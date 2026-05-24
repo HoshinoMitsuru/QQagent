@@ -361,6 +361,7 @@ ext.onNotCommandReceived = function (ctx, msg) {
     const c = cfg(ext);
     if (!c.autoReplyEnabled) return;
 
+    // 👇 统一使用 text 作为清洗后的文本变量，解决 cleanedText 未定义的问题
     const text = String(msg.message || "").trim();
     if (!text) return;
 
@@ -368,20 +369,42 @@ ext.onNotCommandReceived = function (ctx, msg) {
     const groupId = msg.groupId || null;
     const bufferKey = groupId ? `group_${groupId}` : `private_${userId}`;
     const userNickname = msg.sender.card || msg.sender.nickname || `用户${userId}`;
+    
+    // 👇 将 now 提前，确保缓冲区初始化时能获取到正确的时间戳
+    const now = Date.now(); 
 
-    // 初始化缓冲区
+    // 初始化/更新缓冲区（已去除下方重复的 push 操作）
     if (!chatBuffers[bufferKey]) {
-        chatBuffers[bufferKey] = { messages: [], senders: [], timer: null };
-    }
+        chatBuffers[bufferKey] = {
+            messages: [{
+                sender: userNickname,
+                content: text,
+                timestamp: now
+            }],
+            lastActiveTime: now,
+            senders: [userNickname]
+        };
+    } else {
+        chatBuffers[bufferKey].messages.push({
+            sender: userNickname,
+            content: text,
+            timestamp: now
+        });
+        
+        // 👇 核心修复：收到新消息时重置活跃时间，防止连续对话意外超时
+        chatBuffers[bufferKey].lastActiveTime = now;
+        
+        // 👇 保留重复@功能，直接 push 不做去重
+        chatBuffers[bufferKey].senders.push(userNickname);
+    } 
     
     const buffer = chatBuffers[bufferKey];
+    
     // 核心防抖：收到新消息，清除旧定时器
     if (buffer.timer) clearTimeout(buffer.timer);
 
-    buffer.messages.push(text);
-    buffer.senders.push(userNickname);
+    // 👇 注意：这里不再重复 push text 和 userNickname，避免消息翻倍！
 
-    const now = Date.now();
     const BASE_WAIT = 10000; 
     const COLD_START_PENALTY = 6000; 
     const DECAY_TURNS = 4; 
@@ -427,9 +450,10 @@ ext.onNotCommandReceived = function (ctx, msg) {
             const isContinuous = isContinuousActive(ext, scope, now, c.continuousConversationTimeoutSeconds);
             console.log(`【调试】连续对话状态检查结果: ${isContinuous}`);
             
-            // 检查触发词（这里会打印出它到底有没有识别到前缀）
-            const hasPrefix = !c.keywordPrefix || startsWithPrefix(currentBuffer.messages[0], c.keywordPrefix);
-            console.log(`【调试】触发词检查结果: ${hasPrefix} (首条消息: "${currentBuffer.messages[0]}", 期待前缀: "${c.keywordPrefix}")`);
+            // 检查触发词（使用对象数组中的第一个 content 进行检查）
+            const firstMsgContent = currentBuffer.messages[0].content || "";
+            const hasPrefix = !c.keywordPrefix || startsWithPrefix(firstMsgContent, c.keywordPrefix);
+            console.log(`【调试】触发词检查结果: ${hasPrefix} (首条消息: "${firstMsgContent}", 期待前缀: "${c.keywordPrefix}")`);
 
             // 核心拦截逻辑
             if (!isContinuous && !hasPrefix) {
@@ -445,10 +469,14 @@ ext.onNotCommandReceived = function (ctx, msg) {
                 updateContinuousCooldown(ext, scope, now, c.continuousConversationTimeoutSeconds);
             }
 
-            // 整合语段
+            // 整合语段（适配新的对象数组结构）
             let combinedMessage = "";
             for (let i = 0; i < currentBuffer.messages.length; i++) {
-                combinedMessage += `【${currentBuffer.senders[i]}】：${currentBuffer.messages[i]}\n`;
+                const msgObj = currentBuffer.messages[i];
+                // 兼容处理：如果历史遗留了纯字符串格式，也能正常读取
+                const sender = typeof msgObj === 'string' ? currentBuffer.senders[i] : msgObj.sender;
+                const content = typeof msgObj === 'string' ? msgObj : msgObj.content;
+                combinedMessage += `【${sender}】：${content}\n`;
             }
 
             const atString = `@${currentBuffer.senders[0]} `;
@@ -463,7 +491,6 @@ ext.onNotCommandReceived = function (ctx, msg) {
             delete chatBuffers[bufferKey];
 
         } catch (error) {
-            // 捕获并打印定时器内部的任何报错
             console.error(`【严重错误】定时器内部执行崩溃！`, error);
         }
     }, waitTime);

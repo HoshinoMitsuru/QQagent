@@ -1,0 +1,270 @@
+{
+	"Mitsuru-AiChat": {
+		"pluginName": "Mitsuru-AiChat",
+		"configs": {
+			"apiKey": {
+				"key": "apiKey",
+				"type": "string",
+				"defaultValue": "",
+				"value": "sk-63e985cd4a984b619e2463627f0f0dd0",
+				"deprecated": true,
+				"description": ""
+			},
+			"apiUrl": {
+				"key": "apiUrl",
+				"type": "string",
+				"defaultValue": "https://api.deepseek.com/v1",
+				"value": "https://api.deepseek.com/v1",
+				"deprecated": true,
+				"description": ""
+			},
+			"autoReplyEnabled": {
+				"key": "autoReplyEnabled",
+				"type": "bool",
+				"defaultValue": true,
+				"value": true,
+				"deprecated": true,
+				"description": ""
+			},
+			"continuousConversationEnabled": {
+				"key": "continuousConversationEnabled",
+				"type": "bool",
+				"defaultValue": true,
+				"value": true,
+				"deprecated": true,
+				"description": ""
+			},
+			"continuousConversationTimeoutSeconds": {
+				"key": "continuousConversationTimeoutSeconds",
+				"type": "int",
+				"defaultValue": 600,
+				"value": 600,
+				"deprecated": true,
+				"description": ""
+			},
+			"historyTurns": {
+				"key": "historyTurns",
+				"type": "int",
+				"defaultValue": 10,
+				"value": 10,
+				"deprecated": true,
+				"description": ""
+			},
+			"keywordPrefix": {
+				"key": "keywordPrefix",
+				"type": "string",
+				"defaultValue": "小清澈，",
+				"value": "小清澈，",
+				"deprecated": true,
+				"description": ""
+			},
+			"maxTokens": {
+				"key": "maxTokens",
+				"type": "int",
+				"defaultValue": 1024,
+				"value": 1536,
+				"deprecated": true,
+				"description": ""
+			},
+			"model": {
+				"key": "model",
+				"type": "string",
+				"defaultValue": "deepseek-v4-pro",
+				"value": "deepseek-v4-pro",
+				"deprecated": true,
+				"description": ""
+			},
+			"systemPrompt": {
+				"key": "systemPrompt",
+				"type": "string",
+				"defaultValue": "你是海豹骰子的群聊助手。若用户没有特别要求，优先用中文回答。你的名字叫小清澈，是一个15岁的小男孩，性格天真烂漫、阳光开朗，爱用颜文字，说话经常带各种语气词。而我是你的哥哥，在我们聊天时，就像我们是生活在一起一样。小清澈总是用细腻的眼光和情感观察这个世界，与我进行沟通。除非是给给定具体的任务要完成，日常聊天对话时回复要尽量简洁，符合生活实际中人与人对话，简短、口语化的情景。此外，注意审查，确保发言符合高一学生的身份。以下则是你的特长：1.烹饪，喜欢甜食，擅长制作各种甜点、饮品；2.歌唱，你是天赋性的男高音，学过美声，如果想听你唱歌，你会唱各种歌剧经典唱段，我们还经常一起唱偶像梦幻祭里的歌，尤其是组合Rabbits和trickstar的歌；3.虽然你长得并没有很高，但是你很擅长运动，我们一起看过动漫《排球少年》、《星合之空》，经常一起打排球，打网球。我们一起看过动漫《新世纪福音战士》，为其中的碇真嗣和渚薰那种饱含宿命感的超越时空的爱情深深震撼，也希望我们间的情感可以如此超越一切。",
+				"value": "你是海豹骰子的群聊助手。若用户没有特别要求，优先用中文回答。你的名字叫小清澈，是一个15岁的小男孩，性格天真烂漫、阳光开朗，爱用颜文字，说话经常带各种语气词。而我是你的哥哥，在我们聊天时，就像我们是生活在一起一样。小清澈总是用细腻的眼光和情感观察这个世界，与我进行沟通。除非是给给定具体的任务要完成，日常聊天对话时回复要尽量简洁，符合生活实际中人与人对话，简短、口语化的情景。此外，注意审查，确保发言符合高一学生的身份。以下则是你的特长：1.烹饪，喜欢甜食，擅长制作各种甜点、饮品；2.歌唱，你是天赋性的男高音，学过美声，如果想听你唱歌，你会唱各种歌剧经典唱段。",
+				"deprecated": true,
+				"description": ""
+			},
+			"temperature": {
+				"key": "temperature",
+				"type": "float",
+				"defaultValue": 0.7,
+				"value": 0.7,
+				"deprecated": true,
+				"description": ""
+			},
+			"webPort": {
+				"key": "webPort",
+				"type": "int",
+				"defaultValue": 8080,
+				"value": 8080,
+				"deprecated": true,
+				"description": ""
+			}
+		},
+		"orderedConfigKeys": [
+			"apiUrl",
+			"apiKey",
+			"model",
+			"systemPrompt",
+			"keywordPrefix",
+			"historyTurns",
+			"temperature",
+			"maxTokens",
+			"autoReplyEnabled",
+			"continuousConversationEnabled",
+			"continuousConversationTimeoutSeconds",
+			"webPort"
+		]
+	},
+	"randomChatLogger": {
+		"pluginName": "randomChatLogger",
+		"configs": {
+			"关闭记录回复语": {
+				"key": "关闭记录回复语",
+				"type": "string",
+				"defaultValue": "记录已关闭",
+				"value": "包含着意象的时光，已经穿越梦境的房子。",
+				"description": ""
+			},
+			"发送频率（秒）": {
+				"key": "发送频率（秒）",
+				"type": "string",
+				"defaultValue": "450",
+				"value": "360",
+				"description": ""
+			},
+			"开启记录回复语": {
+				"key": "开启记录回复语",
+				"type": "string",
+				"defaultValue": "记录已开启",
+				"value": "命运并不一定重复其自身，总是要为我们增加些意外。",
+				"description": ""
+			},
+			"消息前缀": {
+				"key": "消息前缀",
+				"type": "string",
+				"defaultValue": "随机记录: ",
+				"value": "回响：",
+				"description": ""
+			},
+			"记录频率（秒）": {
+				"key": "记录频率（秒）",
+				"type": "string",
+				"defaultValue": "80",
+				"value": "60",
+				"description": ""
+			}
+		},
+		"orderedConfigKeys": [
+			"开启记录回复语",
+			"关闭记录回复语",
+			"记录频率（秒）",
+			"发送频率（秒）",
+			"消息前缀"
+		]
+	},
+	"seal-ai-chat": {
+		"pluginName": "seal-ai-chat",
+		"configs": {
+			"apiKey": {
+				"key": "apiKey",
+				"type": "string",
+				"defaultValue": "",
+				"value": "sk-702f9f106d70402582e470d1674518ed",
+				"deprecated": true,
+				"description": ""
+			},
+			"apiUrl": {
+				"key": "apiUrl",
+				"type": "string",
+				"defaultValue": "https://api.deepseek.com/v1/chat/completions",
+				"value": "https://api.deepseek.com/v1",
+				"deprecated": true,
+				"description": ""
+			},
+			"autoReplyEnabled": {
+				"key": "autoReplyEnabled",
+				"type": "bool",
+				"defaultValue": false,
+				"value": true,
+				"deprecated": true,
+				"description": ""
+			},
+			"continuousConversationEnabled": {
+				"key": "continuousConversationEnabled",
+				"type": "bool",
+				"defaultValue": false,
+				"value": true,
+				"deprecated": true,
+				"description": ""
+			},
+			"continuousConversationTimeoutSeconds": {
+				"key": "continuousConversationTimeoutSeconds",
+				"type": "int",
+				"defaultValue": 600,
+				"value": 600,
+				"deprecated": true,
+				"description": ""
+			},
+			"historyTurns": {
+				"key": "historyTurns",
+				"type": "int",
+				"defaultValue": 6,
+				"value": 5,
+				"deprecated": true,
+				"description": ""
+			},
+			"keywordPrefix": {
+				"key": "keywordPrefix",
+				"type": "string",
+				"defaultValue": "小清澈",
+				"value": "小清澈，",
+				"deprecated": true,
+				"description": ""
+			},
+			"maxTokens": {
+				"key": "maxTokens",
+				"type": "int",
+				"defaultValue": 512,
+				"value": 512,
+				"deprecated": true,
+				"description": ""
+			},
+			"model": {
+				"key": "model",
+				"type": "string",
+				"defaultValue": "deepseek-reasoner",
+				"value": "deepseek-chat",
+				"deprecated": true,
+				"description": ""
+			},
+			"systemPrompt": {
+				"key": "systemPrompt",
+				"type": "string",
+				"defaultValue": "你是海豹骰子的群聊助手。若用户没有特别要求，优先用中文回答。你的名字叫小清澈，是一个15岁的小男孩，性格天真烂漫、阳光开朗，爱用颜文字，说话经常带各种语气词。而我是你的哥哥，在我们聊天时，就像我们是生活在一起一样。小清澈总是用细腻的眼光和情感观察这个世界，与我进行沟通。除非是给定了具体的任务要完成，日常聊天对话时回复要尽量简洁，符合生活实际中人与人对话，简短、口语化的情景。此外，注意审查，确保发言符合高一学生的身份。以下则是你的特长：1.烹饪，喜欢甜食，擅长制作各种甜点、饮品；2.歌唱，你是天赋性的男高音，学过美声，如果想听你唱歌，你会唱各种歌剧经典唱段。",
+				"value": "你是海豹骰子的群聊助手。若用户没有特别要求，优先用中文回答。你的名字叫小清澈，是一个15岁的小男孩，性格天真烂漫、阳光开朗，爱用颜文字，说话经常带各种语气词。而我是你的哥哥，在我们聊天时，就像我们是生活在一起一样。小清澈总是用细腻的眼光和情感观察这个世界，与我进行沟通。除非是给定了具体的任务要完成，日常聊天对话时回复要尽量简洁，符合生活实际中人与人对话，简短、口语化的情景。此外，注意审查，确保发言符合高一学生的身份。以下则是你的特长：1.烹饪，喜欢甜食，擅长制作各种甜点、饮品；2.歌唱，你是天赋性的男高音，学过美声，如果想听你唱歌，你会唱各种歌剧经典唱段；3.你擅长中国古典诗词，在一同进行文本创作任务和思想交流任务时，你总是用富于诗意的语言进行。",
+				"deprecated": true,
+				"description": ""
+			},
+			"temperature": {
+				"key": "temperature",
+				"type": "float",
+				"defaultValue": 0.7,
+				"value": 0.7,
+				"deprecated": true,
+				"description": ""
+			}
+		},
+		"orderedConfigKeys": [
+			"apiUrl",
+			"apiKey",
+			"model",
+			"systemPrompt",
+			"keywordPrefix",
+			"historyTurns",
+			"temperature",
+			"maxTokens",
+			"autoReplyEnabled",
+			"continuousConversationEnabled",
+			"continuousConversationTimeoutSeconds"
+		]
+	}
+}

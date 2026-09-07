@@ -1,24 +1,42 @@
 // ==UserScript==
 // @name         小清澈-接入AI聊天（直连独立版·沉浸式陪伴）
 // @author       bilibili@嗅尘紫蝶
-// @version      2.2.0
-// @description  直连 DeepSeek/OpenAI 兼容接口的海豹 JS 插件（不依赖任何本地服务器）。支持 .ai 指令、自动唤起、连续对话模式、多人格切换（仅预设）、触发词(keywordPrefix)、图片识别(视觉API直连)、URL 网页读取。沉浸式陪伴：私聊强制全开关，群聊由 master 用 .ai on/.ai off 按需开启。注意：与微信小程序共享上下文为服务器版专属能力，本直连版不支持；自定义人格为服务器版专属，本版仅保留预设人格。
-// @timestamp    2026-07-28
+// @version      2.3.0
+// @description  直连 DeepSeek/OpenAI 兼容接口的海豹 JS 插件（不依赖任何本地服务器）。支持 .ai 指令、自动唤起、连续对话模式、多人格切换（仅预设）、触发词(keywordPrefix)、图片识别(视觉API直连)、URL 网页读取。沉浸式陪伴：私聊恒免触发词且不拼接@前缀；群聊默认免触发词自由对话，master 可用 .ai on 切回免触发词、.ai off 启用触发词机制。注意：与微信小程序共享上下文为服务器版专属能力，本直连版不支持；自定义人格为服务器版专属，本版仅保留预设人格。
+// @timestamp    2026-09-07
 // @license      MIT
 // ==/UserScript==
+// 2.3.0 合并说明：以 2.2.0 主分支（人格提示词 / 对话文案）为底，合并直连版的 4 项功能修复：
+//   1. fetch 超时保护（本次修正了直连版 imageToText / fetchUrlText 漏传 timeoutMs 导致必超时的回归）
+//   2. .ai off 独立分支（修复群聊开启陪伴后无法关闭的死代码问题）
+//   3. @ 判定改用 $ 锚定（\b 对中文无效）
+//   4. 连续对话超时改用布尔短路（修复 boolean 被当作秒数传入导致窗口压缩为 1 秒的问题）
+//   另：清理未使用的 stripPrefix。
+//
+// 触发词机制调整（本次）：
+//   - .ai on  = 群聊免触发词，直接对话（默认状态）
+//   - .ai off = 群聊启用触发词机制，须以 keywordPrefix（默认"小清澈，"）开头才会回应
+//   - 该开关原控制的"是否回应"功能改为恒定开启：群聊始终会应答，on/off 只决定要不要喊名字
+//   - 私聊回复不再拼接 "@昵称 " 前缀，与群聊区分开（私聊本就是一对一，@ 属于冗余噪声）
+//   - 触发词模式下，直接发图片仍可免触发词唤起（发图本身已是指向 AI 的明确意图）
 
 (() => {
   const EXT_NAME = "AiChat";
   const HISTORY_PREFIX = "AiChat:history:";
   const CONTINUOUS_PREFIX = "AiChat:continuous:";
   const PERSONA_PREFIX = "AiChat:persona:";
-  const AUTOREPLY_PREFIX = "AiChat:autoReply:";
+  // 群聊「免触发词模式」开关：true = 不用喊名字直接聊，false = 必须带触发词
+  const FREETALK_PREFIX = "AiChat:freeTalk:";
   const DEFAULT_API_URL = "https://api.deepseek.com/v1";
   const DEFAULT_MODEL = "deepseek-v4-pro";
   const DEFAULT_CONTINUOUS_TIMEOUT_SECONDS = 1800;
   const DEFAULT_VISION_PROMPT = "请详细描述这张图片的内容，包括场景、人物、文字等关键信息。";
   const DEFAULT_MAX_IMAGE_CHARS = 500;
   const DEFAULT_MAX_URL_CHARS = 4000;
+  // 各类上游请求的超时时间（毫秒）
+  const CHAT_FETCH_TIMEOUT_MS = 30000;
+  const VISION_FETCH_TIMEOUT_MS = 60000;
+  const URL_FETCH_TIMEOUT_MS = 15000;
 
   // 预设人格（直连版仅允许在预设间切换，自定义人格为服务器版专属）
   const DEFAULT_PERSONAS = {
@@ -36,6 +54,17 @@
     return value;
   }
 
+  // 带超时的 fetch 封装：防止上游（LLM/视觉/网页）无响应一直挂起，导致防抖 buffer 永不触发而丢消息。
+  // timeoutMs 必须做兜底：漏传时 setTimeout(fn, undefined) 会退化成 0ms 立即 reject，
+  // 结果是请求"必超时"而不是"不超时"。
+  function fetchWithTimeout(url, options, timeoutMs) {
+    const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : CHAT_FETCH_TIMEOUT_MS;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("请求超时(" + ms + "ms)")), ms);
+      fetch(url, options).then(resolve, reject).finally(() => clearTimeout(timer));
+    });
+  }
+
   function cfg(ext) {
     return {
       apiUrl: normalizeApiUrl(seal.ext.getStringConfig(ext, "apiUrl") || ""),
@@ -48,7 +77,6 @@
       historyTurns: Math.max(0, seal.ext.getIntConfig(ext, "historyTurns") || 10),
       temperature: Number(seal.ext.getFloatConfig(ext, "temperature") || 0.7),
       maxTokens: Math.max(16, seal.ext.getIntConfig(ext, "maxTokens") || 1024),
-      autoReplyEnabled: !!seal.ext.getBoolConfig(ext, "autoReplyEnabled"),
       continuousConversationEnabled: !!seal.ext.getBoolConfig(ext, "continuousConversationEnabled"),
       continuousConversationTimeoutSeconds: Math.max(
         600,
@@ -77,8 +105,8 @@
     return PERSONA_PREFIX + scope;
   }
 
-  function autoReplyKey(scope) {
-    return AUTOREPLY_PREFIX + scope;
+  function freeTalkKey(scope) {
+    return FREETALK_PREFIX + scope;
   }
 
   function loadJson(ext, key, fallbackValue) {
@@ -168,34 +196,35 @@
     saveJson(ext, personaKey(scope), personaName);
   }
 
-  function loadAutoReply(ext, scope) {
-    // null = 未设置（按场景取默认：私聊开、群聊关）
-    const v = ext.storageGet(autoReplyKey(scope));
+  function loadFreeTalk(ext, scope) {
+    // null = 未设置 → 取默认「免触发词」（与原 autoReply 默认开启的行为一致）
+    const v = ext.storageGet(freeTalkKey(scope));
     if (v === undefined || v === null || v === "") return null;
     return v === "true" || v === true;
   }
 
-  function saveAutoReply(ext, scope, val) {
-    ext.storageSet(autoReplyKey(scope), val ? "true" : "false");
+  function saveFreeTalk(ext, scope, val) {
+    ext.storageSet(freeTalkKey(scope), val ? "true" : "false");
   }
 
   // ══════════════════════════════════════
   //  沉浸式开关解析
-  //  私聊：强制 autoReply / continuous / image / url 全部开启（忽略全局配置，保证沉浸感）
-  //  群聊：按 master 用 .ai on/.ai off 设置的每群开关（默认关，按需开启）
+  //  私聊：恒免触发词，continuous / image / url 全部开启（忽略全局配置，保证沉浸感）
+  //  群聊：始终应答；.ai on = 免触发词（默认），.ai off = 必须带 keywordPrefix
   // ══════════════════════════════════════
   function resolveSwitches(ext, ctx, msg) {
     const c = cfg(ext);
     const isPrivate = msg.messageType === "private";
     if (isPrivate) {
       // 私聊陪伴沉浸模式：置空触发词，任意消息直接触发，无需唤醒词
-      return { isPrivate: true, autoReply: true, continuous: true, image: true, url: true, prefix: "" };
+      return { isPrivate: true, needPrefix: false, continuous: true, image: true, url: true, prefix: "" };
     }
     const scope = scopeKey(ctx, msg);
-    const ar = loadAutoReply(ext, scope);
+    const free = loadFreeTalk(ext, scope);
     return {
       isPrivate: false,
-      autoReply: ar === null ? false : ar,
+      // 群聊一律应答，开关只决定"要不要喊名字"
+      needPrefix: free === null ? false : !free,
       continuous: c.continuousConversationEnabled,
       image: c.imageRecognitionEnabled,
       url: c.urlReadingEnabled,
@@ -271,10 +300,6 @@
     return String(text || "").indexOf(prefix) === 0;
   }
 
-  function stripPrefix(text, prefix) {
-    return String(text || "").slice(prefix.length).trim();
-  }
-
   function getRestArgsText(cmdArgs, startIndex) {
     if (cmdArgs && typeof cmdArgs.getRestArgsFrom === "function") {
       return cmdArgs.getRestArgsFrom(startIndex);
@@ -322,11 +347,11 @@
     const headers = { "Content-Type": "application/json" };
     if (c.apiKey) headers["Authorization"] = "Bearer " + c.apiKey;
 
-    fetch(c.apiUrl, {
+    fetchWithTimeout(c.apiUrl, {
       method: "POST",
       headers: headers,
       body: JSON.stringify(body),
-    })
+    }, CHAT_FETCH_TIMEOUT_MS)
       .then(function (resp) {
         if (!resp.ok) {
           return resp.text().then(function (t) {
@@ -468,11 +493,11 @@
 
     try {
       console.log("[图片识别] 开始识别图片:", imageUrl.substring(0, 80) + "...");
-      var response = await fetch(visionUrl, {
+      var response = await fetchWithTimeout(visionUrl, {
         method: "POST",
         headers: headers,
         body: JSON.stringify(body),
-      });
+      }, VISION_FETCH_TIMEOUT_MS);
 
       if (!response.ok) {
         var errText = await response.text();
@@ -573,10 +598,10 @@
     const maxChars = c.maxUrlChars || DEFAULT_MAX_URL_CHARS;
     try {
       console.log("[URL读取] 开始抓取:", url.substring(0, 100));
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: "GET",
         headers: { "User-Agent": "Mozilla/5.0 (compatible; SealdiceAI/1.0)" },
-      });
+      }, URL_FETCH_TIMEOUT_MS);
       if (!response.ok) {
         console.error("[URL读取] HTTP", response.status);
         return "";
@@ -650,7 +675,7 @@
   // ══════════════════════════════════════
   const cmdAi = seal.ext.newCmdItemInfo();
   cmdAi.name = "ai";
-  cmdAi.help = "向 DeepSeek/OpenAI 兼容接口发送消息，格式：.ai 你的问题；支持 .ai reset 清空记录，.ai stop 退出连续对话模式，.ai on/.ai off 在群聊开关自动陪伴，.ai persona <人格名> 切换人格，.ai list 查看可用人格，.ai img [提示词] 识别图片。私聊中陪伴始终开启。";
+  cmdAi.help = "向 DeepSeek/OpenAI 兼容接口发送消息，格式：.ai 你的问题；支持 .ai reset 清空记录，.ai stop 退出连续对话模式，.ai on 群聊免触发词直接对话（默认），.ai off 群聊启用触发词机制（须以「小清澈，」开头），.ai persona <人格名> 切换人格，.ai list 查看可用人格，.ai img [提示词] 识别图片。私聊中陪伴始终开启且免触发词。";
   cmdAi.solve = function (ctx, msg, cmdArgs) {
     const first = cmdArgs.getArgN(1);
     if (!first || first === "help") {
@@ -662,26 +687,32 @@
       clearSession(ext, ctx, msg);
       return seal.ext.newCmdExecuteResult(true);
     }
-    if (first === "stop" || first === "end" || first === "off") {
-      // 注意：群聊里的 .ai off 指"退出连续对话"；群聊自动陪伴开关见下方 on/off 分支
+    // 退出连续对话模式（私聊/群聊通用）
+    // 注意：不要把 "off" 并进这里，否则群聊的 .ai off 会被提前 return，关不掉自动陪伴
+    if (first === "stop" || first === "end") {
       stopContinuous(ext, ctx, msg);
       return seal.ext.newCmdExecuteResult(true);
     }
-    // 群聊自动陪伴开关（master 在群内按需开启/关闭自动回复）
+    // 群聊免触发词开关：on = 不用喊名字直接聊（默认状态）
     if (first === "on" || first === "open") {
       const scope = scopeKey(ctx, msg);
       if (msg.messageType === "private") {
         seal.replyToSender(ctx, msg, "Ciallo～(∠・ω< )⌒★我一直都在喔~");
       } else {
-        saveAutoReply(ext, scope, true);
-        seal.replyToSender(ctx, msg, "小清澈揉了揉惺忪睡眼，向你露出朦胧的微笑。");
+        saveFreeTalk(ext, scope, true);
+        seal.replyToSender(ctx, msg, "小清澈揉了揉惺忪睡眼，向你露出朦胧的微笑。此后不用喊我，我也会应答啦~");
       }
       return seal.ext.newCmdExecuteResult(true);
     }
-    if (first === "off" && msg.messageType === "group") {
+    // 群聊触发词开关：off = 需以 keywordPrefix 开头才应答；私聊恒免触发词，仅提示
+    if (first === "off" || first === "close") {
       const scope = scopeKey(ctx, msg);
-      saveAutoReply(ext, scope, false);
-      seal.replyToSender(ctx, msg, "小清澈撑着脑袋，静静地凝望。");
+      if (msg.messageType === "private") {
+        seal.replyToSender(ctx, msg, "Ciallo～(∠・ω< )⌒★我一直都在喔，这里不用喊我的名字~");
+      } else {
+        saveFreeTalk(ext, scope, false);
+        seal.replyToSender(ctx, msg, "小清澈撑着脑袋，静静地凝望。此后要先用「" + cfg(ext).keywordPrefix + "」唤我，我才会搭话喔。");
+      }
       return seal.ext.newCmdExecuteResult(true);
     }
     if (first === "persona") {
@@ -701,7 +732,8 @@
     if (first === "img" || first === "itt" || first === "image") {
       const imgConfig = cfg(ext);
       const sw = resolveSwitches(ext, ctx, msg);
-      if (!sw.image || !imgConfig.imageRecognitionEnabled) {
+      // 私聊由沉浸式开关强制开启，不再受全局 imageRecognitionEnabled 约束；群聊仍需全局开启
+      if (!sw.image || (!sw.isPrivate && !imgConfig.imageRecognitionEnabled)) {
         seal.replyToSender(ctx, msg, "图片识别功能未开启，请在插件配置中开启 imageRecognitionEnabled。");
         return seal.ext.newCmdExecuteResult(true);
       }
@@ -741,7 +773,7 @@
   // ══════════════════════════════════════
   if (seal.ext.find(EXT_NAME)) return;
 
-  const ext = seal.ext.new(EXT_NAME, "嗅尘紫蝶", "2.2.0");
+  const ext = seal.ext.new(EXT_NAME, "嗅尘紫蝶", "2.3.0");
 
   ext.cmdMap["ai"] = cmdAi;
   ext.cmdMap["aichat"] = cmdAi;
@@ -763,9 +795,9 @@
     const userNickname = msg.sender.card || msg.sender.nickname || `用户${userId}`;
     const now = Date.now();
 
-    // 沉浸式开关解析：私聊强制全开；群聊按 master 开关（默认关）
+    // 沉浸式开关解析：私聊恒免触发词；群聊由 .ai on/.ai off 决定是否要触发词
+    // 群聊一律应答（原"是否回应"开关已恒定开启），这里不再做 autoReply 拦截
     const sw = resolveSwitches(ext, ctx, msg);
-    if (!sw.autoReply) return;
 
     // 初始化缓冲区（含白名单）
     if (!chatBuffers[bufferKey]) {
@@ -794,7 +826,8 @@
         isAtSelf = (atQq === claritasQq) || (atQq === userId);
       } else if (textAtMatch) {
         const atName = textAtMatch[1];
-        isAtSelf = /^(Claritas-小清澈|小清澈)\b/.test(atName);
+        // \b 词边界对 CJK 失效，用 $ 锚定（atName 已是 \S+ 截出的纯 token）
+        isAtSelf = /^(Claritas-小清澈|小清澈)$/.test(atName);
       }
 
       const hasTriggerPrefix = sw.prefix && startsWithPrefix(text, sw.prefix);
@@ -874,7 +907,10 @@
         const scope = groupId ? `group:${groupId}` : `private:${userId}`;
 
         // 检查连续对话状态（私聊已强制开启）
-        const isContinuous = isContinuousActive(ext, scope, now, sw.continuous ? sw.continuous : c.continuousConversationTimeoutSeconds);
+        // sw.continuous 是布尔开关，超时秒数必须取自配置，不能把布尔值当秒数传进去
+        const isContinuous = sw.continuous
+          ? isContinuousActive(ext, scope, now, c.continuousConversationTimeoutSeconds)
+          : false;
         console.log(`【调试】连续对话状态检查结果: ${isContinuous}`);
 
         // 连续对话已激活 → 刷新冷却时间，避免固定窗口过期
@@ -883,11 +919,12 @@
         }
 
         // 检查触发词（首条消息是否以 keywordPrefix 开头）
+        // 仅当该场景要求触发词时才校验：私聊与群聊免触发词模式直接放行
         const firstMsgContent = currentBuffer.messages[0].content || "";
-        const hasPrefix = !sw.prefix || startsWithPrefix(firstMsgContent, sw.prefix);
-        console.log(`【调试】触发词检查结果: ${hasPrefix} (首条消息: "${firstMsgContent}", 期待前缀: "${sw.prefix}")`);
+        const hasPrefix = !sw.needPrefix || !sw.prefix || startsWithPrefix(firstMsgContent, sw.prefix);
+        console.log(`【调试】触发词检查结果: ${hasPrefix} (需触发词: ${sw.needPrefix}, 首条消息: "${firstMsgContent}", 期待前缀: "${sw.prefix}")`);
 
-        // 检查是否有图片（图片消息无需触发词）
+        // 检查是否有图片（图片消息无需触发词，即便处于触发词模式）
         const hasImages = currentBuffer.messages.some(function (m) { return m.hasImages; });
 
         // 核心拦截逻辑：非连续 + 无触发词 + 无图片 → 拦截并清空
@@ -908,7 +945,8 @@
           combinedMessage += `【${sender}】：${content}\n`;
         }
 
-        const atString = `@${currentBuffer.senders[0]} `;
+        // 群聊拼接 @触发者 便于辨认对象；私聊是一对一，拼接 @ 属于冗余噪声，故置空
+        const atString = groupId ? `@${currentBuffer.senders[0]} ` : "";
 
         console.log(`【调试】多人对话整合完毕，即将发给AI的内容：\n`, combinedMessage);
 
@@ -939,7 +977,7 @@
   seal.ext.registerIntConfig(ext, "historyTurns", 10);
   seal.ext.registerFloatConfig(ext, "temperature", 0.7);
   seal.ext.registerIntConfig(ext, "maxTokens", 1024);
-  seal.ext.registerBoolConfig(ext, "autoReplyEnabled", true);
+  // 注：原 autoReplyEnabled 已移除——群聊恒应答，.ai on/.ai off 只切换「是否需要触发词」
   seal.ext.registerBoolConfig(ext, "continuousConversationEnabled", true);
   seal.ext.registerIntConfig(ext, "continuousConversationTimeoutSeconds", 1800);
   // 图片识别相关配置

@@ -66,8 +66,79 @@ except ImportError:
     print("[X] 缺少 requests。请先执行：pip install -r requirements.txt")
     raise SystemExit(2)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+try:
+    from reply_queue import ReplyQueue
+except ImportError:
+    print("[X] 缺少 reply_queue.py（回复排队与风控限速模块），请确认它与 agent.py 同目录")
+    raise SystemExit(2)
+
+# 错误码目录（与 app/ 控制台壳共用同一份）。
+#
+# 刻意做成「缺失也能跑」：这个文件是**诊断**用的，它自己绝不该成为新的启动失败点。
+# 所以导入失败时给它一个最小替身 —— 报错路径退化，但功能照常。
+try:
+    import error_codes as EC
+except ImportError:
+    class _ECShim:
+        """error_codes.py 缺失时的替身。只保留被调用到的那几个接口。"""
+
+        class AppError(RuntimeError):
+            def __init__(self, code: str, detail: str = "", context: dict | None = None):
+                self.code = code
+                self.detail_text = detail
+                self.context = context or {}
+                super().__init__(f"{code} {detail}")
+
+        @staticmethod
+        def severity(code: str) -> str:
+            return "warn" if code.endswith("000") else "error"
+
+        @staticmethod
+        def describe(code: str, detail: str = "", context: dict | None = None) -> str:
+            ctx = "  ".join(f"{k}={v}" for k, v in (context or {}).items())
+            return f"{code} {detail}" + (f"  [{ctx}]" if ctx else "")
+
+        @staticmethod
+        def wrap(exc, default):
+            return _ECShim.AppError(default, f"{type(exc).__name__}: {exc}")
+
+        class Throttle:
+            def __init__(self, window: float = 60.0):
+                self.window = window
+
+            def should_emit(self, code, now=None):
+                return True, 0
+
+    EC = _ECShim()
+
+def _resolve_home() -> str:
+    """
+    数据根目录的解析顺序（顺序不能改，改了打包版会把状态写到临时解压目录里）：
+
+        1. 环境变量 QQ_AGENT_HOME  —— 由 exe 壳指定，允许把数据挪到可写位置
+        2. 冻结运行时：exe 所在目录 —— 打包后 `__file__` 指向 _MEIPASS 临时目录，
+                                    写进去的文件重启就没了，必须换成 exe 旁边
+        3. 源码运行时：本文件所在目录
+    """
+    env = (os.environ.get("QQ_AGENT_HOME") or "").strip()
+    if env:
+        return os.path.normpath(os.path.abspath(env))
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+HERE = _resolve_home()
 CONFIG_PATH = os.path.join(HERE, "config.json")
+
+# 心跳文件：exe 壳（WebUI）据此展示「常驻到第几轮、队列多长、当前在服务谁」。
+# 没设这个环境变量时整个心跳机制是死的，不影响命令行直接使用。
+HEARTBEAT_PATH = (os.environ.get("QQ_AGENT_HEARTBEAT") or "").strip()
+
+# 停止哨兵：exe 壳（WebUI）要停掉常驻进程时，就创建这个文件。
+# 为什么不发 Ctrl+C —— 子进程是用 CREATE_NO_WINDOW 起的，**没有控制台**，
+# 控制台控制事件根本送不到，信号这条路是走不通的。用文件当协议反而最可靠。
+STOP_PATH = (os.environ.get("QQ_AGENT_STOP") or "").strip()
 
 auto.SetGlobalSearchTimeout(1.2)
 if hasattr(auto, "SetGlobalSearchInterval"):
@@ -82,6 +153,82 @@ def log(tag: str, msg: str) -> None:
 def clip(text: str, n: int = 60) -> str:
     text = (text or "").replace("\n", "⏎")
     return text if len(text) <= n else text[: n - 1] + "…"
+
+
+# 错误抑制：常驻循环每 ~0.8s 一轮，持续性故障会以每秒一条的速度刷屏，
+# 几分钟就把日志埋掉 —— 连第一现场都找不回来。见 error_codes.Throttle 的说明。
+THROTTLE = EC.Throttle(window=60.0)
+
+
+def report(code: str, detail: str = "", *, ctx: dict | None = None,
+           force: bool = False) -> None:
+    """
+    带错误码的报错（带抑制）。
+
+    `code` 是 `error_codes.CATALOG` 里的稳定编号。每个码**只对应一个根因** ——
+    这是本文件报错的基本原则：一句「找不到 QQ 窗口」压在三种根因上时，
+    人会按错误的动作去修（去重启 QQ，而实际问题只是窗口缩在托盘）。
+
+    `ctx` 是现场数据（会话数、窗口类名、当前前台…），它决定了事后能不能复盘，
+    所以关键分支都要填。
+    """
+    emit, suppressed = THROTTLE.should_emit(code)
+    if not emit and not force:
+        return
+
+    sev = EC.severity(code)
+    tag = {"error": "ERR", "warn": "WARN", "info": "INFO"}.get(sev, "ERR")
+    if suppressed:
+        log(tag, f"（同一问题在最近 60 秒内被抑制了 {suppressed} 次，下面是完整说明）")
+    # 逐行输出：控制台的日志面板按行着色，整体塞进一条会让后续行丢掉级别
+    for line in EC.describe(code, detail, ctx).splitlines():
+        log(tag, line)
+
+
+def report_exc(exc: BaseException, default_code: str, *, ctx: dict | None = None) -> str:
+    """把异常映射成错误码并报出来，返回最终使用的码。"""
+    err = EC.wrap(exc, default_code)
+    report(err.code, err.detail_text, ctx=ctx)
+    return err.code
+
+
+def diag_line(code: str) -> str:
+    """单行摘要，适合塞进本来就紧凑的输出里（例如自检表格）。"""
+    return f"[{code}] {EC.describe(code).splitlines()[0].split(' ', 1)[-1]}"
+
+
+def heartbeat(**fields) -> None:
+    """
+    把当前状态原子地写进 `QQ_AGENT_HEARTBEAT` 指向的文件（未设置则什么都不做）。
+
+    用 `os.replace` 换文件而不是原地覆盖：WebUI 随时可能在读，边写边读会读到半截 JSON。
+    """
+    if not HEARTBEAT_PATH:
+        return
+    try:
+        payload = {"ts": time.time(), "pid": os.getpid()}
+        payload.update(fields)
+        tmp = HEARTBEAT_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, HEARTBEAT_PATH)
+    except Exception:
+        pass        # 心跳是纯观测，失败绝不能影响主循环
+
+
+def stop_requested() -> bool:
+    """
+    外部要求优雅退出（见 `QQ_AGENT_STOP`）。
+
+    走「文件当协议」而不是信号，是因为 exe 壳把常驻进程起成无控制台进程，
+    CTRL_C / CTRL_BREAK 都送不进去。文件这条路不挑环境。
+    """
+    if not STOP_PATH:
+        return False
+    try:
+        return os.path.isfile(STOP_PATH)
+    except Exception:
+        return False
 
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -147,6 +294,12 @@ DEFAULTS = {
         "send_with_ctrl_enter": False,
         "poll_interval_seconds": 0.8,
         "max_reply_chars": 500,
+        # 多媒体（图片/语音/文件/动画表情）怎么处理：
+        #   "skip"     = 一律跳过（默认）。最省模型额度，但「对方只发了个表情」时
+        #                整条链路会走到「总读取没拿到新消息 → 撤单」，一声不吭。
+        #   "describe" = 拿 QQ 气泡里的占位文本（如 `[动画表情]`）当正文继续走，
+        #                让 AI 自己决定回不回。陪伴场景建议开。
+        "nontext_policy": "skip",
     },
     # ---------------------------------------------------------------- 防抖聚合
     # 移植自 小清澈3.0.js 的 setupDebounceTimer：对方连发多条时合并成一次模型调用。
@@ -184,6 +337,39 @@ DEFAULTS = {
         "save_interval_seconds": 3.0,
         "max_scopes": 50,
     },
+    # ------------------------------------------------------------ 会话身份 / 取号
+    # 主键用 QQ 号而不是昵称：昵称能改、也会重名，拿它当主键迟早串味。
+    "identity": {
+        "enabled": True,
+        "store": "state/uid-map.json",
+        "enroll_on_demand": True,
+        "require_qq_uin": False,
+    },
+    # -------------------------------------------------------------- 排队 / 风控
+    "queue": {
+        "enabled": True,
+        "max_replies_per_minute": 12,
+        "min_interval_seconds": 5.0,
+        "merge_if_wait_over_seconds": 5.0,
+        "unit_cost_seconds": 3.0,
+        "max_hold_seconds": 30.0,
+        "jitter_seconds": 3.0,
+        "max_attempts": 3,
+    },
+    # ------------------------------------------------------------------ 多会话发现
+    # 桌面 UI 上每个会话只保留「最新一条消息的节选」，摘要不足以构造上下文，
+    # 所以这里只做发现（扫未读徽标/摘要指纹 → 占位排队），
+    # 真正的上下文总读取推迟到出队时（Agent.prepare）。
+    "discovery": {
+        "enabled": True,
+        "scan_interval_seconds": 2.0,
+        "trigger_on_unread": True,
+        "trigger_on_preview_change": True,
+        "trigger_on_first_sight_unread": True,
+        "max_enqueue_per_scan": 3,
+        "read_limit": 30,
+        "state_file": "state/rotation.json",
+    },
     "teach": {
         "enabled": True,
         "names": ["小清澈", "Claritas-小清澈"],
@@ -217,8 +403,15 @@ def load_config() -> dict:
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 raw = json.load(f)
+        except json.JSONDecodeError as exc:
+            # 报出行列号 —— 「JSON 语法错」这句话本身没有可操作性，位置才有
+            report("E-CFG-001", f"{CONFIG_PATH} 第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}",
+                   ctx={"文件": CONFIG_PATH})
         except Exception as exc:
-            log("WARN", f"config.json 解析失败，使用内置默认值：{exc}")
+            report_exc(exc, "E-CFG-001", ctx={"文件": CONFIG_PATH})
+    else:
+        report("E-CFG-005", f"没有找到 {CONFIG_PATH}，全部使用内置默认值",
+               ctx={"数据目录": HERE})
     return _deep_merge(DEFAULTS, raw)
 
 
@@ -279,28 +472,45 @@ def resolve_api_key(cfg: dict, verbose: bool = False) -> str:
         return key
 
     path = (cfg["llm"].get("api_key_file") or "").strip()
-    if path and not os.path.isabs(path) and not os.path.isfile(path):
-        path = abs_here(path)     # 相对路径按脚本目录解析
+    raw_path = path
+    # 相对路径**一律**按数据目录解析，绝不看当前工作目录。
+    #
+    # 这里原来写的是 `if path and not os.path.isabs(path) and not os.path.isfile(path)`——
+    # 也就是说「CWD 下刚好存在同名文件」时会优先用 CWD 那个。那是个隐蔽的坑：
+    # 从项目目录启动会读到项目里的密钥文件，从别处启动就读到别的（或读不到），
+    # 表现为「同样的配置，换个目录结果就不一样」。这类依赖 CWD 的行为必须掐掉。
+    if path and not os.path.isabs(path):
+        path = abs_here(path)
     if not path or not os.path.isfile(path):
-        if verbose and path:
-            log("WARN", f"api_key_file 不存在：{path}")
+        if verbose:
+            report("E-LLM-001",
+                   f"api_key 为空，且 api_key_file 指向的文件不存在：{raw_path or '(未配置)'}",
+                   ctx={"解析后路径": path or "(空)", "数据目录": HERE})
         return ""
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read().strip()
     except Exception as exc:
         if verbose:
-            log("WARN", f"读取 api_key_file 失败：{exc}")
+            report_exc(exc, "E-PATH-002", ctx={"文件": path})
         return ""
 
     if path.lower().endswith(".json") or text.startswith("{"):
         try:
             data = json.loads(text)
-        except Exception:
+        except Exception as exc:
+            if verbose:
+                report("E-PATH-003",
+                       f"密钥文件不是合法 JSON：{path}（{exc}）",
+                       ctx={"文件": path})
             return ""
         value, source = _pick_from_json(data, cfg["llm"].get("api_key_json_keys"))
         if verbose and value:
             log("INFO", f"密钥来源：{os.path.basename(path)} → {source}")
+        elif verbose:
+            report("E-LLM-001",
+                   f"密钥文件里没找到可用字段：{path}",
+                   ctx={"找过这些键": " / ".join(cfg['llm'].get('api_key_json_keys') or [])})
         return value
     return text
 
@@ -547,9 +757,15 @@ class ConversationStore:
             bad = self.path + ".bad"
             try:
                 os.replace(self.path, bad)
-                log("WARN", f"上下文文件损坏，已备份为 {os.path.basename(bad)}：{exc}")
-            except Exception:
-                log("WARN", f"上下文文件损坏且备份失败：{exc}")
+                report("E-PATH-003", "上下文文件损坏，已备份后重建（历史会丢）",
+                       ctx={"损坏文件": self.path,
+                            "备份为": os.path.basename(bad),
+                            "原因": f"{type(exc).__name__}: {exc}"})
+            except Exception as exc2:
+                report("E-PATH-003", "上下文文件损坏且备份失败（历史会丢，且坏文件还在）",
+                       ctx={"文件": self.path,
+                            "损坏原因": f"{type(exc).__name__}: {exc}",
+                            "备份失败": f"{type(exc2).__name__}: {exc2}"})
             return
 
         for scope, row in (data.get("scopes") or {}).items():
@@ -597,7 +813,9 @@ class ConversationStore:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)
         except Exception as exc:
-            log("WARN", f"上下文保存失败（不影响运行）：{exc}")
+            report_exc(exc, "E-PATH-003",
+                       ctx={"阶段": "上下文落盘", "文件": self.path,
+                            "后果": "本次没写成功，会保留脏标记下次重试；运行不受影响"})
             self._dirty = True
 
     # ---------------------------------------------------- 取用
@@ -797,6 +1015,81 @@ class Debouncer:
         return max(0.0, self.due_at - time.time())
 
 
+# ============================================================ 发现 / 轮转状态
+class RotationState:
+    """
+    多会话「发现」所需的持久化状态。
+
+        baselined    : 已经建过基线的 scope 集合（每个会话只建一次）
+        fingerprints : 会话列表展示名 -> 上次看到的指纹（预览文本元组, 未读数）
+
+    **为什么必须落盘**：
+
+      - `baselined` 丢了 → 重启后每个会话都会重新建一次基线，
+        重启那一刻积压的未读全被当历史吞掉；
+      - `fingerprints` 丢了 → 重启后第一次扫描没有「变化前的样子」可对比，
+        只能整批按首见处理（按设计不动作），于是重启瞬间的未读
+        要等到**下一次**变化才被发现 —— 用户会觉得「刚重启那会儿它聋了」。
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self.baselined: set = set()
+        self.fingerprints: dict = {}
+        self.load()
+
+    def load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            self.baselined = set(raw.get("baselined") or [])
+            fp = {}
+            for name, v in (raw.get("fingerprints") or {}).items():
+                try:
+                    fp[name] = (tuple(v[0]), int(v[1]))
+                except Exception:
+                    continue
+            self.fingerprints = fp
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003", ctx={"文件": self.path, "处理": "按空状态继续（会重建基线）"})
+
+    def save(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            payload = {
+                "version": 1,
+                "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "baselined": sorted(self.baselined),
+                "fingerprints": {k: [list(v[0]), int(v[1])]
+                                 for k, v in self.fingerprints.items()},
+            }
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003", ctx={"文件": self.path, "后果": "重启后可能重复建基线并吞掉那一瞬间的未读"})
+
+    def is_baselined(self, scope: str) -> bool:
+        return scope in self.baselined
+
+    def mark_baselined(self, scope: str) -> None:
+        self.baselined.add(scope)
+
+    def fp_of(self, key: str):
+        return self.fingerprints.get(key)
+
+    def set_fp(self, key: str, fp) -> None:
+        self.fingerprints[key] = fp
+
+    def forget(self, scope: str, display_name: str = "") -> None:
+        self.baselined.discard(scope)
+        if display_name:
+            self.fingerprints.pop(display_name, None)
+
+
 # ============================================================ LLM
 class LLMClient:
     def __init__(self, cfg: dict):
@@ -819,8 +1112,22 @@ class LLMClient:
             time.sleep(gap - delta)
 
     def chat(self, messages: list[dict]) -> str:
+        """
+        调一次模型。失败时抛带错误码的 `AppError`。
+
+        ## 为什么要按状态码分类
+
+        原来这里是 `if resp.status_code != 200: raise RuntimeError(f"HTTP {code}: {text}")`，
+        于是 401（密钥错）、404（模型名错）、429（限流）、500（服务端挂了）
+        在日志里长成一个样子 —— 而这四件事的**处理动作完全不同**：
+        改密钥 / 改模型名 / 等一会儿 / 什么都不用做。
+
+        分类之后，界面和日志都能直接告诉你该动哪里。
+        """
         if not self.api_key:
-            raise RuntimeError("api_key 为空，且 api_key_file 里也没找到可用密钥")
+            raise EC.AppError("E-LLM-001",
+                              "config.json 的 llm.api_key 为空，且 api_key_file 里也没找到可用密钥",
+                              {"api_base": self.url, "model": self.model})
         self.wait_turn()
         payload = {
             "model": self.model,
@@ -834,13 +1141,58 @@ class LLMClient:
             "Content-Type": "application/json",
         }
         self._last_call = time.time()
-        resp = requests.post(self.url, headers=headers, json=payload, timeout=self.timeout)
+
+        try:
+            resp = requests.post(self.url, headers=headers, json=payload, timeout=self.timeout)
+        except requests.exceptions.ConnectTimeout as exc:
+            raise EC.AppError("E-LLM-003", f"连接阶段超时（{self.timeout}s）：{exc}",
+                              {"url": self.url}) from exc
+        except requests.exceptions.ReadTimeout as exc:
+            raise EC.AppError("E-LLM-003", f"等待响应超时（{self.timeout}s）：{exc}",
+                              {"url": self.url, "max_tokens": payload["max_tokens"]}) from exc
+        except requests.exceptions.SSLError as exc:
+            raise EC.AppError("E-LLM-002", f"TLS 握手失败：{exc}", {"url": self.url}) from exc
+        except requests.exceptions.ProxyError as exc:
+            raise EC.AppError("E-LLM-002", f"代理异常：{exc}", {"url": self.url}) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise EC.AppError("E-LLM-002", f"连接失败（DNS 或网络不通）：{exc}",
+                              {"url": self.url}) from exc
+        except requests.exceptions.Timeout as exc:
+            raise EC.AppError("E-LLM-003", f"请求超时：{exc}", {"url": self.url}) from exc
+        except Exception as exc:
+            raise EC.wrap(exc, "E-LLM-002") from exc
+
         if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-        data = resp.json()
+            snippet = resp.text[:300]
+            ctx = {"HTTP": resp.status_code, "url": self.url, "model": self.model}
+            if resp.status_code in (401, 403):
+                raise EC.AppError("E-LLM-004",
+                                  f"服务端拒绝了这次鉴权：{snippet}", ctx)
+            if resp.status_code == 404:
+                raise EC.AppError("E-LLM-005",
+                                  f"接口或模型不存在：{snippet}", ctx)
+            if resp.status_code == 429:
+                raise EC.AppError("E-LLM-006",
+                                  f"被限流或额度用尽：{snippet}", ctx)
+            if 500 <= resp.status_code < 600:
+                raise EC.AppError("E-LLM-007",
+                                  f"服务端错误：{snippet}", ctx)
+            # 其余 4xx：多半是请求体不合法（模型名、参数越界），归到地址/模型那一类最好排查
+            raise EC.AppError("E-LLM-005",
+                              f"HTTP {resp.status_code}（请求被拒）：{snippet}", ctx)
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise EC.AppError("E-LLM-008",
+                              f"响应不是合法 JSON：{resp.text[:200]}") from exc
+
         choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError(f"响应里没有 choices：{str(data)[:300]}")
+            err = (data.get("error") or {})
+            raise EC.AppError("E-LLM-008",
+                              f"响应里没有 choices：{str(data)[:300]}",
+                              {"error.message": err.get("message", "") if isinstance(err, dict) else ""})
         return (choices[0].get("message") or {}).get("content", "").strip()
 
 
@@ -1148,6 +1500,43 @@ def _is_foreground(hwnd: int) -> bool:
     return bool(hwnd) and _fg_hwnd() == int(hwnd)
 
 
+def _foreground_title() -> str:
+    """当前前台窗口的标题（诊断用）。"""
+    try:
+        hwnd = _fg_hwnd()
+        if not hwnd:
+            return "(无)"
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        n = u32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 2)
+        u32.GetWindowTextW(hwnd, buf, n + 2)
+        return buf.value or "(空标题)"
+    except Exception:
+        return "(读取失败)"
+
+
+def _desktop_locked() -> bool:
+    """
+    桌面是不是锁着（或屏保挡着）。
+
+    为什么要单独判一下：锁屏时 **UIA 读取照常工作**（读无障碍树不需要前台），
+    但 `Click()` 走的是坐标 + 鼠标事件，点不到被锁屏盖住的 QQ。
+    症状是「发送前复核一连失败好几次」，很容易被误判成「三道闸太严」。
+    实际上闸是对的 —— 是环境点不动。实测就踩过这个：
+    锁屏下 test_send_guard 会 6 项全挂，但 `--sessions` 只读诊断完全正常。
+    """
+    try:
+        hwnd = _fg_hwnd()
+        if not hwnd:
+            return True
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        buf = ctypes.create_unicode_buffer(256)
+        u32.GetClassNameW(hwnd, buf, 256)
+        return buf.value == "Windows.UI.Core.CoreWindow"
+    except Exception:
+        return False
+
+
 def force_foreground(hwnd: int, retries: int = 5) -> bool:
     """
     尽力把窗口切到前台，并**返回是否真的成功**（以 GetForegroundWindow 为准）。
@@ -1202,49 +1591,29 @@ def restore_foreground(prev_hwnd: int, retries: int = 3) -> bool:
     """
     把前台窗口还给 prev_hwnd —— 方案 C（降低打扰）的收尾动作。
 
-    为什么不能直接 SetForegroundWindow(prev) 就完事：
-    抢前台成功之后，「前台进程」其实是 QQ 而不是我们，系统照样可能拒绝我们
-    的 SetForegroundWindow。所以这里复用同一套 AttachThreadInput 组合拳，
-    并如实返回是否成功 —— 失败不是致命错误，只意味着 QQ 仍留在最上层。
+    ## 实现说明：直接复用 `force_foreground`（2026-09-11 实测后合并）
 
-    安全性：只对调用前真实存在过的窗口操作，且用 IsWindow 兜住「窗口已关闭」。
+    这里原来有**另一份**几乎一样的实现，唯一的差别是它 `AttachThreadInput` 到
+    **目标窗口的线程**，而 `force_foreground` 附加到**当前前台窗口的线程**。
+    这个差别不是小事：
+
+    | 场景 | 旧 restore_foreground | force_foreground |
+    | --- | --- | --- |
+    | 坐标点击切换后归还 | ✅ 成功 | ✅ 成功 |
+    | `InvokePattern` 切换后归还（QQ 是自己抢的前台） | ❌ **等 4s、重试 5 次仍失败** | ✅ **一次成功** |
+
+    原因是「前台归属权」握在**当前前台窗口**的那个线程手里，要改它就得先和它握手；
+    去和目标窗口握手是没有用的。所以统一走 `force_foreground`，
+    只额外保留「别对已关闭的窗口操作」这一层保护。
     """
     if not prev_hwnd:
         return False
     u32 = ctypes.WinDLL("user32", use_last_error=True)
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    u32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    u32.SetForegroundWindow.restype = wintypes.BOOL
     u32.IsWindow.argtypes = [wintypes.HWND]
     u32.IsWindow.restype = wintypes.BOOL
-    u32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-    u32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    k32.GetCurrentThreadId.restype = wintypes.DWORD
-    prev_hwnd = int(prev_hwnd)
-
-    for _ in range(max(1, retries)):
-        if _is_foreground(prev_hwnd):
-            return True
-        if not u32.IsWindow(prev_hwnd):
-            return False          # 原窗口已被关掉，没什么可还的
-        tid_prev = u32.GetWindowThreadProcessId(prev_hwnd, None)
-        tid_me = k32.GetCurrentThreadId()
-        attached = False
-        if tid_prev and tid_prev != tid_me:
-            attached = bool(u32.AttachThreadInput(tid_prev, tid_me, True))
-        try:
-            u32.SetForegroundWindow(prev_hwnd)
-            u32.SetFocus(prev_hwnd)
-        except Exception:
-            pass
-        finally:
-            if attached:
-                try:
-                    u32.AttachThreadInput(tid_prev, tid_me, False)
-                except Exception:
-                    pass
-        time.sleep(0.1)
-    return _is_foreground(prev_hwnd)
+    if not u32.IsWindow(int(prev_hwnd)):
+        return False          # 原窗口已被关掉，没什么可还的
+    return force_foreground(prev_hwnd, retries=retries)
 
 
 # ---------------------------------------------------------------- 窗口驱动
@@ -1272,8 +1641,16 @@ class QQWindow:
         self.member_count = 0
         self.self_nickname = ""
         self._layout_at = 0.0
-        self._seen = collections.OrderedDict()   # key -> True
-        self._seen_max = 600
+        # scope -> OrderedDict(msg_key -> True)
+        # **每个会话各一份**，不能共用。UID 路线下窗口要在多个会话之间切来切去，
+        # 共用一个集合时，「刚切过去的那个会话的历史消息」会被别人的 key 挤掉，
+        # 反过来又可能把别的会话的 key 当成自己已读 —— 两个方向都是错的。
+        self._seen: dict[str, collections.OrderedDict] = {}
+        self._seen_max = 400        # 每个会话各自保留的条数上限
+        # 「切会话」之前用户的前台窗口。切会话是坐标点击，必须先把 QQ 抬到最上层，
+        # 于是用户原来的窗口就被我们顶掉了 —— 存下来交给输入路径用完即还。
+        # 不存的话 type_text 只会把前台「还」给 QQ 自己（它那时看到的前台就是 QQ）。
+        self.fg_before_switch: int = 0
         self.ocr = OcrReader(cfg)
         self._ocr_warned = False
 
@@ -1299,6 +1676,79 @@ class QQWindow:
         self.win = best
         self.refresh_layout(force=True)
         return True
+
+    def _qq_top_windows(self) -> list[dict]:
+        """
+        属于 QQ 的全部顶层窗口（含隐藏的）。
+
+        判定规则**必须与 `attach()` 完全一致**，否则诊断给出的结论会和实际行为对不上
+        —— 那种"诊断说没问题但就是跑不起来"的情况比没有诊断更糟。
+        """
+        out = []
+        for row in _enum_top_windows():
+            cls = row["class"]
+            if cls not in ("Chrome_WidgetWin_1", "Chrome_WidgetWin_0", "TXGuiFoundation"):
+                continue
+            p = process_path(row["pid"]).lower()
+            if "qq.exe" not in p and "qqnt" not in p and cls != "TXGuiFoundation":
+                continue
+            out.append(row)
+        return out
+
+    def diagnose_attach(self) -> tuple[str, dict]:
+        """
+        `attach()` 失败之后调用，判定**到底卡在哪一步**。
+
+        ## 为什么必须拆开
+
+        原来这里只有一句话：
+
+            找不到 QQ 窗口。请确认 QQ 已启动，且带 --force-renderer-accessibility 参数。
+
+        它同时压在三个根因上，而三者的处理动作完全不同：
+
+        | 真实根因 | 正确动作 | 按那句话去做的后果 |
+        | --- | --- | --- |
+        | QQ 根本没启动 | 启动 QQ | 没损失 |
+        | QQ 在跑，窗口缩在托盘/最小化 | 把窗口显示出来 | **白重启一次，正在输入的文字会丢** |
+        | 窗口可见但无障碍树是空壳 | 完全退出后带参重启 | （另一种情况会去白重启） |
+
+        判据用的是**窗口层面的客观事实**（有几个 QQ 顶层窗口、几个可见），
+        不是猜。
+        """
+        wins = _enum_top_windows()
+        qq_wins = self._qq_top_windows()
+        visible = [w for w in qq_wins if w["visible"]]
+        ctx = {
+            "顶层窗口": len(wins),
+            "QQ窗口": len(qq_wins),
+            "可见": len(visible),
+            "类名": ",".join(sorted({w["class"] for w in qq_wins})) or "(无)",
+            "前台": _foreground_title() or "(未知)",
+        }
+        if not qq_wins:
+            # 连一个顶层窗口都没有 → QQ 进程没跑（或只有纯后台进程）
+            return "E-QQ-002", ctx
+        if not visible:
+            # 有窗口但全不可见 → 缩在托盘 / 被最小化
+            return "E-QQ-003", {**ctx, "全部隐藏": "是（托盘或最小化）"}
+        # 有可见窗口却挑不出主窗口：控件转换失败，多为权限或位数不一致
+        return "E-QQ-003", {**ctx, "说明": "有可见窗口但无法转成控件，可能是权限或位宽不一致"}
+
+    def dom_exposed(self) -> bool:
+        """
+        DOM 有没有真的暴露出来（= 无障碍参数有没有生效）。
+
+        判据：**能不能找到输入框或消息列表锚点**。
+
+        这是与「找不到窗口」完全不同的一件事，必须分开报：窗口找到得很顺利、
+        但里面什么都没有，特征就是 `--force-renderer-accessibility` 没生效。
+        以前这两种情况混在一起，导致「明明是参数问题，却让人去检查 QQ 有没有启动」。
+        """
+        if self.win is None:
+            return False
+        self.refresh_layout(force=True)
+        return self.ml_list is not None or self.editor is not None
 
     @property
     def rect(self) -> tuple:
@@ -1499,25 +1949,50 @@ class QQWindow:
         )
 
     # ---------------------------------------------------- 新消息切分
-    def mark_seen(self, msgs: list[Message]) -> None:
-        for m in msgs:
-            self._seen[m.key] = True
-        while len(self._seen) > self._seen_max:
-            self._seen.popitem(last=False)
+    def _seen_of(self, scope: str) -> collections.OrderedDict:
+        return self._seen.setdefault(scope or "", collections.OrderedDict())
 
-    def split_new(self, msgs: list[Message]) -> list[Message]:
-        fresh = [m for m in msgs if m.key not in self._seen]
-        self.mark_seen(msgs)
+    def mark_seen(self, msgs: list[Message], scope: str = "") -> None:
+        d = self._seen_of(scope)
+        for m in msgs:
+            d[m.key] = True
+        while len(d) > self._seen_max:
+            d.popitem(last=False)
+
+    def split_new(self, msgs: list[Message], scope: str = "") -> list[Message]:
+        d = self._seen_of(scope)
+        fresh = [m for m in msgs if m.key not in d]
+        self.mark_seen(msgs, scope)
         return fresh
 
-    def baseline(self, skip_last: int = 0) -> int:
+    def forget_scope(self, scope: str) -> None:
+        """丢掉某个会话的已读集合（调试 / 换账号时用）。"""
+        self._seen.pop(scope or "", None)
+
+    def has_seen(self, scope: str) -> bool:
+        """
+        **本进程**有没有给这个会话建过已读集合。
+
+        ⚠️ 判断「要不要建基线」必须用这个，不能用落盘的 `RotationState.baselined`：
+        `_seen` 只活在内存里，重启就空了，而 `baselined` 是落盘的。
+        早期版本拿落盘标记当判据，于是重启后第一次访问某个老会话时，
+        因为「标记说建过基线」而跳过建基线 —— 结果是内存里空的已读集合
+        把最近 30 条历史全判成新消息，一股脑灌进上下文并触发回复。
+        """
+        return (scope or "") in self._seen
+
+    def baseline(self, skip_last: int = 0, scope: str = "") -> int:
         """
         把已有消息标记为已读，避免启动时对着历史记录刷屏。
         skip_last=N 时保留最后 N 条不标记，留给本次处理（调试用）。
+
+        ⚠️ **只应该在一个会话「第一次被打开」时调用**（见 Agent._sync_scope）。
+        以前每切一次会话都调，于是「我不在的那段时间到达的消息」在切回去的瞬间
+        就被记成已读、静默丢弃 —— 这就是并发场景下的 D5 缺陷。
         """
         msgs = self.read_messages(limit=30)
         target = msgs[: len(msgs) - skip_last] if skip_last > 0 else msgs
-        self.mark_seen(target)
+        self.mark_seen(target, scope)
         return len(target)
 
     # ---------------------------------------------------- 发消息
@@ -1543,6 +2018,50 @@ class QQWindow:
             return ""
         return "".join(collect_texts(self.editor, 4))
 
+    # ---------------------------------------------------- 会话身份 / 发送前复核
+    def message_ids(self, limit: int = 8) -> list[str]:
+        """
+        消息区最后 N 条消息的 AutomationId。
+
+        实测（probe-tree.txt:187 起）：`ml-item` 的 AutomationId 是 18~19 位的消息 ID，
+        例如 `7684140137907339382` —— **全局唯一**，所以「一组消息 ID」天然是
+        「当前打开的是哪个会话」的强指纹：两个不同会话不可能有相同的可见消息集合。
+        """
+        if self.ml_list is None:
+            self.refresh_layout(force=True)
+        if self.ml_list is None:
+            return []
+        items = [c for c in _kids(self.ml_list) if _has_cls(c, CLS_ML_ITEM)]
+        if not items:
+            return []
+        return [_aid(c) for c in items][-limit:]
+
+    def title_now(self) -> str:
+        """重新扫树只为拿会话标题（比全量 refresh_layout 便宜，且不受 5s 缓存影响）。"""
+        if self.win is None:
+            return ""
+        for ctrl, _d in iter_bfs(self.win, SCAN_MAX_DEPTH, limit=4000):
+            if CLS_CHAT_TITLE in _cls(ctrl) and _visible(ctrl):
+                return _name(ctrl).strip()
+        return ""
+
+    def chat_signature(self, force: bool = True) -> tuple:
+        """
+        当前打开会话的签名 = (标题, 是否群聊, 最后 6 条消息 ID)。
+
+        发送前复核用它。为什么必须带消息 ID：
+        - 标题只等于「对方给我的备注名」，重名/改备注都可能骗过它；
+        - 消息 ID 是全局唯一的，切换会话 → 消息集合必然改变，骗不过；
+        - 它还顺带解决了「切了但没渲染完」——渲染没完成时 ID 列表也对不上。
+
+        `force=True` 会强制重扫锚点（≈103ms）。这一步不能省：
+        切换会话后 `self.ml_list` 可能还指向旧容器，用陈旧引用读出来的 ID
+        恰好等于切换前的值，复核就会假通过 —— 那正是「发错人」。
+        """
+        if force:
+            self.refresh_layout(force=True)
+        return (self.title_now(), bool(self.is_group), tuple(self.message_ids(6)))
+
     def clear_editor(self) -> None:
         """清空输入框。**只能在校验过前台之后调用**（靠 Ctrl+A / Delete）。"""
         auto.SendKeys("{Ctrl}a", waitTime=0.02)
@@ -1560,7 +2079,8 @@ class QQWindow:
         if restore_foreground(prev_fg):
             log("INFO", "前台窗口已归还给调用前的那个窗口")
         else:
-            log("WARN", "前台窗口归还失败（系统拒绝了 SetForegroundWindow），QQ 会继续留在最上层")
+            report("E-FG-003", "归还前台失败，QQ 会继续留在最上层",
+                   ctx={"目标窗口": prev_fg, "当前前台": _foreground_title()})
 
     def type_text(self, text: str) -> bool:
         """
@@ -1579,13 +2099,22 @@ class QQWindow:
         if self.editor is None:
             self.refresh_layout(force=True)
         if self.editor is None:
-            log("ERR", "找不到 QQ 输入框（ExEditor-qq-msg-editor）。请把目标会话窗口显示出来。")
+            report("E-UIA-004", "找不到输入框（ExEditor-qq-msg-editor）",
+                   ctx={"消息列表": self.ml_list is not None,
+                        "窗口可见": _visible(self.win) if self.win else False,
+                        "标题": self.dialog_title or "(无)"})
             return False
 
-        prev_fg = _fg_hwnd()
+        # 归还目标优先用「切会话时记下的那个用户窗口」。
+        # 如果我们是被 serve_queue 叫起来的，此刻的前台**已经是 QQ 自己**
+        # （切会话是坐标点击，必须先顶上去），直接读 _fg_hwnd() 会把前台
+        # 「还」给 QQ，用户原来的窗口就再也回不来了 —— 方案 C 会静默失效。
+        prev_fg = self.fg_before_switch or _fg_hwnd()
         if not force_foreground(self.hwnd):
-            log("ERR", "无法把 QQ 窗口切到前台，已放弃输入（防止按键漏到其它窗口）")
-            log("ERR", "请从你自己的终端启动本程序（子进程才有抢前台的权限），并别让 QQ 被完全挡住")
+            report("E-FG-001", "无法把 QQ 窗口切到前台，已放弃输入（防止按键漏到其它窗口）",
+                   ctx={"锁屏": _desktop_locked(),
+                        "当前前台": _foreground_title(),
+                        "窗口最小化": _u32.IsIconic(self.hwnd) if self.hwnd else None})
             return False
 
         try:
@@ -1595,18 +2124,21 @@ class QQWindow:
                 pass
             time.sleep(0.05)
             if not self.is_foreground():
-                log("ERR", "聚焦后 QQ 仍不在前台，放弃输入")
+                report("E-FG-002", "聚焦后 QQ 仍不在前台，放弃输入",
+                       ctx={"当前前台": _foreground_title()})
                 return False
 
             self.clear_editor()
             if not copy_to_clipboard(text):
-                log("ERR", "写入剪贴板失败，无法输入中文")
+                report("E-SEND-001", f"写入剪贴板失败，无法输入中文（{len(text)} 字）",
+                       ctx={"pyperclip": "已装" if pyperclip else "未安装，退化为 UIA ValuePattern"})
                 return False
             time.sleep(0.05)
             auto.SendKeys("{Ctrl}v", waitTime=0.05)
             return True
         finally:
             self._release_foreground(prev_fg)   # 无论成功失败，都把焦点还回去
+            self.fg_before_switch = 0           # 用掉了，下次由新的切会话重新记
 
     def wait_send_enabled(self, timeout: float = 1.0) -> bool:
         """
@@ -1621,20 +2153,47 @@ class QQWindow:
         return False
 
     # ---------------------------------------------------- 发送
-    def send_text(self, text: str) -> bool:
+    def send_text(self, text: str, guard=None) -> bool:
+        """
+        写 + 发。`guard` 是**发出去之前的最后一道闸**（可调用对象，返回 bool）。
+
+        时序（三次校验，见 `并发能力评估与优化方向.md` D1）：
+            type_text          ← 抢前台 385ms，写完后把前台还回去
+            wait_send_enabled  ← 免前台
+            回读输入框          ← 免前台，确认写进去的确实是我们的话
+            guard()            ← 免前台，**复核「现在还是那个会话」**  ← 关键
+            Invoke 发送按钮     ← 免前台
+        """
         if not self.type_text(text):
             return False
 
         if not self.wait_send_enabled():
-            log("WARN", "发送按钮仍是禁用态，文本可能没进输入框，已中止发送")
+            report("E-SEND-002", "发送按钮仍是禁用态，文本可能没进输入框，已中止发送",
+                   ctx={"输入框回读": clip(self.editor_text(), 40) or "(空)"})
+            self._abort_cleanup()
             return False
 
         # 回读校验：确认输入框里真的是我们要发的内容，防止发出错误内容
         got = self.editor_text()
         want = text.strip()
         if want and want not in got:
-            log("WARN", f"输入框回读不符，已中止发送：期望 {clip(want, 40)!r}，实际 {clip(got, 40)!r}")
+            report("E-SEND-003", "输入框回读不符，已中止发送",
+                   ctx={"期望": clip(want, 40), "实际": clip(got, 40)})
+            self._abort_cleanup()
             return False
+
+        # ---- 发送前最后一道闸：此刻会话还是不是原来那个？----
+        if guard is not None:
+            try:
+                ok = bool(guard())
+            except Exception as exc:
+                ok = False
+                report_exc(exc, "E-SEND-006", ctx={"阶段": "发送前复核抛异常"})
+            if not ok:
+                report("E-SEND-006", "发送前复核失败：会话已被切换或未渲染完成 —— 本条中止，避免发错人",
+                       ctx={"目标": getattr(self, "_guard_target", "")})
+                self._abort_cleanup()
+                return False
 
         # 首选 InvokePattern 触发发送按钮：走 UIA 调用，**不需要前台窗口，也不产生任何按键**
         if self.send_btn is not None:
@@ -1642,14 +2201,41 @@ class QQWindow:
                 self.send_btn.GetInvokePattern().Invoke()
                 return True
             except Exception as exc:
-                log("WARN", f"InvokePattern 发送失败，准备按键兜底：{exc}")
+                report_exc(exc, "E-SEND-008", ctx={"阶段": "InvokePattern.Invoke 发送按钮"})
 
         # 兜底才用回车，且必须确认前台 —— 否则宁可失败也不发（见文件上方踩坑说明）
         if not self.is_foreground():
-            log("ERR", "QQ 不在前台，拒绝发送回车（防止按键漏到其它窗口），本条中止")
+            report("E-SEND-008", "Invoke 失败且 QQ 不在前台，拒绝发送回车（防止按键漏到其它窗口）",
+                   ctx={"发送按钮": "已定位" if self.send_btn is not None else "未定位",
+                        "当前前台": _foreground_title()})
             return False
         auto.SendKeys("{Enter}")
         return True
+
+    def _abort_cleanup(self) -> None:
+        """
+        中止发送后的清理：输入框里可能已经粘进了我们的话，得擦掉。
+
+        ⚠️ 这一步会**短暂抢回前台**（Ctrl+A/Delete 必须前台）。
+        这是有意为之：留一段没发出去的回复草稿在输入框里，人一眼能看见并且可能误发，
+        比多打扰 50ms 更糟。擦不掉时只记日志，不抛异常。
+        """
+        try:
+            if not self.editor_text().strip():
+                return
+            prev_fg = _fg_hwnd()
+            if not self.is_foreground():
+                if not force_foreground(self.hwnd):
+                    report("E-FG-001", "输入框里有残留草稿，但抢不回前台，无法清理 —— 请手动清空",
+                           ctx={"当前前台": _foreground_title()})
+                    return
+            self.clear_editor()
+            log("INFO", "已清掉输入框里的残留草稿")
+            self._release_foreground(prev_fg)
+        except Exception as exc:
+            report_exc(exc, "E-SEND-003", ctx={"阶段": "中止后的清理"})
+        except Exception as exc:
+            report_exc(exc, "E-SEND-003", ctx={"阶段": "中止后清理残留草稿", "后果": "输入框里可能留有一段没发出去的草稿，请手动清空"})
 
 
 # ============================================================ OCR 兜底（可选）
@@ -1690,7 +2276,7 @@ class OcrReader:
             )
             return [ln.strip() for ln in text.splitlines() if ln.strip()]
         except Exception as exc:
-            log("WARN", f"OCR 失败：{exc}")
+            report_exc(exc, "E-UIA-004", ctx={"阶段": "OCR 兜底读取", "提示": "OCR 只是兜底，失败不影响 UIA 主链"})
             return []
 
 
@@ -1706,25 +2292,74 @@ class Agent:
     这样对方连发「在吗」「你在干嘛」「算了」三条，AI 只会看到合并后的一条、只回一次。
     """
 
-    def __init__(self, cfg: dict, dry_run: bool = False):
+    def __init__(self, cfg: dict, dry_run: bool = False, no_send: bool = False):
         self.cfg = cfg
         self.dry_run = dry_run
+        self.no_send = no_send      # 彩排模式：走完全链路但不真的发出
         self.qq = QQWindow(cfg)
         self.llm = LLMClient(cfg)
         self.ocr = OcrReader(cfg)
         self.store = ConversationStore(cfg)
         self.deb = Debouncer(cfg)
+        self.queue = ReplyQueue(cfg)
         self.scope = ""
         self._last_reply_at = 0.0
         self._last_msg_key = ""
+        self._uid_store = None      # 懒加载：没开 QQ 时不该因为读缓存而报错
+        self._identity = {}         # scope -> {"display_name":…, "uin":…}
+        self._rotation = None       # 懒加载 RotationState（发现/轮转状态）
+        self._last_scan = 0.0       # 上次扫会话列表的时刻（节流用）
+        self._scan_stats = {"scans": 0, "hits": 0, "enqueued": 0}
 
     # ---------------------------------------------------- 会话身份
+    def _uids(self):
+        """QQ 号缓存（qqid 依赖 agent，所以这里延迟导入，避免循环 import）。"""
+        if self._uid_store is None:
+            import qqid
+            path = (self.cfg.get("identity") or {}).get("store") or qqid.DEFAULT_STORE
+            if not os.path.isabs(path):
+                path = os.path.join(HERE, path)
+            self._uid_store = qqid.UidStore(path)
+        return self._uid_store
+
+    def _rot(self) -> RotationState:
+        """发现/轮转状态（同样懒加载，保证 --dry-run 不碰 QQ 也能跑起来）。"""
+        if self._rotation is None:
+            self._rotation = RotationState(_rot_path(self.cfg))
+        return self._rotation
+
+    def identity_of(self, display_name: str, is_group: bool) -> tuple[str, str]:
+        """
+        把「会话列表上显示的名字」解析成 (scope, uin)。
+
+        scope **优先用 QQ 号**：昵称可以随时改、也可以重名，拿它当主键迟早串味。
+        没取到号时降级回昵称，并把 uin 置空 —— 调用方据此知道这条不稳。
+        """
+        uin = self._uids().uin_of(display_name) if display_name else ""
+        kind = "group" if is_group else "private"
+        if uin:
+            return f"{kind}:{uin}", uin
+        return f"{kind}:{display_name or '(未命名会话)'}", ""
+
+    def remember_identity(self, scope: str, display_name: str, uin: str) -> None:
+        self._identity[scope] = {"display_name": display_name, "uin": uin}
+
     def current_scope(self) -> str:
-        kind = "group" if self.qq.is_group else "private"
-        return f"{kind}:{self.qq.dialog_title or '(未命名会话)'}"
+        title = self.qq.dialog_title or "(未命名会话)"
+        scope, uin = self.identity_of(title, self.qq.is_group)
+        self.remember_identity(scope, title, uin)
+        return scope
 
     def _sync_scope(self) -> None:
-        """窗口标题变了 = 换了一个会话 → 结算旧会话、给新会话建基线、换上下文。"""
+        """
+        窗口标题变了 = 换了一个会话 → 结算旧会话、**按需**给新会话建基线、换上下文。
+
+        ⚠️ 基线的建立必须**每个会话只做一次**，而且要落盘。
+
+        老实现是无条件 `baseline()`：每切一次会话，就把新会话当前可见的消息全标成已读。
+        单会话时代这样没问题（切走的会话本来就没人服务）；一旦要服务多个会话，
+        它就会把「我不在的那段时间到达的消息」在切回去的瞬间**静默吃掉** —— 这就是 D5。
+        """
         scope = self.current_scope()
         if scope == self.scope:
             return
@@ -1734,8 +2369,15 @@ class Agent:
                 self.flush(force=True)
             self.deb.clear()
             self.qq.refresh_layout(force=True)
-            kept = self.qq.baseline()
-            log("INFO", f"会话切换 → {scope}（忽略该会话已有 {kept} 条历史消息）")
+            rot = self._rot()
+            if self.qq.has_seen(scope):
+                log("INFO", f"会话切换 → {scope}（本进程建过基线，"
+                            f"按它自己的已读集合切新消息，不吞消息）")
+            else:
+                kept = self.qq.baseline(scope=scope)
+                rot.mark_baselined(scope)
+                rot.save()
+                log("INFO", f"会话切换 → {scope}（首见，建立基线，忽略已有 {kept} 条历史）")
         self.scope = scope
 
     def _cont_timeout(self) -> float:
@@ -1746,73 +2388,111 @@ class Agent:
             return False
         return self.store.is_continuous(scope, time.time(), self._cont_timeout())
 
+    # ---------------------------------------------------- 准入判定（两条路径共用）
+    def _admit(self, m: Message, scope: str) -> tuple[list, str]:
+        """
+        单条消息的准入判定。返回 (写入指令, 跳过原因)。
+
+        写入指令是 `(role, text, source)` 三元组列表，按顺序写进上下文即可；
+        跳过原因是给人看的短句（空串表示「静默丢弃」，不刷日志）。
+
+        为什么要抽出来共用：现在有两条路径会往上下文里写消息 ——
+
+            A) 已打开会话的**实时路径**（`step` → `_ingest`）
+            B) 未打开会话的**延迟总读取路径**（`_read_into_history`）
+
+        不共用的话，同一条消息会因为「当时是不是凑巧开着这个会话」
+        而时进时不进上下文 —— 这是最难查的一类不一致。
+        """
+        if not m.content:
+            return [], ""
+        if m.direction != "other":
+            if m.direction == "me" and self.cfg["teach"].get("honor_own_outgoing"):
+                body = parse_teach(m.content, self.cfg)
+                if body:
+                    return [("assistant", body, "teach-self")], ""
+            return [], ""                       # 自己发的 / 系统消息：静默跳过
+
+        # 白名单：只跟私聊说话时，群聊一律跳过
+        if self.cfg["chat"].get("private_chat_only") and self.qq.is_group:
+            return [], f"群聊『{self.qq.dialog_title}』已跳过"
+
+        # 多媒体（图片/语音/文件/动画表情）：由 chat.nontext_policy 决定
+        #   "skip"     —— 一律跳过（默认）
+        #   "describe" —— 拿 QQ 气泡里的占位文本（如 `[动画表情]`）当正文继续走
+        #
+        # 为什么要有 describe：`read_messages` 解析非文本气泡时，拿到的 content 本身
+        # 就是 QQ 渲染的占位串（`[动画表情]`/`[图片]`/`[语音]`），它天然就是一句描述。
+        # 不利用它的话，「对方只发了个表情」会在总读取阶段被判成 0 条新消息 → 撤单，
+        # 表现为「明明有红点却一声不吭」。陪伴场景下表情是社交信号，值得让 AI 自己判断。
+        if m.kind != "text":
+            policy = str(self.cfg["chat"].get("nontext_policy") or "skip").lower()
+            if policy != "describe":
+                return [], f"非文本消息已跳过（{m.kind}）"
+            desc = (m.content or "").strip()
+            if not desc:
+                return [], f"非文本消息没有可用描述（{m.kind}）"
+        else:
+            desc = ""
+        text_src = desc or m.content
+
+        # 调教语句：不触发 AI，直接以 assistant 身份写入
+        # （非文本的描述串不参与调教解析，免得表情占位串碰巧长得像调教语句）
+        if not desc:
+            body = parse_teach(m.content, self.cfg)
+            if body is not None:
+                return [("assistant", body, "teach")], ""
+
+        # 触发词判定：
+        # 连续对话激活期间免触发词（插件同款行为）；
+        # 群聊默认额外要求触发词，想放开就把 chat.group_requires_trigger 设为 false
+        need_trigger = (not self.cfg["chat"].get("always_reply")) or (
+            self.qq.is_group and self.cfg["chat"].get("group_requires_trigger", True)
+        )
+        if need_trigger and not self._continuous_now(scope):
+            if not looks_like_trigger(text_src, self.cfg):
+                return [], "未命中触发词"
+            text = strip_trigger(text_src, self.cfg)
+        else:
+            text = text_src
+        if not text:
+            return [], "触发词之后没有内容"
+        return [("user", text, "incoming")], ""
+
     # ---------------------------------------------------- 一轮：读 → 入队
     def step(self) -> int:
         """读一轮新消息并入队，返回本轮收下的条数（真正调模型在 flush）。"""
         self.qq.refresh_layout()
         self._sync_scope()
         msgs = self.qq.read_messages()
-        fresh = self.qq.split_new(msgs)
+        fresh = self.qq.split_new(msgs, self.scope)
         if not fresh:
             return 0
-        return self._ingest(fresh)
+        return self._ingest(fresh, self.scope)
 
-    def _ingest(self, fresh: list[Message]) -> int:
-        scope = self.scope
+    def _ingest(self, fresh: list[Message], scope: str = "") -> int:
+        scope = scope or self.scope
         hist = self.store.history(scope)
         handled = 0
         for m in fresh:
-            if not m.content:
+            writes, why = self._admit(m, scope)
+            if not writes:
+                if why:
+                    log("SKIP", why)
                 continue
 
-            # 只关心对方发来的
-            if m.direction != "other":
-                if m.direction == "me" and self.cfg["teach"].get("honor_own_outgoing"):
-                    body = parse_teach(m.content, self.cfg)
-                    if body:
-                        hist.push("assistant", body, source="teach-self", teach=True)
-                        log("TEACH", f"（我方手输）写入上下文：{clip(body)}")
-                        handled += 1
-                continue
-
-            # 白名单：群聊直接跳过
-            if self.cfg["chat"].get("private_chat_only") and self.qq.is_group:
-                log("SKIP", f"群聊『{self.qq.dialog_title}』已跳过")
-                continue
-
-            # 只处理纯文本，图片/语音/文件一律跳过（多媒体部分继续悬置）
-            if m.kind != "text":
-                log("SKIP", f"非文本消息已跳过（{clip(m.content, 20)}）")
-                continue
-
-            log("RECV", f"{m.sender or '对方'}: {clip(m.content)}")
-
-            # ---- 调教语句：不触发 AI，带着自己的 seq 立即写入上下文 ----
+            # ---- 调教语句：立即写入，不触发 AI ----
             # 立即写入是为了「调教即生效」；防抖缓冲里那批更早的用户消息，
             # 结算时会用 push_before_teach 回插到它之前，保证因果不倒置。
-            body = parse_teach(m.content, self.cfg)
-            if body is not None:
-                hist.push("assistant", body, source="teach", teach=True)
-                log("TEACH", f"用户替 AI 说：{clip(body)}")
-                handled += 1
+            if all(role == "assistant" for role, _t, _s in writes):
+                for role, text, src in writes:
+                    hist.push(role, text, source=src, teach=True)
+                    log("TEACH", f"（{src}）写入上下文：{clip(text)}")
+                    handled += 1
                 continue
 
-            # ---- 触发词判定 ----
-            # 连续对话激活期间免触发词（插件同款行为）；
-            # 群聊默认额外要求触发词，想放开就把 chat.group_requires_trigger 设为 false
-            need_trigger = (not self.cfg["chat"].get("always_reply")) or (
-                self.qq.is_group and self.cfg["chat"].get("group_requires_trigger", True)
-            )
-            if need_trigger and not self._continuous_now(scope):
-                if not looks_like_trigger(m.content, self.cfg):
-                    log("SKIP", f"未命中触发词（{'群聊' if self.qq.is_group else '触发词模式'}）")
-                    continue
-                user_text = strip_trigger(m.content, self.cfg)
-            else:
-                user_text = m.content
-
-            if not user_text:
-                continue
+            user_text = next(t for r, t, _s in writes if r == "user")
+            log("RECV", f"{m.sender or '对方'}: {clip(user_text)}")
 
             # ---- 冷却 / 重复 ----
             cooldown = float(self.cfg["chat"].get("reply_cooldown_seconds") or 0)
@@ -1823,6 +2503,25 @@ class Agent:
                 continue
 
             seq = hist.next_seq()      # 先占号，用于回插定位
+
+            # ---- 排队期间的补充消息：5s 阈值判定（见 reply_queue.offer_followup）----
+            # 该会话已经在队列里等着被回复，这时又发来一句：
+            #   还要等 > 阈值 → 直接并进他待提交的上下文，不额外产生一次回复
+            #   还要等 ≤ 阈值 → 不掺和，让他照常排队，这句之后单独回一次
+            piece = f"【{m.sender or '对方'}】：{user_text}"
+            verdict = self.queue.offer_followup(scope, piece, m.key, seq)
+            if verdict == "merged":
+                it = self.queue.get(scope)
+                log("QUE", f"排队中补充消息已并入 {it.display_name!r}"
+                           f"（还需等 {self.queue.remaining_wait(scope):.1f}s > "
+                           f"{self.queue.merge_threshold:.1f}s 阈值）"
+                           f"→ 该批共 {it.count} 条，不单独回复")
+                handled += 1
+                continue
+            if verdict == "close":
+                log("QUE", f"该会话 {self.queue.remaining_wait(scope):.1f}s 内就会被轮到"
+                           f"（≤ {self.queue.merge_threshold:.1f}s），本条不并入，另排一次回复")
+
             wait = self.deb.add(PendingMessage(m.sender or "对方", user_text, m.key, seq), scope)
             if self.deb.enabled:
                 log("BUF", f"入队（缓冲 {len(self.deb.pending)} 条），{wait:.1f}s 后聚合结算"
@@ -1832,9 +2531,15 @@ class Agent:
             handled += 1
         return handled
 
-    # ---------------------------------------------------- 结算：聚合 → 调模型 → 发送
+    # ---------------------------------------------------- 结算：聚合 → 入队
     def flush(self, force: bool = False) -> bool:
-        """缓冲到期（或 force）则合并这一批消息，调一次模型。返回是否真的结算了。"""
+        """
+        缓冲到期（或 force）则把这一批合并成**一个待回复项**放进队列。
+
+        注意这里**不再调模型、也不发送** —— 那是 `serve_queue()` 的活。
+        拆开的原因：模型 1.3~1.8s 不占前台，UI 串行段只有 0.5s 左右；
+        把模型挪出 UI 临界区，才能让「风控限速」成为唯一的节拍器。
+        """
         if not self.deb.pending:
             return False
         if not force and not self.deb.ready:
@@ -1843,44 +2548,574 @@ class Agent:
         batch = self.deb.take()
         scope = self.scope
         self.deb.note_round(scope, len(batch))     # 记录本轮条数 → 两档自适应
-        hist = self.store.history(scope)
         combined = "\n".join(f"【{p.sender}】：{p.content}" for p in batch)
         batch_seq = min((p.seq for p in batch if p.seq), default=0)
 
-        log("AGG", f"聚合 {len(batch)} 条消息 → 一次模型调用")
-        hist.push_before_teach(batch_seq, "user", combined, source="incoming")
-        if self._continuous_now(scope):
-            self.store.refresh_continuous(scope, time.time())   # 连续互动 → 续期
+        ident = self._identity.get(scope) or {}
+        display_name = ident.get("display_name") or self.qq.dialog_title or "(未命名会话)"
+        uin = ident.get("uin") or self._uids().uin_of(display_name)
+
+        log("AGG", f"聚合 {len(batch)} 条消息 → 1 个待回复项入队")
 
         if self.dry_run:
-            log("DRY", "dry-run：只记录，不调用模型")
-            print(hist.dump(6))
+            # dry-run 的语义是「记录，但不调模型、不入队、不发送」。
+            # 所以这里必须把聚合结果写进上下文 —— 否则下面 dump 出来的还是旧内容，
+            # `--dry-run` 就验证不了「到底读到了什么、聚合成了什么」。
+            self.store.history(scope).push_before_teach(
+                batch_seq or None, "user", combined, source="incoming")
+            log("DRY", f"dry-run：已把聚合后的 {len(batch)} 条写入上下文，"
+                       f"不调用模型、不入队、不发送")
+            print(self.store.history(scope).dump(6))
             self.store.save()
             return True
 
-        reply = self.generate_reply(scope)
-        if reply:
-            self.deliver(scope, reply)
-            self._last_reply_at = time.time()
-            self._last_msg_key = batch[-1].key
+        item = self.queue.submit(scope, display_name, uin, combined,
+                                 key=batch[-1].key, seq=batch_seq, wait_seconds=0.0)
+        item.batch = batch
+        self.remember_identity(scope, display_name, uin)
+        log("QUE", self.queue.snapshot())
         self.store.save()
+        return True
+
+    # ==================================================== 发现（只扫列表，不碰前台）
+    def _discovery_wait(self, scope: str) -> float:
+        """
+        发现路径的静默窗长度（秒）。
+
+        默认直接复用防抖器的当前基础等待（配置里是 5s）—— 这样「5s 阈值」
+        在整个系统里始终是同一个数，不会出现两处阈值互相打架。
+        该会话若已被判成快档（连续几轮都是单条消息），这里也跟着缩短。
+        上限受 `queue.max_hold_seconds` 约束，免得窗口比硬上限还长。
+        """
+        base = self.deb.current_base(scope) / 1000.0
+        return max(0.0, min(base, self.queue.max_hold))
+
+    def _scope_for_session(self, s) -> tuple[str, str]:
+        """
+        由会话项推出 (scope, uin)。
+
+        群 / 私聊必须判准：它决定 scope 前缀（`private:` / `group:`），
+        判错会把**同一个会话的历史劈成两份**，AI 从此记不住之前聊过什么。
+        优先级：
+
+            1) uid 缓存里的 `is_group` —— 最可靠，是 QQ 自己在资料卡上给的
+            2) 预览首段带「：」→ 群聊 —— 会话列表的启发式，实测 6/6 命中
+            3) 都判不了 → 按私聊走，同时记一条 WARN
+        """
+        info = self._uids().get(s.display_name)
+        if info is not None and info.uin:
+            return self.identity_of(s.display_name, info.is_group)
+        guess = "群聊" if s.looks_group else "私聊"
+        if info is None:
+            log("WARN", f"{s.display_name!r} 没有 QQ 号缓存 → 按「预览首段带：」猜为{guess}。"
+                        f"建议先跑 `python qqid.py --enroll-all`，否则 scope 可能判错")
+        else:
+            log("WARN", f"{s.display_name!r} 缓存里没有 QQ 号（当初资料卡没取到）→ "
+                        f"按预览猜为{guess}")
+        return self.identity_of(s.display_name, s.looks_group)
+
+    def _refresh_fp(self, display_name: str) -> None:
+        """
+        重采某个会话的指纹快照。**必须在发完自己的消息之后立刻调。**
+
+        我们的回复会让这个会话的预览变掉。不刷新的话，下一轮扫描就会把
+        「我自己刚发的那条」当成对方的新消息 → 再占位 → 再切过去总读取
+        （结果发现没有新消息）→ 撤单。白付一次切会话的成本，
+        严重时还会形成「自己叫醒自己」的循环。
+        """
+        try:
+            import qqid
+            for s in qqid.list_sessions(self.qq.win):
+                if s.display_name == display_name:
+                    self._rot().set_fp(s.key, s.fingerprint())
+                    return
+        except Exception as exc:
+            report_exc(exc, "E-UIA-002", ctx={"阶段": "发送后重采指纹", "后果": "可能把自己刚发的那条误判成新消息"})
+
+    def discover(self) -> int:
+        """
+        「发现」阶段：扫一遍会话列表，看谁有新消息 —— 给它占一个待回复位。
+
+        **这一步完全不碰前台、也不读正文。** 桌面 UI 上每个会话只保留
+        「最新一条消息的节选」，既不足以构造上下文，也不是必须的：
+        真正的总读取推迟到 `prepare()`（见那里的说明）。
+
+        跳过当前已打开的那个会话 —— 它的正文由 `step()` 的实时路径负责，
+        两边都入队会让同一个会话被回两次。
+        """
+        d = self.cfg.get("discovery") or {}
+        if not d.get("enabled") or self.qq.win is None:
+            return 0
+        now = time.time()
+        if now - self._last_scan < max(0.0, float(d.get("scan_interval_seconds") or 2.0)):
+            return 0
+        self._last_scan = now
+
+        import qqid
+        try:
+            sessions = qqid.list_sessions(self.qq.win)
+        except Exception as exc:
+            report_exc(exc, "E-UIA-002", ctx={"阶段": "发现扫描", "处理": "本轮跳过，下一轮继续"})
+            return 0
+        if not sessions:
+            return 0
+
+        rot = self._rot()
+        cur_title = self.qq.title_now()
+        on_unread = bool(d.get("trigger_on_unread", True))
+        on_preview = bool(d.get("trigger_on_preview_change", True))
+        on_first = bool(d.get("trigger_on_first_sight_unread", True))
+        cap = max(1, int(d.get("max_enqueue_per_scan") or 3))
+        self._scan_stats["scans"] += 1
+        enqueued = 0
+
+        for s in sessions:
+            if not s.display_name:
+                continue
+            if cur_title and s.display_name == cur_title:
+                continue                    # 已打开的会话交给 step() 的实时路径
+
+            fp = s.fingerprint()
+            old = rot.fp_of(s.key)
+            rot.set_fp(s.key, fp)           # 先记账，免得中途异常导致下轮误判
+
+            if old is None:
+                log("DISC", f"首见 {s.display_name!r}：记录指纹快照（未读={s.unread}）")
+                # 未读徽标本身就等于「对方发来之后一直没人看」→ 是新鲜的，值得回。
+                # 不想让它一上来就处理历史未读，把 trigger_on_first_sight_unread 关掉。
+                if not (on_first and s.unread > 0):
+                    continue
+                trigger = f"首见但已有未读({s.unread})"
+            elif old == fp:
+                continue
+            else:
+                # 红点是硬证据；预览变化是兜底（有些会话不显未读数字）
+                if not ((on_unread and s.unread > 0) or on_preview):
+                    continue
+                trigger = (f"红点(未读 {old[1]}→{fp[1]})" if s.unread > 0
+                           else "摘要变化")
+
+            wait = self._discovery_wait(self.scope or s.display_name)
+            scope, uin = self._scope_for_session(s)
+            item, created = self.queue.ensure_pending(
+                scope, s.display_name, uin, now=now,
+                wait_seconds=wait, unread_hint=s.unread)
+            if not created:
+                log("DISC", f"{s.display_name!r} 又有新动静（{trigger}），但已在队列里 "
+                            f"→ 不重复占位")
+                continue
+            enqueued += 1
+            self._scan_stats["enqueued"] += 1
+            log("DISC", f"发现 {s.display_name!r} 有新消息：{trigger}"
+                        f"｜摘要={s.summary[:20]!r} → 占位入队，"
+                        f"{wait:.1f}s 后做上下文总读取")
+            if enqueued >= cap:
+                log("DISC", f"本轮已达上限 {cap} 个，剩下的下一轮再说")
+                break
+
+        if enqueued:
+            self._scan_stats["hits"] += 1
+            rot.save()
+            log("QUE", self.queue.snapshot())
+        return enqueued
+
+    # ==================================================== 总读取（把正文读全）
+    def _read_into_history(self, item) -> int:
+        """
+        「上下文总读取」—— 降级方案的第二步。
+
+        调用前提：**已经切到目标会话**（由 `prepare` 负责切）。
+
+        这里才把关这个会话的消息列表**读全**，按 `_admit` 的判定写进
+        **它自己的**上下文。返回写进去的对方消息条数；0 表示没有新东西，
+        调用方应当撤单（别再白回一条）。
+        """
+        scope = item.scope
+        hist = self.store.history(scope)
+        rot = self._rot()
+
+        if not self.qq.has_seen(scope):
+            # 本进程还没给这个会话建过已读集合（可能是刚启动、也可能是刚发现它）：
+            # 建基线，但把「会话项上显示的未读条数」留出来本次处理 ——
+            # 这样既不回灌 30 条历史，也不会把对方刚发的那几条当成历史吃掉。
+            # 这个 skip_last 就是「降级方案」里唯一还能利用的未读线索。
+            keep = max(0, min(int(item.unread_hint or 0), 8))
+            kept = self.qq.baseline(skip_last=keep, scope=scope)
+            rot.mark_baselined(scope)
+            rot.save()
+            log("INFO", f"{item.display_name!r} 本进程首次访问：建立基线"
+                        f"（忽略 {kept} 条历史，保留最后 {keep} 条本次处理）")
+
+        self.qq.refresh_layout(force=True)
+        limit = max(5, int((self.cfg.get("discovery") or {}).get("read_limit") or 30))
+        msgs = self.qq.read_messages(limit=limit)
+        fresh = self.qq.split_new(msgs, scope)
+        if not fresh:
+            return 0
+
+        written = 0
+        for m in fresh:
+            writes, why = self._admit(m, scope)
+            if not writes:
+                if why:
+                    log("SKIP", f"[总读取] {why}")
+                continue
+            for role, text, src in writes:
+                if role == "assistant":
+                    hist.push(role, text, source=src, teach=True)
+                    log("TEACH", f"[总读取] 用户替 AI 说：{clip(text)}")
+                else:
+                    hist.push("user", f"【{m.sender or '对方'}】：{text}", source=src)
+                    written += 1
+                    log("RECV", f"[总读取] {m.sender or '对方'}: {clip(text)}")
+        return written
+
+    # ==================================================== 出队：读+生成 → 发送
+    def prepare(self, item) -> bool:
+        """
+        结算的第一阶段：**读 → 写上下文 → 调模型**，把回复算好放进 `item.reply`。
+
+        拆两阶段的原因，正是「降级方案」的核心：
+
+            桌面 UI 上每个会话只保留最新一条消息的**节选**，靠它构造不出上下文。
+            所以「发现」阶段只排队、不读正文；真正的上下文总读取推迟到这里 ——
+            此时静默窗（5s 阈值）已经关闭、对方这一轮说完了，一次读全。
+
+        这一步**不发送**，所以不消耗风控额度，可以早于风控放行执行
+        （用 `pick(ignore_budget=True)`）；真正排到之后再走 `deliver()` 发出去。
+        """
+        scope = item.scope
+        hist = self.store.history(scope)
+
+        if item.pending_read:
+            if not self._ensure_session(item):
+                self.queue.requeue(item, delay=2.0)
+                log("WARN", f"{item.display_name!r} 切不过去，读不了正文 → 排回队尾重试")
+                return False
+            n = self._read_into_history(item)
+            if n <= 0:
+                self.queue.drop(scope, aborted=True)
+                log("QUE", f"{item.display_name!r} 总读取没拿到新消息"
+                           f"（已被别处读过 / 撤回 / 只是自己发的）→ 撤单，不回复")
+                self.store.save()
+                return False
+        elif not item.pushed:
+            # 实时路径：正文在 _ingest 时就拿到了，直接写进上下文
+            seq0 = item.seqs[0] if item.seqs else 0
+            hist.push_before_teach(seq0, "user", item.combined(), source="incoming")
+            item.pushed = True
+
+        if self._continuous_now(scope):
+            self.store.refresh_continuous(scope, time.time())
+
+        # 模型调用（不占前台；故意放在 UI 临界区之外）
+        reply = self.generate_reply(scope)
+        if not reply:
+            self.queue.drop(scope, aborted=True)
+            # 生成失败的**根因**在 generate_reply 里已经带码报过了（模型侧各状态码分类）。
+            # 这里只说清后果，不重复报同一件事 —— 重复报错本身就是一种混淆。
+            report("E-LLM-009", "本条回复没生成出来，已作废（消息留在上下文里，下一轮仍会带上）",
+                   ctx={"会话": item.display_name})
+            self.store.save()
+            return False
+
+        item.reply = reply
+        item.prepared = True
+        item.prepared_at = time.time()
+        log("QUE", f"{item.display_name!r} 回复已备好（{len(reply)} 字），等风控放行发送")
+        return True
+
+    def serve_queue(self) -> bool:
+        """
+        队列服务。分两阶段（见 `prepare`）：
+
+            阶段一 prepare ：读 → 写上下文 → 调模型  （**可以早于风控放行**，不吃额度）
+            阶段二 deliver ：带租约发送             （必须等风控放行）
+
+        返回「这一轮有没有真的把消息发出去」。
+
+        为什么一次只处理一项：UI 是唯一串行资源，多会话同时到点时连切好几次
+        会话会把前台预算打穿。而两阶段之间我们**停在同一会话上**（单项队列天然
+        把我们park在那儿），所以整条链路仍然只付一次「切会话」的成本。
+        """
+        item = self.queue.pick(ignore_budget=True)
+        if item is None:
+            return False
+
+        if item.attempts >= self.queue.max_attempts:
+            report("E-SEND-009",
+                   f"连续 {item.attempts} 次发送失败，放弃并撤单（避免无限重排把队列堵死）",
+                   ctx={"会话": item.display_name, "上限": self.queue.max_attempts,
+                        "上下文": "保留，不丢"})
+            self.queue.drop(item.scope, aborted=True)
+            self.store.save()
+            return False
+
+        # ---- 阶段一：读 + 生成（不发送，因此不需要风控放行）----
+        if not item.prepared:
+            self.prepare(item)          # 失败时 prepare 内部已经撤单或重排
+            return False                # 本轮只做读+生成，下一轮 tick 再看能不能发
+
+        # ---- 阶段二：发送（这一步才占风控额度）----
+        if self.queue.budget.wait_seconds() > 0:
+            return False                # 回复已备好，只是还没轮到
+
+        ok = self.deliver(item, item.reply)
+        if ok:
+            self.queue.drop(item.scope)
+            self.queue.served()
+            self._last_reply_at = time.time()
+            self._last_msg_key = item.keys[-1] if item.keys else ""
+            self._refresh_fp(item.display_name)     # 别把自己发的那条当成新消息
+        else:
+            # 复核失败（有人手动切了会话等）→ 作废备好的回复，排回队尾重读重生成
+            item.prepared = False
+            item.reply = ""
+            self.queue.requeue(item, delay=1.0)
+            log("QUE", f"{item.display_name!r} 未发出，已放回队尾重排"
+                       f"（第 {item.attempts} 次，上下文不丢）")
+        self.store.save()
+        return ok
+
+    # ---------------------------------------------------- 发送租约
+    def _prepare_qq_for_switch(self, display_name: str) -> None:
+        """
+        切换会话前的**最小**准备：窗口最小化就还原，**不抢前台**。
+
+        ## 为什么不抢前台了（2026-09-11 实测，B5 的进一步结论）
+
+        会话列表项支持 `InvokePattern`，而它是**免前台**的：QQ 完全不在前台时
+        `Invoke()` 照样能把会话切过去。所以只要窗口**可见**（非最小化）就够了 ——
+        不必再把 QQ 顶到最上面，也就不会打断你正在用的窗口、不会挪走你的光标。
+
+        这比"抬前台 + 坐标点击"干净得多：坐标点击点到的是「该屏幕坐标上最顶层的
+        窗口」，被盖住就静默打偏，而且**返回值还会骗你**（旧会话的标题也非空）。
+
+        ## 为什么最小化必须还原
+
+        Chromium 在窗口被最小化/完全遮挡时会**节流 renderer**，此时 `Invoke()`
+        会静默失效（实测：最小化后 Invoke 无任何效果，还原后立刻可用）。
+        注意**读取不受影响** —— 读的是 a11y 树缓存，最小化后节点数/会话数/消息数
+        完全一致（见 `probe_minimized.py`）。
+        """
+        hwnd = getattr(self.qq, "hwnd", 0)
+        if not hwnd:
+            return                       # 没附着到窗口（或测试替身），没什么可做
+        try:
+            if _u32.IsIconic(hwnd):
+                log("INFO", "QQ 处于最小化：先还原窗口（最小化时 Invoke 会静默失效）")
+                _u32.ShowWindow(hwnd, 9)          # SW_RESTORE
+                time.sleep(0.6)
+        except Exception as exc:
+            report_exc(exc, "E-QQ-003", ctx={"阶段": "还原最小化窗口"})
+
+    def _ensure_session(self, item) -> bool:
+        """确保 QQ 里当前打开的就是目标会话；不是就切过去。"""
+        cur = self.qq.title_now()
+        if cur and cur == item.display_name:
+            return True
+
+        try:
+            import qqid
+            sessions = qqid.list_sessions(self.qq.win)
+        except Exception as exc:
+            report_exc(exc, "E-UIA-002", ctx={"阶段": "读会话列表（准备切换）"})
+            return False
+
+        target = None
+        for s in sessions:
+            if s.display_name == item.display_name:
+                target = s
+                break
+        if target is None:
+            # 分两种：列表整体为空（渲染/无障碍问题）vs 列表有内容但没有这个会话（真的没了）
+            if not sessions:
+                report("E-QQ-007", "读不到任何会话（会话列表为空）",
+                       ctx={"目标": item.display_name, "标题": cur or "(空)"})
+            else:
+                report("E-SEND-004", "会话列表里找不到目标会话（已删除 / 退群 / 未加载）",
+                       ctx={"目标": item.display_name, "列表条数": len(sessions)})
+            return False
+
+        log("INFO", f"切换会话 → {item.display_name!r}")
+
+        # 切会话会把 QQ 激活到最上层（Invoke 与点击都会）。这不是我们需要的前台，
+        # 只是副作用 —— 记下你原来的窗口，切完就还回去（方案 C）。
+        # ⚠️ 必须在 _prepare_qq_for_switch 之前读：那个函数在窗口最小化时会
+        # `SW_RESTORE`，而还原一个最小化窗口本身就会改变前台。
+        # hwnd 为 0 表示没附着到真窗口（或测试替身）→ 整套前台逻辑跳过。
+        hwnd = getattr(self.qq, "hwnd", 0)
+        prev_fg = 0
+        if hwnd:
+            prev_fg = _fg_hwnd()
+            if prev_fg and prev_fg != hwnd:
+                self.qq.fg_before_switch = prev_fg
+
+        self._prepare_qq_for_switch(item.display_name)
+
+        if not qqid.switch_session(target, self.qq.win):
+            report("E-FG-004", "切换会话失败",
+                   ctx={"目标": item.display_name,
+                        "当前标题": self.qq.title_now() or "(空)",
+                        "锁屏": _desktop_locked(),
+                        "窗口最小化": _u32.IsIconic(hwnd) if hwnd else None})
+            self._return_focus_after_switch(prev_fg)
+            return False
+
+        # 等渲染稳定：连续两次签名一致、且标题已对上才算稳。
+        # 必须 force=True 重扫锚点 —— 切换会话后 ml_list 可能仍指向旧容器，
+        # 用陈旧引用读出的消息 ID 恰好等于切换前的值，签名就会「稳定地错」。
+        last = None
+        settled = False
+        for _ in range(10):
+            time.sleep(0.2)
+            sig = self.qq.chat_signature(force=True)
+            if sig[0] == item.display_name and sig == last:
+                settled = True
+                break
+            last = sig
+        self._return_focus_after_switch(prev_fg)
+        if not settled:
+            got = self.qq.title_now()
+            # 标题已经对了、只是签名没稳定下来：这不算失败，但要说清楚，
+            # 因为它会直接导致下一道闸（签名复核）失败 —— 提前把因果挂上。
+            code = "E-FG-004" if got != item.display_name else "E-SEND-006"
+            report(code, "切换后渲染未稳定（下面可能紧跟一次签名复核失败）",
+                   ctx={"当前标题": got or "(空)", "目标": item.display_name})
+        return settled or (self.qq.title_now() == item.display_name)
+
+    def _return_focus_after_switch(self, prev_fg: int) -> None:
+        """
+        切会话之后把前台还给你原来的窗口。
+
+        `InvokePattern` 虽然**不需要**前台，但 Chromium 内部会对目标元素 `SetFocus`
+        → QQ 被激活、顶到最上层。既然这个激活是我们引起的、而且我们并不需要它
+        （后面读消息、读签名全是 UIA，免前台），就该还回去（方案 C）。
+
+        还成功后清掉 `qq.fg_before_switch`：那个值只在"归还失败、QQ 会继续占着前台"时
+        才有用 —— 交给输入路径，免得它把前台「还」给 QQ 自己。
+        """
+        if not self.cfg["uia"].get("restore_foreground", True):
+            return
+        if not prev_fg or prev_fg == self.qq.hwnd:
+            return
+        if restore_foreground(prev_fg):
+            log("INFO", "切换会话后已把前台还给你原来的窗口")
+            self.qq.fg_before_switch = 0
+        else:
+            report("E-FG-003", "切换后前台归还失败（QQ 会留在最上层，发送完成后会再试一次）",
+                   ctx={"目标窗口": prev_fg, "当前前台": _foreground_title()})
+
+    def _enroll_now(self, display_name: str) -> str:
+        """现场取号（打开资料卡，会抢前台一次）。取到就写缓存。"""
+        try:
+            import qqid
+            sessions = qqid.list_sessions(self.qq.win)
+            target = next((s for s in sessions if s.display_name == display_name), None)
+            if target is None:
+                return ""
+            log("INFO", f"缓存里没有 {display_name!r} 的 QQ 号，现场取一次（会抢前台）")
+            info = qqid.enroll(self.qq.win, self._uids(), target)
+            return info.uin if info else ""
+        except Exception as exc:
+            report_exc(exc, "E-SEND-007",
+                       ctx={"阶段": "现场取号（资料卡通路）", "后果": "本次发送只能按昵称复核"})
+            return ""
+
+    def _verify_target(self, item) -> bool:
+        """
+        身份复核 —— 这是「绝不发错人」的第二道闸（D1 的核心）。
+
+            标题对得上  AND  QQ 号对得上
+
+        标题只是备注名，重名/改备注都可能骗过它；QQ 号是稳定标识，骗不过。
+        目标没取到号时（降级模式）只校验标题，并明确记一条 WARN。
+        """
+        title = self.qq.title_now()
+        if title != item.display_name:
+            report("E-SEND-004", "身份复核失败：当前打开的会话不是目标",
+                   ctx={"当前打开": title or "(空)", "目标": item.display_name,
+                        "QQ号": item.uin or "未知"})
+            return False
+
+        uin = self._uids().uin_of(title) or self._enroll_now(title)
+        if not uin:
+            if item.uin:
+                report("E-SEND-005", "当前会话取不到 QQ 号，而目标要求了 QQ 号 —— 拒绝发送",
+                       ctx={"当前会话": title, "目标QQ": item.uin})
+                return False
+            report("E-SEND-007", "该会话没有 QQ 号，退化为「仅按昵称复核」（有重名风险）",
+                   ctx={"会话": title, "建议": "跑一次「给所有会话取号」"})
+            return True
+
+        if item.uin and uin != item.uin:
+            report("E-SEND-005", "身份不符：QQ 号对不上 —— 拒绝发送（最严重的一类）",
+                   ctx={"当前会话": title, "当前QQ": uin, "目标QQ": item.uin})
+            return False
+
+        if not item.uin:
+            # 入队时没号、发之前取到了 → 补上，下次就不必再现场取
+            item.uin = uin
+            self.remember_identity(item.scope, title, uin)
+        return True
+
+    def deliver(self, item, reply: str) -> bool:
+        """带租约的发送事务：切会话 → 身份复核 → 捕获签名 → 写入 → 复核签名 → 发送。"""
+        scope = item.scope
+
+        if not self._ensure_session(item):
+            return False
+        if not self._verify_target(item):
+            return False
+
+        # 第三道闸：写入前后签名必须完全一致。
+        # 它挡的是「模型生成/写入期间，人手动切了会话」——那时 InvokePattern 会
+        # 把这段文字发到另一个会话的输入框里，是并发化最凶险的一种错发。
+        sig = self.qq.chat_signature(force=True)
+        log("SEND", f"→ {item.display_name!r}(QQ {item.uin or '未知'}) {clip(reply, 70)}")
+
+        if self.no_send:
+            log("DRY", f"彩排模式：已通过①②闸，签名={sig[0]!r}/{len(sig[2])}条，"
+                       f"本条不会真的发出")
+            self.store.history(scope).push("assistant", reply, source="auto")
+            return True
+
+        def guard() -> bool:
+            now_sig = self.qq.chat_signature(force=True)
+            if now_sig != sig:
+                log("WARN", f"会话签名已变化：{sig[0]!r}/{len(sig[2])}条 "
+                            f"→ {now_sig[0]!r}/{len(now_sig[2])}条")
+                return False
+            return True
+
+        if not self.qq.send_text(reply, guard=guard):
+            return False
+        self.store.history(scope).push("assistant", reply, source="auto")
         return True
 
     def generate_reply(self, scope: str) -> str:
         hist = self.store.history(scope)
         try:
             reply = self.llm.chat(hist.build_messages())
+        except EC.AppError as exc:
+            # 模型侧的错误已经按状态码分类好了（密钥/地址/限流/超时/服务端…），
+            # 直接透传，不要再包一层「模型调用失败」把码盖掉。
+            report(exc.code, exc.detail_text, ctx={**exc.context, "scope": scope})
+            return ""
         except Exception as exc:
-            log("ERR", f"模型调用失败：{exc}")
+            report_exc(exc, "E-LLM-008", ctx={"scope": scope})
             # 刚推进去的 user 消息留在历史里没关系，下一轮还会带上
             return ""
 
         reply = (reply or "").strip()
         limit = int(self.cfg["chat"].get("max_reply_chars") or 500)
         if len(reply) > limit:
+            report("E-LLM-010", f"回复 {len(reply)} 字，超过上限 {limit}，已截断",
+                   ctx={"scope": scope, "上限": limit})
             reply = reply[:limit]
         if not reply:
-            log("WARN", "模型返回空内容")
+            report("E-LLM-009", "模型返回空内容，本条不再重试",
+                   ctx={"scope": scope, "max_tokens": self.cfg["llm"].get("max_tokens")})
             return ""
 
         # 开口即激活连续对话（插件的 activateContinuous）
@@ -1889,52 +3124,146 @@ class Agent:
             log("CONT", f"连续对话已激活（{self._cont_timeout():.0f}s 内该会话免触发词）")
         return reply
 
-    def deliver(self, scope: str, reply: str) -> None:
-        log("SEND", clip(reply, 70))
-        self.store.history(scope).push("assistant", reply, source="auto")
-        if self.dry_run:
-            return
-        if not self.qq.send_text(reply):
-            log("ERR", "发送失败，本条回复未送达")
-
     # ---------------------------------------------------- 常驻循环
     def run_forever(self) -> int:
+        # ---- 入口三道检查，每一道都对应**一个**确定的原因 ----
+        # 这三件事以前挤在同一句报错里，导致修复动作经常是错的（详见 diagnose_attach）。
         if not self.qq.attach():
-            log("ERR", "找不到 QQ 窗口。请确认 QQ 已启动，且带 --force-renderer-accessibility 参数。")
+            code, ctx = self.qq.diagnose_attach()
+            report(code, "无法附着到 QQ 窗口", ctx=ctx)
             return 2
+        if not self.qq.dom_exposed():
+            report("E-QQ-004",
+                   "窗口找到了，但里面读不到输入框和消息列表 —— 无障碍树是空壳",
+                   ctx={"窗口": self.qq.dialog_title or "(无标题)",
+                        "类名": _cls(self.qq.win),
+                        "消息列表": self.qq.ml_list is not None,
+                        "输入框": self.qq.editor is not None,
+                        "窗口可见": _visible(self.qq.win)})
+            return 2
+
         log("INFO", f"已附着 QQ 窗口，标题={self.qq.dialog_title!r}，群聊={self.qq.is_group}")
+        if _desktop_locked():
+            report("E-ENV-006", "桌面处于锁屏状态，只能读不能发", ctx={"前台": _foreground_title()})
+        elif not _is_foreground(self.qq.hwnd):
+            log("WARN", f"QQ 当前不是前台窗口（前台={_foreground_title()!r}）："
+                        f"切会话走的是坐标点击，必须先把它抬到最上层抢一次焦点；"
+                        f"发完会还给你原来的窗口（uia.restore_foreground=true 时）。")
         if self.qq.ml_list is None:
-            log("WARN", "没定位到消息列表控件，UIA 读取可能拿不到内容（考虑启用 OCR 兜底）")
+            report("E-QQ-007", "没定位到消息列表控件，读取可能拿不到内容",
+                   ctx={"考虑": "启用 OCR 兜底（uia.read_chain）"})
 
         self.scope = self.current_scope()
-        n = self.qq.baseline()
+        n = self.qq.baseline(scope=self.scope)
+        self._rot().mark_baselined(self.scope)      # 当前会话的基线建立过了，记下来
+        self._rot().save()
         log("INFO", f"基线建立完成，忽略已有 {n} 条历史消息")
         log("INFO", f"当前会话 {self.scope}（上下文 {len(self.store.history(self.scope))} 条，"
                     f"连续对话={self._continuous_now(self.scope)}）")
+
+        ident = self._identity.get(self.scope) or {}
+        if ident.get("uin"):
+            log("INFO", f"会话身份已锁定：{ident.get('display_name')!r} → QQ {ident['uin']}"
+                        f"（发送前按 QQ 号复核）")
+        else:
+            report("E-SEND-007", "当前会话还没有 QQ 号，发送前只能按昵称复核",
+                   ctx={"会话": self.scope, "建议": "跑一次「给所有会话取号」"})
+
+        b = self.queue.budget.snapshot()
+        log("INFO", f"风控预算：{b['per_minute']} 条/分，硬间隔 {b['min_interval']:.1f}s "
+                    f"｜排队合并阈值 {self.queue.merge_threshold:.1f}s"
+                    f"｜静默窗硬上限 {self.queue.max_hold:.0f}s")
+        disc = self.cfg.get("discovery") or {}
+        if disc.get("enabled"):
+            log("INFO", f"发现已开启：每 {disc.get('scan_interval_seconds', 2.0)}s 扫一次会话列表，"
+                        f"重{disc.get('trigger_on_unread', True) and '点' or '-'}"
+                        f"/{'摘要' if disc.get('trigger_on_preview_change', True) else '-'}触发"
+                        f"→ 占位排队 → 出队时做一次上下文总读取")
+        else:
+            log("WARN", "发现已关闭：只会服务「当前打开的那一个会话」")
         log("INFO", f"进入循环（poll={self.cfg['chat'].get('poll_interval_seconds')}s，"
                     f"防抖={'开' if self.deb.enabled else '关'}，"
                     f"基础等待={self.deb.summary(self.scope)}）")
-        log("INFO", "按 Ctrl+C 退出")
+        if STOP_PATH:
+            log("INFO", f"停止方式：Ctrl+C，或由界面写入停止哨兵 {STOP_PATH}")
+        else:
+            log("INFO", "按 Ctrl+C 退出")
 
         interval = float(self.cfg["chat"].get("poll_interval_seconds") or 0.8)
+        started = time.time()
         while True:
             try:
                 self.step()
                 self.flush()
+                self.discover()         # 扫会话列表：谁有新消息就占位排队（不碰前台）
+                self.serve_queue()      # 读+生成 → 排到就发
                 self.store.save()
+                heartbeat(              # 供 exe 壳的 WebUI 展示实时状态
+                    uptime=round(time.time() - started, 1),
+                    scope=self.scope,
+                    title=self.qq.dialog_title,
+                    is_group=bool(self.qq.is_group),
+                    queue_len=len(self.queue),
+                    pending=len(self.deb.pending),
+                    scans=self._scan_stats["scans"],
+                    hits=self._scan_stats["hits"],
+                    enqueued=self._scan_stats["enqueued"],
+                )
+                if stop_requested():
+                    return self.shutdown("收到界面下发的停止哨兵")
+                time.sleep(interval)
             except KeyboardInterrupt:
-                log("INFO", "收到退出信号，结束")
-                if self.deb.pending:
-                    log("BUF", f"退出前把剩下的 {len(self.deb.pending)} 条结算掉")
-                    try:
-                        self.flush(force=True)
-                    except Exception as exc:
-                        log("ERR", f"收尾结算失败：{exc}")
-                self.store.save(force=True)
-                return 0
+                return self.shutdown("收到退出信号")
             except Exception as exc:
-                log("ERR", f"循环异常（已忽略继续）：{type(exc).__name__}: {exc}")
-            time.sleep(interval)
+                # 循环里的异常是**唯一**会被无限重复的一类：这里必须靠抑制器兜住，
+                # 否则每 0.8 秒一条堆栈，几分钟就把日志刷爆、把真正的第一现场埋掉。
+                report_exc(exc, "E-UIA-002", ctx={"阶段": "主循环 tick"})
+                time.sleep(interval)
+
+    def shutdown(self, reason: str) -> int:
+        """
+        优雅退出：把已经攒下的东西尽量处理完，再落盘返回。
+
+        **不能直接 return** —— 退出瞬间正在防抖缓冲里的消息、以及队列里已经生成好的回复，
+        丢了就意味着「对方明明发了消息，我们却永远不回」。所以这里给它们各留一个时限。
+        """
+        log("INFO", f"{reason}，开始收尾")
+        if self.deb.pending:
+            log("BUF", f"退出前把剩下的 {len(self.deb.pending)} 条结算掉")
+            try:
+                self.flush(force=True)
+            except Exception as exc:
+                report_exc(exc, "E-PROC-005", ctx={"阶段": "退出收尾：结算防抖缓冲"})
+        try:
+            self._drain_queue(limit_seconds=10.0)
+        except Exception as exc:
+            report_exc(exc, "E-PROC-005", ctx={"阶段": "退出收尾：发送剩余队列"})
+        try:
+            self._rot().save()
+            self.store.save(force=True)
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003", ctx={"阶段": "退出收尾：落盘上下文"})
+        log("INFO", "已退出")
+        return 0
+
+    def _drain_queue(self, limit_seconds: float = 10.0) -> int:
+        """退出前的收尾：在时限内把队列尽量发完（仍然遵守风控，不破例）。"""
+        if not self.queue:
+            return 0
+        log("QUE", f"收尾：队列还剩 {len(self.queue)} 项，最多再等 {limit_seconds:.0f}s")
+        deadline = time.time() + limit_seconds
+        sent = 0
+        while self.queue and time.time() < deadline:
+            if self.serve_queue():
+                sent += 1
+                continue
+            if self.queue.pick() is None and not any(
+                    it.ready_at <= time.time() for it in self.queue.items):
+                break          # 剩下的都还没到点，等也没用
+            time.sleep(0.4)
+        if self.queue:
+            log("WARN", f"队列仍有 {len(self.queue)} 项未发出：{self.queue.snapshot()}")
+        return sent
 
 
 # ============================================================ 自检 / 回放
@@ -1952,7 +3281,9 @@ def selftest(cfg: dict) -> int:
     print("\n[2] 密钥")
     key = resolve_api_key(cfg, verbose=True)
     if not key:
-        print("    [X] 没拿到密钥。请在 config.json 里填 api_key，或修正 api_key_file 路径。")
+        print(f"    [X] {diag_line('E-LLM-001')}")
+        for f in EC.get("E-LLM-001")["fixes"]:
+            print(f"        → {f}")
     else:
         print(f"    [✓] 已获取密钥（长度 {len(key)}，内容不打印）")
 
@@ -1970,8 +3301,19 @@ def selftest(cfg: dict) -> int:
                 ]
             )
             print(f"    [✓] {time.time() - t0:.2f}s 返回：{out!r}")
+        except EC.AppError as exc:
+            # 把错误码、判据、动作一起打出来 —— 这三样缺任何一样，
+            # 用户都会退回到「把整段日志发给我」的循环里。
+            print(f"    [X] {diag_line(exc.code)}")
+            print(f"        详情　：{exc.detail_text}")
+            for c in EC.get(exc.code)["causes"]:
+                print(f"        可能　：{c}")
+            for f in EC.get(exc.code)["fixes"]:
+                print(f"        怎么办：{f}")
         except Exception as exc:
-            print(f"    [X] 调用失败：{exc}")
+            code = EC.wrap(exc, "E-LLM-008").code
+            print(f"    [X] {diag_line(code)}")
+            print(f"        {type(exc).__name__}: {exc}")
 
     print("\n[4] 调教解析（应中 4 个，不中 2 个）")
     cases = [
@@ -2012,6 +3354,43 @@ def selftest(cfg: dict) -> int:
         names = store.scopes()
         print(f"    已存会话   : {len(names)} 个" + (f"（{', '.join(names[:5])}）" if names else ""))
     print(f"    多媒体     : 图片识别 / URL 读取 → 继续悬置（按当前要求不移植）")
+
+    print("\n[7] 会话身份与排队风控")
+    q = cfg.get("queue") or {}
+    ident = cfg.get("identity") or {}
+    print(f"    会话主键   : QQ 号（identity.store = {ident.get('store')}）")
+    print(f"    排队       : {'开' if q.get('enabled', True) else '关'}"
+          f"｜风控 {q.get('max_replies_per_minute')} 条/分"
+          f"｜硬间隔 {q.get('min_interval_seconds')}s")
+    print(f"    补充消息   : 剩余等待 > {q.get('merge_if_wait_over_seconds')}s 则并入待发上下文，"
+          f"否则另排一次回复")
+    print(f"    静默窗上限 : 顺延不超过 {q.get('max_hold_seconds')}s"
+          f"｜到期抖动 ±{q.get('jitter_seconds')}s")
+    try:
+        import qqid
+        store_path = ident.get("store") or qqid.DEFAULT_STORE
+        if not os.path.isabs(store_path):
+            store_path = os.path.join(HERE, store_path)
+        st = qqid.UidStore(store_path)
+        print(f"    已取号缓存 : {len(st.map)} 个会话 → {store_path}")
+        conf = st.conflicts()
+        if conf:
+            print(f"    [!] 重号告警 : {conf}")
+    except Exception as exc:
+        print(f"    [i] 取号缓存读取跳过：{exc}")
+    print(f"    [i] 取号/查看：python qqid.py --list ｜ --enroll-all ｜ --check")
+    print(f"    [i] 排队单测：python reply_queue.py --selftest")
+
+    print("\n[8] 错误码目录")
+    problems = EC.audit()
+    n_codes = len(getattr(EC, "CATALOG", {}))
+    if problems:
+        print(f"    [!] 目录有 {len(problems)} 个问题（报错本身可能失真）：")
+        for p in problems[:8]:
+            print(f"        - {p}")
+    else:
+        print(f"    [✓] {n_codes} 条错误码，目录自检通过")
+    print(f"    [i] 遇到带码的报错时，用「诊断报告」导出完整现场，别只截图一行")
 
     print("\n自检结束。")
     return 0
@@ -2107,16 +3486,47 @@ def replay(cfg: dict, text: str) -> int:
 
     client = LLMClient(cfg)
     if not client.ready:
-        print("\n[X] 无密钥，跳过模型调用。")
+        diag("E-LLM-001", "没有可用的 API Key")
         return 2
     try:
         t0 = time.time()
         reply = client.chat(history.build_messages())
         print(f"\n模型回复（{time.time() - t0:.2f}s）：\n    {reply}")
+    except EC.AppError as exc:
+        diag(exc.code, exc.detail_text, exc.context)
+        return 2
     except Exception as exc:
-        print(f"\n[X] 调用失败：{exc}")
+        diag(EC.wrap(exc, "E-LLM-008").code, f"{type(exc).__name__}: {exc}")
         return 2
     return 0
+
+
+def diag(code: str, detail: str = "", ctx: dict | None = None) -> None:
+    """
+    把错误码的完整诊断块**打印到 stdout**。
+
+    与 `report()` 的分工：`report()` 走日志（带抑制、给常驻循环用），
+    `diag()` 直接打印（给一次性的命令行诊断用 —— 那种场合用户就是在等这一句话，
+    抑制反而会让它不出现）。`qqid.py` 与几个测试脚本也复用它。
+    """
+    print()
+    for line in EC.describe(code, detail, ctx).splitlines():
+        print("  " + line)
+
+
+def diag_attach(cfg: dict | None = None) -> tuple[str, dict]:
+    """
+    一次性回答「为什么附着不上 QQ」，返回 (错误码, 现场数据)。
+
+    给命令行脚本用：它们通常先自己找一遍窗口，失败时想知道具体原因。
+    这样 `test_pipeline.py` / `test_send_guard.py` 这类脚本不需要各自复制一份判定逻辑
+    —— 判定只允许有一处实现，否则界面说一套、脚本说另一套，用户会被搞糊涂。
+    """
+    try:
+        qq = QQWindow(cfg or load_config())
+        return qq.diagnose_attach()
+    except Exception as exc:
+        return EC.wrap(exc, "E-UIA-002").code, {"异常": f"{type(exc).__name__}: {exc}"}
 
 
 def input_test(cfg: dict, text: str) -> int:
@@ -2130,11 +3540,14 @@ def input_test(cfg: dict, text: str) -> int:
 
     qq = QQWindow(cfg)
     if not qq.attach():
-        print("[X] 找不到**可见**的 QQ 主窗口（请把目标会话窗口显示出来）。")
+        code, ctx = qq.diagnose_attach()
+        diag(code, "无法附着到 QQ 窗口", ctx)
         return 2
     print(f"\n[窗口] title={qq.dialog_title!r}  群聊={qq.is_group}  群人数={qq.member_count}")
     if qq.editor is None:
-        print("[X] 找不到输入框（ExEditor-qq-msg-editor）。")
+        diag("E-UIA-004", "找不到输入框（ExEditor-qq-msg-editor）",
+                    {"消息列表": qq.ml_list is not None,
+                     "窗口可见": _visible(qq.win) if qq.win else False})
         return 2
     print(f"[输入框] class={_cls(qq.editor)!r}")
     print(f"[前台]   QQ 在前台 = {qq.is_foreground()}  (QQ hwnd={qq.hwnd}, 当前前台 hwnd={_fg_hwnd()})")
@@ -2142,10 +3555,9 @@ def input_test(cfg: dict, text: str) -> int:
 
     print(f"\n[1] 写入文本：{text!r}")
     if not qq.type_text(text):
-        print("[X] 写入失败 —— 常见原因：")
-        print("    · 上面 [前台] 显示 False：进程没抢到前台权限。")
-        print("      从你自己的终端启动即可（子进程才被允许抢前台），别用后台/服务方式启动。")
-        print("    · QQ 窗口被别的窗口完全挡住了。")
+        # type_text 内部已经打过带码的诊断了（前台/剪贴板/输入框各自独立），
+        # 这里只补一句「怎么把上面的码用起来」，不重复报同一件事。
+        print("\n  ↑ 上面那条带错误码的报错就是根因；按它的「怎么办」处理。")
         return 2
     time.sleep(0.4)
 
@@ -2155,7 +3567,7 @@ def input_test(cfg: dict, text: str) -> int:
 
     print(f"[3] 写入后 发送按钮禁用 = {qq._send_disabled()}")
     if not qq.wait_send_enabled(1.0):
-        print("    ⚠️ 发送按钮仍是禁用态 —— 文本可能没真的进输入框")
+        print(f"    [!] {diag_line('E-SEND-002')}")
 
     # type_text 已经把焦点还给你了，这里要清空就得再借一次前台，清完立刻归还
     prev_fg = _fg_hwnd()
@@ -2167,7 +3579,13 @@ def input_test(cfg: dict, text: str) -> int:
     print(f"[4] 清空输入框 = {cleared}，发送按钮禁用 = {qq._send_disabled()}")
 
     ok = got == text
-    print("\n结论：输入链路 " + ("正常 ✅（以上全程未发送任何消息）" if ok else "异常 ❌"))
+    if ok:
+        print("\n结论：输入链路正常 ✅（以上全程未发送任何消息）")
+    else:
+        print("\n结论：输入链路异常 ❌")
+        diag("E-SEND-003",
+                    "写入的内容没能原样出现在输入框里",
+                    {"期望": clip(text, 40), "实际": clip(got, 40), "清空成功": cleared})
     return 0 if ok else 1
 
 
@@ -2180,9 +3598,8 @@ def peek(cfg: dict, limit: int = 12) -> int:
 
     qq = QQWindow(cfg)
     if not qq.attach():
-        print("[X] 找不到**可见**的 QQ 主窗口。")
-        print("    注意：窗口缩在托盘里时 Chromium 不构建无障碍树，读到的是空壳。")
-        print("    请把 QQ 主窗口显示在屏幕上并停在目标会话，再重试。")
+        code, ctx = qq.diagnose_attach()
+        diag(code, "无法附着到 QQ 窗口", ctx)
         return 2
 
     print(f"\n[窗口] title={qq.dialog_title!r}  群聊={qq.is_group}  群人数={qq.member_count}")
@@ -2198,9 +3615,17 @@ def peek(cfg: dict, limit: int = 12) -> int:
 
     msgs = qq.read_messages(limit=limit)
     if not msgs:
-        print("\n[X] 没读到任何消息条目。可能原因：")
-        print("    - 当前没有打开任何会话（请点进一个聊天窗口）")
-        print("    - QQ 未带 --force-renderer-accessibility 启动")
+        # 「没读到消息」有三种完全不同的原因，这里按**已有的现场数据**分流：
+        # 锚点缺失说明无障碍树整体没暴露；锚点齐全说明只是当前会话是空的。
+        if qq.ml_list is None or qq.editor is None:
+            diag("E-QQ-004", "锚点定位失败，无障碍树像是空壳",
+                        {"消息列表": qq.ml_list is not None,
+                         "输入框": qq.editor is not None,
+                         "窗口": _cls(qq.win) if qq.win else "(无)"})
+        else:
+            diag("E-QQ-007", "锚点都在，但消息区里没有消息条目",
+                        {"标题": qq.dialog_title or "(空)",
+                         "建议": "确认 QQ 停在某个**有聊天记录**的会话上，而不是空的会话或设置页"})
         return 1
 
     print(f"\n共解析 {len(msgs)} 条（文档顺序 = 时间顺序）：")
@@ -2232,12 +3657,13 @@ def send_once(cfg: dict, text: str, force: bool = False) -> int:
 
     qq = QQWindow(cfg)
     if not qq.attach():
-        print("[X] 找不到**可见**的 QQ 主窗口（请把目标会话窗口显示出来）。")
+        code, ctx = qq.diagnose_attach()
+        diag(code, "无法附着到 QQ 窗口", ctx)
         return 2
 
     print(f"\n[窗口] title={qq.dialog_title!r}  群聊={qq.is_group}  群人数={qq.member_count}")
     if qq.is_group and cfg["chat"].get("private_chat_only") and not force:
-        print("\n[X] config 里 private_chat_only=true，已拒绝在群聊里发送。")
+        print("\n[!] config 里 private_chat_only=true，已拒绝在群聊里发送。")
         print("    要放开：把 config.json 的 chat.private_chat_only 改成 false，或临时加 --force。")
         return 2
 
@@ -2252,7 +3678,81 @@ def send_once(cfg: dict, text: str, force: bool = False) -> int:
         for m in newest:
             mark = {"me": "我方", "other": "对方", "unknown": "未知"}.get(m.direction, m.direction)
             print(f"    【{mark}】{m.sender or '(无昵称)'}: {clip(m.content, 50)}")
+    else:
+        # send_text 内部每一处失败都已经带了独立的码（前台/剪贴板/按钮/回读），
+        # 这里只说清「返回 False ≠ 发了又失败」，避免用户以为消息已经发出去一半了。
+        print("\n  ↑ 上面那条带错误码的报错就是根因。")
+        print("    本条**没有发出任何内容**（失败都发生在按下发送之前，输入框已被清空）。")
     return 0 if ok else 1
+
+
+def _rot_path(cfg: dict) -> str:
+    """轮转状态文件路径（相对路径按脚本所在目录解析）。"""
+    path = (cfg.get("discovery") or {}).get("state_file") or "state/rotation.json"
+    return path if os.path.isabs(path) else os.path.join(HERE, path)
+
+
+def scan_sessions(cfg: dict) -> int:
+    """
+    只读诊断：打印「发现」视图 —— 会话列表 / 未读徽标 / 指纹与快照的差异。
+
+    **完全不点击、不切换会话、不发送。** 想看切换行为请用 `--no-send` 彩排。
+    """
+    import qqid
+    desc, hwnd = qqid.find_qq_main_window()
+    if not hwnd:
+        # 走与常驻完全相同的分流逻辑：QQ 没启动 / 窗口不可见 / 无障碍没生效
+        probe = QQWindow(cfg)
+        code, ctx = probe.diagnose_attach()
+        diag(code, "没找到可用的 QQ 主窗口", ctx)
+        return 2
+    win = control_from_hwnd(hwnd)
+    try:
+        cards = qqid.list_sessions(win)
+    except Exception as exc:
+        diag(EC.wrap(exc, "E-UIA-002").code, "读会话列表失败",
+                    {"异常": f"{type(exc).__name__}: {exc}"})
+        return 1
+    if not cards:
+        diag("E-QQ-007", "会话列表为空",
+                    {"建议": "确认 QQ 当前停在「消息」标签页（不是联系人/设置页）",
+                     "无障碍": "若刚重启过 QQ，稍等几秒让列表渲染完"})
+        return 1
+
+    cur = qqid.header_title(win)
+    rot = RotationState(_rot_path(cfg))
+    d = cfg.get("discovery") or {}
+    print("=" * 90)
+    print("发现视图（只读：不点击、不切会话、不发送）")
+    print("=" * 90)
+    print(f"发现开关={d.get('enabled')}  扫描间隔={d.get('scan_interval_seconds')}s  "
+          f"单轮上限={d.get('max_enqueue_per_scan')}  "
+          f"红点触发={d.get('trigger_on_unread')}  摘要触发={d.get('trigger_on_preview_change')}")
+    print(f"当前打开 = {cur!r}（发现会跳过它，交给实时路径）")
+    print(f"状态文件 = {_rot_path(cfg)}")
+    print(f"  已建基线 {len(rot.baselined)} 个：{sorted(rot.baselined)[:6]}"
+          f"{' …' if len(rot.baselined) > 6 else ''}")
+    print("-" * 90)
+    print(f"{'#':>2}  {'会话':<28}{'未读':>4} {'类型':>4}  {'判断'}")
+    for s in cards:
+        old = rot.fp_of(s.key)
+        fp = s.fingerprint()
+        if cur and s.display_name == cur:
+            verdict = "当前打开 → 跳过（实时路径负责）"
+        elif old is None:
+            verdict = "首见 → 只记快照，本轮不动作"
+        elif old == fp:
+            verdict = "无变化"
+        elif s.unread > 0:
+            verdict = f"★红点触发（未读 {old[1]} → {fp[1]}）"
+        else:
+            verdict = "摘要变化触发（兜底）"
+        print(f"{s.index:>2}  {s.display_name[:28]:<28}{s.unread:>4} "
+              f"{'群聊' if s.looks_group else '私聊':>4}  {verdict}")
+    print("-" * 90)
+    print("提示：首见会话只记快照不动作，所以**第一次跑起来时不会立刻回历史未读**；")
+    print("     之后再来的新消息才会触发。这也正是重启后要保留指纹快照的原因。")
+    return 0
 
 
 def main() -> int:
@@ -2261,6 +3761,8 @@ def main() -> int:
     ap.add_argument("--replay", metavar="TEXT", help="不开 QQ，回放一条消息看模型会怎么回")
     ap.add_argument("--peek", type=int, nargs="?", const=12, default=None, metavar="N",
                     help="只读诊断：解析并打印最近 N 条消息（默认 12），不发送任何内容")
+    ap.add_argument("--sessions", action="store_true",
+                    help="只读诊断：打印「发现」视图（会话列表/未读徽标/指纹变化），不点击不发送")
     ap.add_argument("--input-test", nargs="?", const="输入框测试文本 ABC123，不会发送",
                     default=None, metavar="TEXT",
                     help="只验证能不能把文字写进输入框：写入→回读→清空，绝不发送")
@@ -2270,6 +3772,8 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="与 --send 配合，允许在群聊里发送")
     ap.add_argument("--once", action="store_true", help="只跑一轮就退出（调试用；会跳过防抖直接结算）")
     ap.add_argument("--dry-run", action="store_true", help="只读不发，确认读取是否准确")
+    ap.add_argument("--no-send", action="store_true",
+                    help="彩排：走完整链路（切会话 → 三重复核 → 生成回复），但最后一步不真的发出")
     ap.add_argument("--config", default=CONFIG_PATH, help="配置文件路径")
     args = ap.parse_args()
 
@@ -2284,6 +3788,8 @@ def main() -> int:
         return replay(cfg, args.replay)
     if args.peek is not None:
         return peek(cfg, args.peek)
+    if args.sessions:
+        return scan_sessions(cfg)
     if args.input_test is not None:
         return input_test(cfg, args.input_test)
     if args.send is not None:
@@ -2293,21 +3799,23 @@ def main() -> int:
     if args.forget is not None:
         return forget(cfg, args.forget)
 
-    agent = Agent(cfg, dry_run=args.dry_run)
+    agent = Agent(cfg, dry_run=args.dry_run, no_send=args.no_send)
     if args.once:
         if not agent.qq.attach():
-            log("ERR", "找不到 QQ 窗口。")
+            code, ctx = agent.qq.diagnose_attach()
+            report(code, "无法附着到 QQ 窗口", ctx=ctx)
             return 2
         agent.scope = agent.current_scope()
         kept = agent.qq.baseline(skip_last=1)
         log("INFO", f"已附着（{agent.qq.dialog_title!r}，群聊={agent.qq.is_group}）")
         log("INFO", f"忽略 {kept} 条历史，只把最新 1 条当作新消息（调试模式：跳过防抖，立即结算）")
         log("INFO", f"当前会话 {agent.scope}，上下文 {len(agent.store.history(agent.scope))} 条")
-        if not agent.dry_run:
-            log("WARN", "未加 --dry-run，会真的回复并发送！建议先加 --dry-run")
+        if not agent.dry_run and not agent.no_send:
+            log("WARN", "未加 --dry-run / --no-send，会真的回复并发送！建议先加 --no-send 彩排")
         handled = agent.step()
         log("INFO", f"本轮入队 {handled} 条")
         agent.flush(force=True)
+        agent.serve_queue()
         agent.store.save(force=True)
         print("\n最近 3 条解析结果：")
         for m in agent.qq.read_messages(limit=3):

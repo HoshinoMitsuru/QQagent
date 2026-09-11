@@ -16,5 +16,21 @@ pc-agent-demo/secrets.local.json
 pc-agent-demo/state/
 pc-agent-demo/*.json.bad
 
+# ---- 控制台壳（exe）相关的构建产物与运行时数据 ----
+# 构建中间件与产物：可重新生成，不入库（exe 有几十 MB）
+pc-agent-demo/build/
+pc-agent-demo/dist/
+pc-agent-demo/*.spec.bak
+# 打包用的隔离环境
+pc-agent-demo/.venv/
+# 图标是 build_icon.py 生成的，但生成结果要能随仓库走（构建时省一步）
+# 所以刻意**不**忽略 pc-agent-demo/app/assets/qq-agent.ico
+# 控制台运行期产生的东西
+pc-agent-demo/app-settings.json
+pc-agent-demo/logs/
+pc-agent-demo/config.backup-*.json
+# 用户可能在项目目录里直接跑控制台，那会在仓库根产生一份状态目录
+/.venv/
+
 # 手机端阅读用临时 txt 副本（源文件为同名 .js）
 小清澈3.0.txt

@@ -1,0 +1,617 @@
+# -*- coding: utf-8 -*-
+"""
+error_codes.py —— 错误码目录（`agent.py` 与 `app/` 共用同一份）
+
+## 为什么要有这个文件
+
+项目早期所有失败都挤在一句话里。最典型的是这句：
+
+    找不到 QQ 窗口。请确认 QQ 已启动，且带 --force-renderer-accessibility 参数。
+
+它同时压在**三个根因**上，而三者的处理方式完全不同：
+
+| 真实根因 | 该做什么 |
+| --- | --- |
+| QQ 根本没启动 | 启动 QQ |
+| QQ 在跑，但主窗口缩在托盘 / 被最小化 | 把窗口显示出来（不必重启） |
+| QQ 在跑、窗口也可见，但没带无障碍参数 | **必须完全退出后带参重启**（参数只在首次启动生效） |
+
+报错混淆的代价不是"不够好看"，而是**把人引向错误的修复动作**：
+按这句话去重启 QQ，对第二种情况纯属白折腾（而且正在输入的字会丢）。
+
+所以这里的规矩是：**一个错误码只对应一个根因，并给出确定性的判据与对应的动作。**
+
+## 三条使用约定
+
+1. **码是稳定的**，可以出现在日志、界面、工单里；改文案不改号。
+2. **`causes` 是「怎么区分的」，不是「可能是什么」** —— 写清判据，
+   让人能自己往下一步走；泛泛的"可能是网络问题"没有价值。
+3. **`fixes` 要具体到动作**，最好能指到界面上的哪个按钮或哪条命令。
+
+## 分级
+
+    error  功能已经失败，必须处理
+    warn   降级运行 / 功能受限，可以不管但要知道
+    info   不是问题，只是提示（例如回复被长度上限截断）
+"""
+
+from __future__ import annotations
+
+import re
+import time
+
+SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
+
+_CODE_RE = re.compile(r"^E-[A-Z]{2,4}-\d{3}$")
+
+# 域 → 中文名。用于诊断报告分组，也用于自检（防止写错域前缀）。
+DOMAINS = {
+    "ENV": "环境与启动",
+    "PATH": "路径与磁盘",
+    "QQ": "QQ 发现与准入",
+    "UIA": "无障碍接口（UIA）",
+    "FG": "前台与焦点",
+    "SEND": "发送链路",
+    "LLM": "模型接入",
+    "CFG": "配置",
+    "PROC": "进程与任务",
+    "WEB": "控制台服务",
+}
+
+
+def _e(code: str, severity: str, title: str, causes: list[str], fixes: list[str]) -> dict:
+    return {"code": code, "severity": severity, "title": title,
+            "causes": causes, "fixes": fixes, "domain": code.split("-")[1]}
+
+
+CATALOG: dict[str, dict] = {}
+
+
+def _add(*items):
+    for it in items:
+        CATALOG[it["code"]] = it
+
+
+_add(
+    # ============================================================ 环境与启动
+    _e("E-ENV-001", "error", "数据目录不可写",
+       ["exe 被放在 C:\\Program Files 这类只读位置",
+        "目录被安全软件锁定",
+        "磁盘已满或路径过长"],
+       ["把 exe 移到可写目录（如 D:\\QQAgent\\）后重新启动",
+        "或让程序回退到 %LOCALAPPDATA%\\QQAgent（看日志里的「数据目录」一行）"]),
+    _e("E-ENV-002", "error", "依赖缺失",
+       ["源码模式下没装 requirements.txt",
+        "打包时隐式导入漏了（只会出现在 exe 上）"],
+       ["源码模式：pip install -r requirements.txt",
+        "exe：说明打包不完整，用 build.bat 重新构建"]),
+    _e("E-ENV-003", "warn", "没有管理员权限",
+       ["直接双击运行且拒绝了 UAC",
+        "被计划任务以普通权限拉起"],
+       ["点界面右上角「提权重启」",
+        "开机自启请用计划任务 + 最高权限（界面里的「安装自启」就是这个）",
+        "不处理也能跑，但自启注册、VM 加固、结束 QQ 进程会失败"]),
+    _e("E-ENV-004", "info", "已有一个控制台在运行",
+       ["上一次启动的实例还在（可能只剩托盘图标）"],
+       ["程序会直接把你导向那一个实例，不需要重复启动",
+        "要彻底关掉：任务栏托盘右键 → 退出 QQAgent"]),
+    _e("E-ENV-005", "error", "控制台端口被占用或无法监听",
+       ["你指定的端口被别的程序占用",
+        "监听 0.0.0.0 时被防火墙拦截",
+        "端口号不在允许范围（<1024 需要更高权限）"],
+       ["程序会自动往后找可用端口；若仍失败，在「运行环境」里换一个端口",
+        "确认没有别的东西在监听同一个端口：netstat -ano | findstr <端口>"]),
+    _e("E-ENV-006", "warn", "桌面处于锁屏状态",
+       ["Windows 锁屏 / 屏保已启动"],
+       ["读取与发现仍然可用，但切会话、写输入框、发送会全部失败",
+        "最彻底的解法是界面里的「虚拟机加固」：禁用自动锁屏与休眠",
+        "宿主机锁屏不影响虚拟机；但宿主机睡眠会挂起虚拟机"]),
+    _e("E-ENV-007", "error", "Python 版本过低",
+       ["解释器低于 3.10（用了 from __future__ annotations 之外的特性）"],
+       ["升级到 Python 3.11 或更高后重新运行"]),
+    _e("E-ENV-008", "warn", "进程位宽与目标程序不一致",
+       ["32 位 Python 读 64 位 QQ 的无障碍树（或反过来）"],
+       ["改用 64 位 Python；打包版已经是 64 位，源码模式请确认位数"]),
+
+    # ============================================================ 路径与磁盘
+    _e("E-PATH-001", "error", "文件路径无法解析",
+       ["配置里写了相对路径，但当前工作目录与预期不一致",
+        "路径含非法字符或被环境变量引用导致为空"],
+       ["配置里的相对路径一律按数据目录解析；改用绝对路径最省事",
+        "看日志里的「数据目录」一行确认实际用的是哪里"]),
+    _e("E-PATH-002", "warn", "文件不存在",
+       ["api_key_file / 缓存文件 / 配置文件还没生成",
+        "用户手动删掉了它就是不想用"],
+       ["大多数情况程序会自动创建；密钥文件缺失需要手动填一次 Key"]),
+    _e("E-PATH-003", "warn", "状态文件损坏，已重建",
+       ["写一半被强杀 / 磁盘故障导致 JSON 截断"],
+       ["程序会当作「首次运行」重建，代价是那一瞬间的未读会被吞掉",
+        "频繁出现要查磁盘或杀毒软件是否在锁文件"]),
+
+    # ============================================================ QQ 发现与准入
+    _e("E-QQ-001", "error", "找不到 QQ.exe",
+       ["QQ 装在非标准路径（本机的 D:\\QQ.exe 就是盘根）",
+        "注册表里没有安装信息（绿色版/便携版）",
+        "QQ 尚未安装"],
+       ["在「运行环境 → QQ 可执行文件」里手填完整路径",
+        "查找顺序是：手动指定 → 注册表 → 常见目录 → 各盘根目录"]),
+    _e("E-QQ-002", "error", "QQ 进程没有运行",
+       ["QQ 被完全退出（含托盘）",
+        "刚启动还在加载"],
+       ["点界面上的「启动 QQ」，它会自动带上无障碍参数",
+        "登录必须你手动完成，程序不碰登录流程"]),
+    _e("E-QQ-003", "error", "找不到可见的 QQ 主窗口",
+       ["QQ 在跑，但主窗口缩到了托盘（点关闭就是缩托盘，不是退出）",
+        "主窗口被最小化",
+        "只剩一个不可见的隐藏窗口（含登录前状态）"],
+       ["把 QQ 主窗口从托盘点出来，或点界面上的「体检」看窗口明细",
+        "最小化状态下**读取是正常的**，但点击/Invoke 会失败 —— 需要发送前先还原窗口"]),
+    _e("E-QQ-004", "error", "QQ 未以无障碍模式启动（UIA 树是空的）",
+       ["启动时没带 --force-renderer-accessibility",
+        "启动时带了参数，但 QQ 之前已经在跑，参数没被应用"],
+       ["点界面上的「重启 QQ 到可读状态」（会完全退出后带参拉起，登录态保留）",
+        "判据是「读不读得到会话列表」，不看命令行 —— 命令行会骗人"]),
+    _e("E-QQ-005", "error", "重启 QQ 失败",
+       ["杀不掉旧进程（有残留 QQ.exe / QQEX.exe）",
+        "QQ 可执行文件路径失效",
+        "没有权限结束别人的进程"],
+       ["用任务管理器确认没有 QQ.exe / QQEX.exe 残留后重试",
+        "确认「运行环境」里的 QQ 路径指向的是真实存在的文件",
+        "以管理员身份运行本程序"]),
+    _e("E-QQ-006", "warn", "CDP 端口不是 CDP",
+       ["端口被 QQ 自己的内部服务占用（例如 9211 的 JWT 服务）",
+        "QQ 启动时没带 --remote-debugging-port"],
+       ["换一个端口（如 9223）后重启 QQ",
+        "判断标准：curl http://127.0.0.1:<端口>/json/version 返回带 Browser 字段的 JSON"]),
+    _e("E-QQ-007", "error", "QQ 窗口在，但消息区锚点找不到",
+       ["QQ 版本与实测版本不同，类名变了",
+        "窗口刚渲染一半（切换会话后立刻读）",
+        "窗口被最小化导致控件矩形全为 0"],
+       ["先点「会话列表体检」看能否读到会话；能读到说明只是消息区待渲染",
+        "重试一次即可；持续失败请把控件树快照发出来比对版本差异"]),
+
+    # ============================================================ UIA
+    _e("E-UIA-001", "error", "UIA 线程未初始化（COM 公寓问题）",
+       ["在创建 COM 单例之外的其他线程里调用了 UIA",
+        "只 import 了 uiautomation 而没有做 CoInitializeEx"],
+       ["程序内部已把 UIA 调用固定到专用线程并显式初始化",
+        "若仍出现，说明有代码绕过了那条线程 —— 这是要修代码，不是改配置"]),
+    _e("E-UIA-002", "error", "UIA 调用超时",
+       ["QQ 进程卡住或正在重启",
+        "窗口被最小化后 Chromium 节流 renderer"],
+       ["等一下重试；持续超时请重启 QQ",
+        "确认窗口没有被最小化（读取不受影响，但某些调用会被节流）"]),
+    _e("E-UIA-003", "warn", "控件不支持所需的 Pattern",
+       ["QQ 版本变化，控件实现改了",
+        "目标元素不是可交互控件"],
+       ["程序会自动退回「坐标点击」兜底（需要前台）",
+        "若兜底也失败，请记录该控件的 ClassName / ControlType 后反馈"]),
+    _e("E-UIA-004", "error", "界面锚点定位失败",
+       ["输入框 / 发送按钮的类名与实测版本不同",
+        "当前不在聊天页面（在设置页、好友列表页）"],
+       ["确认 QQ 停在某个会话的聊天界面",
+        "在控制台点「自检」与「只读诊断」，把输出发出来对齐类名"]),
+
+    # ============================================================ 前台与焦点
+    _e("E-FG-001", "error", "抢前台失败",
+       ["当前进程没有前台权限（被计划任务/服务/SSH 拉起）",
+        "前台被一个「总是置顶」的程序占着（任务管理器、输入法候选框）",
+        "桌面已锁屏 —— 输入桌面切到了 Winlogon，此时抢前台不可能成功"],
+       ["从你自己的交互式终端启动，或双击 exe（不要用计划任务起交互进程）",
+        "先解锁桌面；确认没有置顶窗口挡着",
+        "这是硬约束：Windows 只允许有输入焦点归属的交互式进程调用 SetForegroundWindow，失败时**不报错**"]),
+    _e("E-FG-002", "warn", "聚焦后 QQ 又不在前台",
+       ["别的程序在这几十毫秒内抢走了焦点",
+        "锁屏或 UAC 提示弹出"],
+       ["程序会主动放弃本次输入（一个键都不发），这是**正确的保护**",
+        "减少后台打扰后重试"]),
+    _e("E-FG-003", "warn", "前台窗口归还失败",
+       ["系统拒绝了 SetForegroundWindow",
+        "归还目标窗口已经被关闭"],
+       ["属已知限制，不影响功能正确性（只是 QQ 会留在最上层）",
+        "把「用完后归还前台」保持开启；关掉它只会让情况更差"]),
+    _e("E-FG-004", "error", "切换会话后标题没变",
+       ["窗口被最小化 —— Invoke 在 Chromium 节流下会**静默失效**",
+        "InvokePattern 不被支持，且坐标点击打偏了",
+        "目标会话不存在了（被删好友/退群）"],
+       ["先把窗口还原（SW_RESTORE）再切",
+        "程序会先试 Invoke（免前台），失败才退回坐标点击（需前台）",
+        "确认目标会话还在列表里"]),
+
+    # ============================================================ 发送链路
+    _e("E-SEND-001", "error", "剪贴板写入失败",
+       ["另一个程序正占着剪贴板（剪贴板管理器、远程桌面、Office）",
+        "pyperclip 缺失"],
+       ["关掉剪贴板历史/同步类工具后重试",
+        "源码模式确认已装 pyperclip（缺了会退化为 UIA ValuePattern，能力受限）"]),
+    _e("E-SEND-002", "error", "发送按钮仍是禁用态",
+       ["文本没有真正进输入框（粘贴被打断）",
+        "输入框里只剩空白"],
+       ["先点「输入框写入测试」定位是写入还是按钮的问题",
+        "确认输入框没有被 QQ 的敏感词/长度限制拦下"]),
+    _e("E-SEND-003", "error", "输入框回读与预期不符",
+       ["粘贴过程中用户手动改了输入框",
+        "输入框里有残留内容没被清干净",
+        "输入法还在组字状态"],
+       ["自动化运行期间不要在 QQ 里手动编辑那个输入框",
+        "先点「输入框写入测试」跑一次，确认「写入→回读」这一段是否稳定",
+        "关掉会抢占输入焦点的输入法候选框，再重试"]),
+    _e("E-SEND-004", "error", "身份复核失败：会话标题不符",
+       ["切换会话没成功（见 E-FG-004）",
+        "用户手动切到了别的会话",
+        "对方改了备注名"],
+       ["程序会拒发并重排，这是**防发错人**的第一道闸",
+        "先解决切换会话的问题（看 E-FG-004 的说明），再看这一条是否还会出现",
+        "若是对方改了备注名，按新名字重新取一次号"]),
+    _e("E-SEND-005", "error", "身份复核失败：QQ 号不符",
+       ["切换会话切到了「同名的另一个人」",
+        "缓存里的昵称 → QQ 号映射过期"],
+       ["程序会**拒绝发送**，这是最严重的一类，绝不能降级处理",
+        "跑一次「给所有会话取号」，把昵称与 QQ 号的映射刷新一遍",
+        "若同名确实存在，把备注名改成可区分的写法再重新取号"]),
+    _e("E-SEND-006", "error", "会话签名在写入前后发生了变化",
+       ["模型生成/写入期间，有人手动切换了会话",
+        "切换后渲染未完成就去读了签名"],
+       ["自动化运行期间尽量不要手动操作 QQ 的会话列表",
+        "把「多会话发现」的单轮最多入队调小（默认 3），减少同一时刻的切换次数",
+        "程序已中止本次发送并清空输入框，不需要额外处理"]),
+    _e("E-SEND-007", "warn", "取不到该会话的 QQ 号，降级为仅按昵称复核",
+       ["该会话没有做过「取号」",
+        "资料卡通路在当前版本上读不到"],
+       ["跑一次「给所有会话取号」",
+        "降级状态下有重名风险，日志里会明确记 WARN"]),
+    _e("E-SEND-008", "error", "发送按钮 Invoke 失败",
+       ["按钮控件在切换会话后变成了陈旧引用",
+        "Pattern 不支持且没有可用的兜底按键"],
+       ["程序会重新扫描布局后重试一次",
+        "持续失败请点「输入框写入测试」确认链路是否还正常"]),
+    _e("E-SEND-009", "warn", "发送重试次数用尽，已撤单",
+       ["复核连续失败（身份不符 / 签名变化 / 切不过去）"],
+       ["程序放弃这一条，不会无限重排（避免把队列堵死）",
+        "看日志里这一条具体卡在哪道闸，按对应错误码处理"]),
+
+    # ============================================================ 模型接入
+    _e("E-LLM-001", "error", "没有可用的 API Key",
+       ["config.json 的 llm.api_key 为空，且 secrets.local.json 里也没有",
+        "api_key_file 指向的文件不存在"],
+       ["在界面「模型接入 → API Key」里填一次，保存",
+        "Key 只会写进 secrets.local.json（不进仓库、不进截图）"]),
+    _e("E-LLM-002", "error", "连不上模型接口",
+       ["网络不通 / DNS 解析失败",
+        "公司或虚拟机网络需要代理",
+        "接口地址写错（多了路径、少了协议头）"],
+       ["在虚拟机里先确认能访问外网：curl <api_base>",
+        "检查「运行环境」里的接口地址是不是 https://api.deepseek.com 这种形式"]),
+    _e("E-LLM-003", "error", "模型请求超时",
+       ["网络慢或接口排队",
+        "max_tokens 太大导致生成时间长"],
+       ["把「超时」调大（默认 60 秒）",
+        "或把「单次最大长度」调小"]),
+    _e("E-LLM-004", "error", "密钥无效或无权（401/403）",
+       ["Key 写错、过期、被撤销",
+        "Key 与接口地址不匹配（拿 A 家的 Key 调 B 家）"],
+       ["重新粘贴 Key（注意不要带空格和引号）",
+        "确认接口地址和 Key 属于同一家服务商"]),
+    _e("E-LLM-005", "error", "接口地址或模型名不对（404）",
+       ["模型名拼错（例如 deepseek-flash 与 deepseek-chat 不通用）",
+        "接口地址多了或少了 /v1"],
+       ["在「模型接入」里核对模型名与接口地址",
+        "先用「自检」按钮验证，它会明确报出是地址问题还是模型问题"]),
+    _e("E-LLM-006", "error", "被限流或额度用尽（429）",
+       ["请求过于频繁",
+        "账户余额/额度耗尽"],
+       ["调大「最小 LLM 间隔」与「每分钟最多回复」",
+        "登录服务商控制台查看额度"]),
+    _e("E-LLM-007", "error", "模型服务端错误（5xx）",
+       ["服务商临时故障"],
+       ["稍后重试；程序会把这一条留在历史里，下一轮仍会带上上下文"]),
+    _e("E-LLM-008", "error", "模型响应结构异常",
+       ["返回体里没有 choices（多半是被网关/代理改写）",
+        "接口地址指向的不是 OpenAI 兼容接口"],
+       ["确认接口地址是 OpenAI 兼容的 /chat/completions",
+        "把日志里截取的响应片段发出来"]),
+    _e("E-LLM-009", "warn", "模型返回了空内容",
+       ["模型被判定了不该说话 / 触发了安全策略",
+        "max_tokens 太小，被截成空串"],
+       ["本条不再重试；下一轮会带上完整上下文重来",
+        "适当调大「单次最大长度」"]),
+    _e("E-LLM-010", "info", "回复触发了长度上限，已截断",
+       ["回复超过「回复字数上限」"],
+       ["这是预期行为；觉得截得太狠就调大那个上限",
+        "也可以把人格设定里的「一次回复不超过三句话」写得更明确"]),
+
+    # ============================================================ 配置
+    _e("E-CFG-001", "warn", "配置文件解析失败，已使用内置默认值",
+       ["config.json 有 JSON 语法错误（多逗号、少了引号）",
+        "文件被编辑器写成带 BOM 的编码"],
+       ["用界面的「恢复默认值」重建，或手工修掉语法错误",
+        "程序会明确报出出错位置（行列号）"]),
+    _e("E-CFG-002", "warn", "参数被夹到了合法范围",
+       ["填了超范围的数值（例如温度 5.0）"],
+       ["这是保护：不会让非法值进去；想用别的值请填范围内的数"]),
+    _e("E-CFG-003", "warn", "风控两项参数互相压制",
+       ["「每分钟最多回复」与「两次回复最小间隔」配出了互相矛盾的组合"],
+       ["二者取更严格者生效，你填的每分钟条数不会达到",
+        "想提高速率，两个数要同时放宽"]),
+    _e("E-CFG-004", "error", "接口地址格式不对",
+       ["缺少 http:// 或 https:// 前缀"],
+       ["在「模型接入 → 接口地址」里补上协议头，例如 https://api.deepseek.com",
+        "地址末尾不要带 /chat/completions（程序会自己拼上）"]),
+    _e("E-CFG-005", "info", "配置缺少某些段，已用默认值补齐",
+       ["手改 config.json 时删掉了整段"],
+       ["不需要处理；内置默认值会补上",
+        "程序在保存时会保留你的注释键，不会整体重写"]),
+    _e("E-CFG-006", "error", "配置保存失败",
+       ["数据目录不可写（见 E-ENV-001）",
+        "磁盘空间不足（读取正常，只在写入时才报）"],
+       ["把 exe 移到可写目录后重试",
+        "保存前程序会自动备份，失败不会破坏原配置"]),
+    _e("E-CFG-007", "error", "必填项为空或不合法",
+       ["该字段为空，或填了明显不可能生效的值"],
+       ["按界面上的提示把这一项补全再保存",
+        "程序只会拦下「必然坏事」的输入，不会对风格挑刺"]),
+
+    # ============================================================ 进程与任务
+    _e("E-PROC-001", "warn", "已有同类任务在运行",
+       ["同一个任务被点了两次",
+        "上一次还没跑完"],
+       ["等它结束再点；会碰 QQ 的任务必须串行，这是安全约束不是性能问题",
+        "若确实卡住了，在该任务的卡片上点「中止」，或直接停止常驻后重试"]),
+    _e("E-PROC-002", "warn", "常驻运行时不允许执行该任务",
+       ["该任务会切换会话并写输入框",
+        "常驻随时可能因为收到新消息去切会话"],
+       ["先「停止常驻」，执行完再启动",
+        "只读类任务（自检/只读诊断/看上下文）不受此限制"]),
+    _e("E-PROC-003", "error", "任务缺少必需参数",
+       ["必填参数留空（例如「真发一条」没有填要发送的内容）"],
+       ["按提示把参数填上再执行"]),
+    _e("E-PROC-004", "error", "子进程启动失败",
+       ["exe 被移动或删除",
+        "解释器路径失效（源码模式）",
+        "系统资源不足"],
+       ["重新启动控制台",
+        "源码模式确认 python 路径可用"]),
+    _e("E-PROC-005", "warn", "优雅退出超时，已强制结束",
+       ["主循环卡在某次 UIA 调用里（QQ 无响应）"],
+       ["队列里未发出的回复会保留在磁盘上，下次启动仍在",
+        "如果经常出现，检查 QQ 是否频繁卡顿"]),
+    _e("E-PROC-006", "warn", "子进程以非零码退出",
+       ["任务本身失败（看它前面的输出）"],
+       ["日志里该任务上方的第一条 ERR 才是根因，按那个错误码处理"]),
+
+    # ============================================================ 控制台服务
+    _e("E-WEB-001", "error", "访问令牌无效",
+       ["手工改了地址栏里的令牌",
+        "控制台重启过（令牌每次启动都换）"],
+       ["从托盘菜单「打开控制台界面」重新打开",
+        "令牌每次启动随机生成，首屏 HTML 也必须带令牌才能打开"]),
+    _e("E-WEB-002", "error", "连不上控制台服务",
+       ["控制台程序已经退出",
+        "直接在文件系统里打开了 index.html"],
+       ["双击 qq-agent.exe，用它自动打开的那个地址访问",
+        "只看界面不跑后端时，页面会显示这条提示而不是空白"]),
+    _e("E-WEB-003", "error", "接口内部异常",
+       ["程序 bug 或环境异常"],
+       ["看日志里该请求附近的堆栈",
+        "用「诊断报告」导出完整环境信息再反馈"]),
+)
+
+
+# ============================================================ 查询接口
+def get(code: str) -> dict:
+    """取一条错误定义。未知码返回一个占位定义（不抛异常 —— 报错本身不该再报错）。"""
+    item = CATALOG.get(code)
+    if item:
+        return item
+    return {"code": code or "E-XXX-000", "severity": "error",
+            "title": "未知错误码", "causes": [], "fixes": [], "domain": "XXX"}
+
+
+def title(code: str) -> str:
+    return get(code)["title"]
+
+
+def severity(code: str) -> str:
+    return get(code)["severity"]
+
+
+def one_line(code: str) -> str:
+    """`E-QQ-004 QQ 未以无障碍模式启动（UIA 树是空的）` —— 适合塞在日志第一行。"""
+    it = get(code)
+    return f"{it['code']} {it['title']}"
+
+
+def describe(code: str, detail: str = "", context: dict | None = None) -> str:
+    """
+    生成多行诊断块。这是**给人看的主输出**，格式固定：
+
+        [ERR] E-QQ-004 QQ 未以无障碍模式启动（UIA 树是空的）
+              判据：读不到会话列表，但 QQ 进程与窗口都正常
+              最可能：启动时没带无障碍参数（或参数没被应用）
+              怎么办：点「重启 QQ 到可读状态」
+              详情：session_count=0  window=Chrome_WidgetWin_1
+    """
+    it = get(code)
+    lines = [f"{it['code']} {it['title']}"]
+    for c in it["causes"][:3]:
+        lines.append(f"  可能原因：{c}")
+    for f in it["fixes"][:3]:
+        lines.append(f"  怎么办　：{f}")
+    if context:
+        kv = "  ".join(f"{k}={v}" for k, v in context.items() if v not in (None, ""))
+        if kv:
+            lines.append(f"  现场数据：{kv}")
+    if detail:
+        lines.append(f"  详情　　：{str(detail)[:400]}")
+    return "\n".join(lines)
+
+
+# ============================================================ 异常类型
+class AppError(Exception):
+    """
+    带错误码的异常。
+
+    `str(exc)` 给的是**单行**摘要（适合塞进日志前缀），
+    `exc.detail()` 给的是多行诊断块（适合直接打印）。
+    """
+
+    def __init__(self, code: str, detail: str = "", context: dict | None = None):
+        self.code = code
+        self.detail_text = detail
+        self.context = context or {}
+        super().__init__(one_line(code) + (f"：{detail}" if detail else ""))
+
+    def detail(self) -> str:
+        return describe(self.code, self.detail_text, self.context)
+
+    def to_dict(self) -> dict:
+        it = get(self.code)
+        return {"ok": False, "code": self.code, "severity": it["severity"],
+                "error": it["title"],
+                "hint": (it["fixes"][0] if it["fixes"] else ""),
+                "causes": it["causes"], "fixes": it["fixes"],
+                "detail": str(self.detail_text)[:800],
+                "context": {k: str(v) for k, v in self.context.items()}}
+
+
+def wrap(exc: BaseException | None, default: str) -> AppError:
+    """
+    把原生异常映射成带码的 AppError。
+
+    只做**能确定的**映射：宁可返回 default，也不要瞎猜一个码 ——
+    错误的错误码比没有错误码更坏（它会把排查引向错误方向）。
+    """
+    if isinstance(exc, AppError):
+        return exc
+
+    name = type(exc).__name__
+    text = str(exc)
+
+    # requests 家族
+    if name in ("ConnectTimeout",):
+        return AppError("E-LLM-003", f"连接超时：{text}")
+    if name in ("ReadTimeout", "Timeout", "TimeoutError"):
+        return AppError("E-LLM-003", f"读取超时：{text}")
+    if name in ("ConnectionError", "NewConnectionError", "MaxRetryError", "ProxyError"):
+        return AppError("E-LLM-002", f"连接失败：{text}")
+    if name == "SSLError":
+        return AppError("E-LLM-002", f"TLS 握手失败：{text}")
+    if name in ("JSONDecodeError",):
+        return AppError("E-LLM-008", f"响应不是合法 JSON：{text}")
+
+    # 文件系统
+    if name in ("PermissionError", "FileNotFoundError", "OSError") and \
+            ("Permission denied" in text or "拒绝访问" in text):
+        return AppError("E-PATH-001", text)
+    if name == "PermissionError":
+        return AppError("E-ENV-001", text)
+    if name == "UnicodeDecodeError":
+        return AppError("E-PATH-003", f"文件编码异常：{text}")
+
+    # COM / UIA
+    if "CoInitialize" in text or "UIAutomationCore" in text:
+        return AppError("E-UIA-001", text)
+    if "Event loop" in text or name == "TimeoutExpired":
+        return AppError("E-UIA-002", text)
+
+    return AppError(default, f"{name}: {text}")
+
+
+# ============================================================ 错误抑制器
+class Throttle:
+    """
+    同一个错误码在时间窗内只输出一次**完整**诊断。
+
+    ## 为什么必须有
+
+    常驻循环是每 ~0.8 秒一轮。一旦某个错误是持续性的（比如 QQ 被最小化、
+    锁屏、切不过去），日志会以每秒一条多的速度重复同一句话 ——
+    几分钟就把日志刷成几万行，**真正有价值的信息（第一现场）被埋掉**，
+    而且界面上的日志面板也彻底没法看。
+
+    这里的行为：
+      - 窗口内第一次出现：输出完整诊断块
+      - 窗口内的后续出现：静默计数（不输出）
+      - 窗口过期后再次出现：输出一行「同一问题已重复 N 次」+ 完整块
+
+    另外提供 `note()` 给"仅统计不输出"的场合。
+    """
+
+    def __init__(self, window: float = 60.0):
+        self.window = window
+        self._last: dict[str, float] = {}
+        self._count: dict[str, int] = {}
+        self._suppressed: dict[str, int] = {}
+
+    def should_emit(self, code: str, now: float | None = None) -> tuple[bool, int]:
+        """返回 (是否该输出, 上次到这次之间被抑制的次数)。"""
+        now = time.time() if now is None else now
+        last = self._last.get(code)
+        if last is None or (now - last) >= self.window:
+            suppressed = self._suppressed.pop(code, 0)
+            self._last[code] = now
+            self._count[code] = self._count.get(code, 0) + 1
+            return True, suppressed
+        self._suppressed[code] = self._suppressed.get(code, 0) + 1
+        return False, 0
+
+    def stats(self) -> dict:
+        return {c: {"total": self._count.get(c, 0),
+                    "suppressed": self._suppressed.get(c, 0),
+                    "last": self._last.get(c, 0.0)}
+                for c in set(list(self._count) + list(self._suppressed))}
+
+    def reset(self) -> None:
+        self._last.clear()
+        self._count.clear()
+        self._suppressed.clear()
+
+
+# ============================================================ 自检
+def audit() -> list[str]:
+    """
+    目录自身的完整性检查。返回问题列表（空 = 健康）。
+
+    这是给测试和「诊断报告」用的：错误码写错了域、少了 fixes，
+    会让排查在最需要的时候失效 —— 所以它自己也得被测。
+    """
+    problems: list[str] = []
+    for code, it in CATALOG.items():
+        if not _CODE_RE.match(code):
+            problems.append(f"{code}: 编号格式不合法（应为 E-DOMAIN-000）")
+        if it["code"] != code:
+            problems.append(f"{code}: 内部 code 字段与键不一致")
+        if it["domain"] not in DOMAINS:
+            problems.append(f"{code}: 未知域 {it['domain']}")
+        if it["severity"] not in SEVERITY_ORDER:
+            problems.append(f"{code}: 未知严重级别 {it['severity']}")
+        if not it["title"].strip():
+            problems.append(f"{code}: 缺 title")
+        if not it["causes"]:
+            problems.append(f"{code}: 缺 causes（必须写清判据）")
+        if not it["fixes"]:
+            problems.append(f"{code}: 缺 fixes（必须给出动作）")
+        for text in it["causes"] + it["fixes"]:
+            if len(text.strip()) < 6:
+                problems.append(f"{code}: 有过短的说明 {text!r}（要具体到判据/动作）")
+    return problems
+
+
+if __name__ == "__main__":
+    problems = audit()
+    print(f"错误码总数：{len(CATALOG)}")
+    by_domain: dict[str, int] = {}
+    for it in CATALOG.values():
+        by_domain[it["domain"]] = by_domain.get(it["domain"], 0) + 1
+    for d, n in sorted(by_domain.items()):
+        print(f"  {d:5s} {DOMAINS[d]:14s} {n:2d} 条")
+    print()
+    if problems:
+        print(f"[X] 目录自检发现 {len(problems)} 个问题：")
+        for p in problems:
+            print(f"  - {p}")
+    else:
+        print("[OK] 目录自检通过")
+    print()
+    print("示例：")
+    print(describe("E-QQ-004"))

@@ -39,6 +39,9 @@ def make_cfg(tmpdir: str) -> dict:
     """一份完全不联网、状态写到临时目录的配置。"""
     cfg = A._deep_merge(A.DEFAULTS, {
         "persist": {"file": os.path.join(tmpdir, "conversations.json")},
+        # 轮转状态也要隔离：它会记「哪些会话建过基线」，
+        # 写到真实文件里会污染下一次运行（实测踩过）。
+        "discovery": {"state_file": os.path.join(tmpdir, "rotation.json")},
     })
     cfg["llm"]["system_prompt"] = "（测试用 system prompt）"
     return cfg
@@ -207,16 +210,24 @@ class FakeQQ:
         self.member_count = 0
         self.ml_list = object()
         self._msgs: list[A.Message] = []
-        self._seen: set[str] = set()
+        self._seen: dict[str, set] = {}     # scope -> 已读 key 集合（与真实实现一样按会话隔离）
+        self.win = None                      # 发现路径不用它（本测试不跑 discover）
 
     def refresh_layout(self, force: bool = False) -> None:
         pass
 
-    def baseline(self, skip_last: int = 0) -> int:
-        n = len(self._msgs)
-        for m in self._msgs:
-            self._seen.add(m.key)
-        return n
+    def _seen_of(self, scope: str = "") -> set:
+        return self._seen.setdefault(scope or "", set())
+
+    def has_seen(self, scope: str = "") -> bool:
+        return (scope or "") in self._seen
+
+    def baseline(self, skip_last: int = 0, scope: str = "") -> int:
+        target = self._msgs[: len(self._msgs) - skip_last] if skip_last > 0 else self._msgs
+        d = self._seen_of(scope)
+        for m in target:
+            d.add(m.key)
+        return len(target)
 
     def feed(self, sender: str, content: str, direction="other", kind="text") -> None:
         self._msgs.append(A.Message(
@@ -226,10 +237,11 @@ class FakeQQ:
     def read_messages(self, limit: int = 12) -> list[A.Message]:
         return self._msgs[-limit:]
 
-    def split_new(self, msgs) -> list[A.Message]:
-        fresh = [m for m in msgs if m.key not in self._seen]
+    def split_new(self, msgs, scope: str = "") -> list[A.Message]:
+        d = self._seen_of(scope)
+        fresh = [m for m in msgs if m.key not in d]
         for m in msgs:
-            self._seen.add(m.key)
+            d.add(m.key)
         return fresh
 
     def send_text(self, text: str) -> bool:

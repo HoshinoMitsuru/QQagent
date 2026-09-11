@@ -28,7 +28,9 @@
     "max_history_entries": 40,
     "send_with_ctrl_enter": false,
     "poll_interval_seconds": 0.8,
-    "max_reply_chars": 500
+    "max_reply_chars": 500,
+    "_nontext说明": "图片/语音/文件/动画表情怎么处理。skip = 一律跳过（默认，最省额度）；describe = 拿 QQ 气泡里的占位文本（如 [动画表情]）当正文继续走，让 AI 自己决定回不回。改 describe 前请注意：不显未读数字的会话里，一个表情也会触发一次模型调用。",
+    "nontext_policy": "skip"
   },
 
   "_aggregate说明": "防抖聚合（移植自 小清澈3.0.js）：对方连发多条时合并成一次模型调用。等待 = 基础等待 + 习惯性额外停顿(EMA) + 冷启动惩罚。基础等待两档自适应：同一会话连续 fast_after_single_rounds 轮都只有单条消息 → 降到 fast_wait_ms；一旦出现某轮 ≥2 条（又在连发）→ 回到 base_wait_ms 并重新计数。",
@@ -51,12 +53,56 @@
     "timeout_seconds": 1800
   },
 
-  "_persist说明": "上下文持久化：按会话（私聊 private:<昵称> / 群聊 group:<群名>）隔离落盘，重启不丢。state/ 目录已被 .gitignore 排除。",
+  "_persist说明": "上下文持久化：按会话（私聊 private:<QQ号> / 群聊 group:<群号>）隔离落盘，重启不丢。state/ 目录已被 .gitignore 排除。",
   "persist": {
     "enabled": true,
     "file": "state/conversations.json",
     "save_interval_seconds": 3.0,
     "max_scopes": 50
+  },
+
+  "_identity说明": "会话主键用 QQ 号（state/uid-map.json 缓存）而不是昵称。首次遇到某个会话需要『打开资料卡取号』，会抢前台一次；之后只读缓存。取号命令：python qqid.py --enroll-all",
+  "identity": {
+    "enabled": true,
+    "store": "state/uid-map.json",
+    "enroll_on_demand": true,
+    "require_qq_uin": false
+  },
+
+  "_queue说明": "回复排队 + 风控限速。真实约束不是性能而是账号风控：个人号高频发送会被限制。max_replies_per_minute 与 min_interval_seconds 是决定『能服务几个用户』的唯一两个数，调大前请先读 并发能力评估与优化方向.md §9。",
+  "queue": {
+    "enabled": true,
+    "_风控": "两条同时生效，取更严格者：硬间隔 + 60s 滑动窗口。默认 12/分 + 5s ≈ 安全区间中段。",
+    "max_replies_per_minute": 12,
+    "min_interval_seconds": 5.0,
+    "_合并": "排队期间用户又发来补充消息：还要等 > merge_if_wait_over_seconds 就并进他待发的那批上下文（不额外回一次），否则照常另排一次回复。",
+    "merge_if_wait_over_seconds": 5.0,
+    "_成本": "单次『切会话+读+写+发+模型』的经验耗时，用于估算剩余等待。实测 UI≈1.2s、flash≈1.3~1.8s。",
+    "unit_cost_seconds": 3.0,
+    "_硬上限": "静默窗最多顺延这么久。不设的话『每 20 秒来一句』的用户会让这条永远结算不掉（饿死）。",
+    "max_hold_seconds": 30.0,
+    "_抖动": "给到期时间加随机抖动，避免多个会话的窗口同时到期一起涌入 UI 串行队列。",
+    "jitter_seconds": 3.0,
+    "_重试上限": "发送前复核（标题/QQ号/会话签名）连续失败这么多次就放弃并撤单，防止无限重排。",
+    "max_attempts": 3
+  },
+
+  "_discovery说明": "多会话『发现』（降级方案）。桌面 UI 上每个会话只保留最新一条消息的节选，摘要不足以构造上下文，所以这里只做发现：扫会话列表的未读徽标/摘要指纹 → 占位排队（不碰前台、不读正文）→ 出队时才切过去做一次『上下文总读取』并交给 AI（见 agent.prepare）。",
+  "discovery": {
+    "enabled": true,
+    "_节流": "扫一次会话列表的开销（UIA 遍历）约几十到一两百毫秒，别设得太小。",
+    "scan_interval_seconds": 2.0,
+    "_触发": "trigger_on_unread 是硬证据（红点）；trigger_on_preview_change 兜住「不显未读数字」的会话，但会被我方自己发出的回复误触发——发送后会自动重采指纹来抑制。",
+    "trigger_on_unread": true,
+    "trigger_on_preview_change": true,
+    "_首见": "第一次见到某个会话时，如果它已经带未读徽标也照样触发（未读=对方发来后一直没人看，是新鲜的）。不想让它一上来就清历史未读就设为 false。",
+    "trigger_on_first_sight_unread": true,
+    "_单轮上限": "一次扫描最多占位几个会话，避免一次性把队列灌满、把前台预算打穿。",
+    "max_enqueue_per_scan": 3,
+    "_读取深度": "总读取时读最近多少条消息。首见会话会保留最后 unread 条不被基线吃掉。",
+    "read_limit": 30,
+    "_状态文件": "哪些会话已建基线 + 上次看到的指纹快照。丢了会导致重启后重复建基线（吞掉重启瞬间的未读）。",
+    "state_file": "state/rotation.json"
   },
 
   "teach": {

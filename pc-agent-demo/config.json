@@ -1,13 +1,14 @@
 {
   "_说明": "PC 端 QQ AI 代理（路线A）配置文件。所有字段都有内置默认值，缺项不影响运行。",
-  "_密钥说明": "api_key 留空时，会尝试从 api_key_file 读取；若该文件是 JSON，按 api_key_json_keys 顺序找第一个非空值。",
+  "_密钥说明": "api_key 留空时，会尝试从 api_key_file 读取（相对路径按本目录解析）；若该文件是 JSON，按 api_key_json_keys 顺序找第一个非空值。secrets.local.json 已被 .gitignore 排除，密钥不会进仓库。",
+  "_警示": "不要把 api_key 直接写在这一行下面的 llm.api_key 里 —— 本仓库会推到公开 Gitee。",
 
   "llm": {
     "api_base": "https://api.deepseek.com",
     "api_key": "",
-    "api_key_file": "D:/Psyche/aichataligera/ai-web-page/wechat_et_qq_client/tools/data/secrets.json",
+    "api_key_file": "secrets.local.json",
     "api_key_json_keys": ["llm.api_key", "deepseek.api_key", "openai.api_key", "api_key", "DEEPSEEK_API_KEY"],
-    "model": "deepseek-chat",
+    "model": "deepseek-flash",
     "temperature": 1.1,
     "max_tokens": 800,
     "timeout_seconds": 60,
@@ -28,6 +29,34 @@
     "send_with_ctrl_enter": false,
     "poll_interval_seconds": 0.8,
     "max_reply_chars": 500
+  },
+
+  "_aggregate说明": "防抖聚合（移植自 小清澈3.0.js）：对方连发多条时合并成一次模型调用。等待 = 基础等待 + 习惯性额外停顿(EMA) + 冷启动惩罚。基础等待两档自适应：同一会话连续 fast_after_single_rounds 轮都只有单条消息 → 降到 fast_wait_ms；一旦出现某轮 ≥2 条（又在连发）→ 回到 base_wait_ms 并重新计数。",
+  "aggregate": {
+    "enabled": true,
+    "base_wait_ms": 5000,
+    "fast_wait_ms": 2000,
+    "fast_after_single_rounds": 3,
+    "cold_start_penalty_ms": 6000,
+    "decay_turns": 4,
+    "cold_start_gap_ms": 60000,
+    "habit_min_interval_ms": 500,
+    "habit_max_interval_ms": 15000,
+    "habit_ema_alpha": 0.3
+  },
+
+  "_continuous说明": "连续对话模式（移植自 小清澈3.0.js）：AI 在某个会话开口后，该会话在 timeout_seconds 内免触发词；超时自动退出。",
+  "continuous": {
+    "enabled": true,
+    "timeout_seconds": 1800
+  },
+
+  "_persist说明": "上下文持久化：按会话（私聊 private:<昵称> / 群聊 group:<群名>）隔离落盘，重启不丢。state/ 目录已被 .gitignore 排除。",
+  "persist": {
+    "enabled": true,
+    "file": "state/conversations.json",
+    "save_interval_seconds": 3.0,
+    "max_scopes": 50
   },
 
   "teach": {

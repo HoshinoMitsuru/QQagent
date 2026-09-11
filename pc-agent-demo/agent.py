@@ -8,13 +8,15 @@ agent.py — PC 端 QQ 私聊 AI 代理（最小 demo · 路线 A）
     不碰任何协议、不碰任何硬件模拟，纯粹是「替人在操作这台电脑上的 QQ」。
 
 范围（刻意收窄）：
-    - 只处理纯文本
-    - 只处理私聊（群聊直接跳过）
-    - 不处理图片 / 语音 / 文件 / 表情
+    - 只处理纯文本（图片 / 语音 / 文件 / 表情一律跳过，继续悬置）
+    - 私聊 / 群聊都支持（群聊可用触发词约束）
+    - 已从 小清澈3.0.js 移植：防抖聚合、连续对话模式、上下文按会话持久化
 
 用法：
     python agent.py --selftest          # 不开 QQ，自检配置 + 模型连通性 + 调教解析
     python agent.py --replay "在吗"      # 不开 QQ，跑一遍「收到消息 → 生成回复」的链路
+    python agent.py --state             # 不开 QQ，查看已持久化的会话上下文
+    python agent.py --forget "光みつる"   # 不开 QQ，清空某个会话的上下文
     python agent.py --once              # 开 QQ，只跑一轮（调试用）
     python agent.py                     # 开 QQ，进入常驻循环
     python agent.py --dry-run           # 开 QQ，只读不发（确认读到的内容对不对）
@@ -92,6 +94,14 @@ _k32.QueryFullProcessImageNameW.argtypes = [
 _k32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 
+def abs_here(path: str) -> str:
+    """把配置里的相对路径按「本脚本所在目录」解析，避免受当前工作目录影响。"""
+    p = (path or "").strip()
+    if not p:
+        return ""
+    return p if os.path.isabs(p) else os.path.normpath(os.path.join(HERE, p))
+
+
 def process_path(pid: int) -> str:
     if not pid:
         return ""
@@ -113,9 +123,11 @@ DEFAULTS = {
     "llm": {
         "api_base": "https://api.deepseek.com",
         "api_key": "",
-        "api_key_file": "",
-        "api_key_json_keys": ["deepseek_api_key", "api_key", "key"],
-        "model": "deepseek-chat",
+        # 相对路径按本脚本所在目录解析；该文件已被 .gitignore 排除
+        "api_key_file": "secrets.local.json",
+        "api_key_json_keys": ["llm.api_key", "deepseek.api_key", "openai.api_key",
+                              "api_key", "DEEPSEEK_API_KEY"],
+        "model": "deepseek-flash",
         "temperature": 1.1,
         "max_tokens": 800,
         "timeout_seconds": 60,
@@ -135,6 +147,42 @@ DEFAULTS = {
         "send_with_ctrl_enter": False,
         "poll_interval_seconds": 0.8,
         "max_reply_chars": 500,
+    },
+    # ---------------------------------------------------------------- 防抖聚合
+    # 移植自 小清澈3.0.js 的 setupDebounceTimer：对方连发多条时合并成一次模型调用。
+    # 等待时长 = 基础等待 + 该用户的「习惯性额外停顿」EMA + 冷启动惩罚。
+    #
+    # 基础等待是**自适应**的：
+    #   默认 base_wait_ms(5s)；
+    #   若同一会话连续 fast_after_single_rounds(3) 轮都只有单条消息提交给 AI，
+    #   说明对方不是「连发型」，切到 fast_wait_ms(2s)；
+    #   之后只要出现某轮 ≥2 条（又在连发），立刻回落 5s 并重新计数。
+    "aggregate": {
+        "enabled": True,
+        "base_wait_ms": 5000,
+        "fast_wait_ms": 2000,
+        "fast_after_single_rounds": 3,
+        "cold_start_penalty_ms": 6000,
+        "decay_turns": 4,
+        "cold_start_gap_ms": 60000,
+        "habit_min_interval_ms": 500,
+        "habit_max_interval_ms": 15000,
+        "habit_ema_alpha": 0.3,
+    },
+    # -------------------------------------------------------------- 连续对话模式
+    # 移植自 小清澈3.0.js 的 continuous 状态机：AI 在某个会话开口后，
+    # 该会话在 timeout 秒内免触发词；超时自动退出。
+    "continuous": {
+        "enabled": True,
+        "timeout_seconds": 1800,
+    },
+    # ---------------------------------------------------------------- 持久化
+    # 上下文按会话（scope）隔离落盘，重启不丢。文件已被 .gitignore 排除。
+    "persist": {
+        "enabled": True,
+        "file": "state/conversations.json",
+        "save_interval_seconds": 3.0,
+        "max_scopes": 50,
     },
     "teach": {
         "enabled": True,
@@ -231,6 +279,8 @@ def resolve_api_key(cfg: dict, verbose: bool = False) -> str:
         return key
 
     path = (cfg["llm"].get("api_key_file") or "").strip()
+    if path and not os.path.isabs(path) and not os.path.isfile(path):
+        path = abs_here(path)     # 相对路径按脚本目录解析
     if not path or not os.path.isfile(path):
         if verbose and path:
             log("WARN", f"api_key_file 不存在：{path}")
@@ -319,7 +369,16 @@ class Message:
 
 
 class History:
-    """对话历史。带单调递增 _seq，避免同毫秒内写入导致顺序错乱。"""
+    """
+    单个会话（scope）的对话历史。
+
+    与插件 小清澈3.0.js 的 pushHistoryEntry 对齐的两点：
+      1) 每条记录带单调递增的 seq —— 同一毫秒内到达的两条消息不会出现平局，
+         而「谁先发生」恰恰是上下文因果顺序的判定依据；
+      2) 调教条目是「立即落盘」的，若此时防抖缓冲里还压着更早的用户消息，
+         那些用户消息要能回插到调教条目之前，否则会出现
+         「AI 先说了这句话、用户才来提问」的因果颠倒。
+    """
 
     def __init__(self, max_entries: int = 40, system_prompt: str = ""):
         self.max_entries = max_entries
@@ -327,19 +386,49 @@ class History:
         self._items: list[dict] = []
         self._seq = 0
 
+    # ---------------------------------------------------- 事件序号
     def next_seq(self) -> int:
         self._seq += 1
         return self._seq
 
-    def push(self, role: str, content: str, source: str = "") -> dict:
-        entry = {
+    @property
+    def seq(self) -> int:
+        return self._seq
+
+    def set_seq(self, value: int) -> None:
+        self._seq = max(self._seq, int(value or 0))
+
+    # ---------------------------------------------------- 写入
+    def _make(self, role: str, content: str, source: str, teach: bool,
+              seq: Optional[int]) -> dict:
+        return {
             "role": role,
             "content": content,
-            "seq": self.next_seq(),
-            "_source": source,
-            "_ts": time.time(),
+            "seq": int(seq) if seq else self.next_seq(),
+            "source": source,
+            "teach": bool(teach),
+            "ts": time.time(),
         }
+
+    def push(self, role: str, content: str, source: str = "",
+             teach: bool = False, seq: Optional[int] = None) -> dict:
+        entry = self._make(role, content, source, teach, seq)
         self._items.append(entry)
+        self._trim()
+        return entry
+
+    def push_before_teach(self, before_seq: Optional[int], role: str, content: str,
+                          source: str = "", teach: bool = False,
+                          seq: Optional[int] = None) -> dict:
+        """插到「seq 比 before_seq 晚、且带 teach 标记」的第一条之前（插件同款回插）。"""
+        entry = self._make(role, content, source, teach, seq)
+        idx = len(self._items)
+        if before_seq:
+            for i, it in enumerate(self._items):
+                if it.get("teach") and int(it.get("seq") or 0) > int(before_seq):
+                    idx = i
+                    break
+        self._items.insert(idx, entry)
         self._trim()
         return entry
 
@@ -348,22 +437,364 @@ class History:
         if len(self._items) > self.max_entries:
             self._items = self._items[-self.max_entries:]
 
+    # ---------------------------------------------------- 读取
     def build_messages(self) -> list[dict]:
         msgs = []
         if self.system_prompt:
             msgs.append({"role": "system", "content": self.system_prompt})
         for it in self._items:
-            # 只把 role/content 交给 API，内部元数据不上行
-            msgs.append({"role": it["role"], "content": it["content"]})
+            # 只把 role/content 交给 API，seq/teach/source 属于本地元数据，不上行
+            content = str(it.get("content") or "")
+            if not it.get("role") or not content:
+                continue
+            msgs.append({"role": it["role"], "content": content})
         return msgs
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def teach_entries(self) -> list[dict]:
+        return [it for it in self._items if it.get("teach")]
+
+    def clear_teach(self) -> int:
+        n = len(self.teach_entries())
+        self._items = [it for it in self._items if not it.get("teach")]
+        return n
+
+    def drop_last_teach(self) -> Optional[str]:
+        for i in range(len(self._items) - 1, -1, -1):
+            if self._items[i].get("teach"):
+                return self._items.pop(i).get("content")
+        return None
+
+    def clear(self) -> int:
+        n = len(self._items)
+        self._items = []
+        return n
 
     def dump(self, n: int = 6) -> str:
         out = []
         for it in self._items[-n:]:
             tag = {"user": "对方", "assistant": "小清澈"}.get(it["role"], it["role"])
-            tag = f"{tag}/{it['_source']}" if it.get("_source") else tag
-            out.append(f"      #{it['seq']} {tag}: {clip(it['content'], 50)}")
+            if it.get("source"):
+                tag = f"{tag}/{it['source']}"
+            if it.get("teach"):
+                tag += "·教"
+            out.append(f"      #{it['seq']} {tag}: {clip(it.get('content') or '', 50)}")
         return "\n".join(out) or "      (空)"
+
+    # ---------------------------------------------------- 序列化
+    def to_dict(self) -> list[dict]:
+        return [dict(it) for it in self._items]
+
+    @classmethod
+    def from_dict(cls, rows, max_entries: int, system_prompt: str) -> "History":
+        h = cls(max_entries=max_entries, system_prompt=system_prompt)
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            role = r.get("role")
+            if role not in ("user", "assistant", "system"):
+                continue
+            h._items.append({
+                "role": role,
+                "content": str(r.get("content") or ""),
+                "seq": int(r.get("seq") or 0),
+                "source": str(r.get("source") or "restored"),
+                "teach": bool(r.get("teach")),
+                "ts": float(r.get("ts") or 0.0),
+            })
+            h.set_seq(int(r.get("seq") or 0))
+        h._trim()
+        return h
+
+
+# ============================================================ 会话仓库（按 scope 隔离 + 持久化）
+class ConversationStore:
+    """
+    按会话隔离的上下文仓库（对齐插件「一个 scope 一份历史 + 一份连续对话状态」的做法）。
+
+    scope 命名与插件一致：
+        私聊 → `private:<对方昵称>`      群聊 → `group:<群名>`
+    PC 端拿不到 QQ 号，只能拿窗口标题当身份 —— 改昵称 / 改群名就等于换了一个 scope。
+
+    落盘策略：内存里改，写盘做节流（默认 3s 最多一次），原子替换（先写 .tmp 再 rename），
+    退出时强制写一次。文件损坏时自动备份原文件后从空开始，不会把程序带崩。
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        p = cfg["persist"]
+        self.enabled = bool(p.get("enabled", True))
+        self.interval = float(p.get("save_interval_seconds") or 3.0)
+        self.max_scopes = max(1, int(p.get("max_scopes") or 50))
+        self.path = abs_here(p.get("file") or "state/conversations.json")
+        self.system_prompt = cfg["llm"].get("system_prompt") or ""
+        self.max_entries = int(cfg["chat"].get("max_history_entries") or 40)
+        self._book: dict[str, dict] = {}
+        self._dirty = False
+        self._last_save = 0.0
+        self.load()
+
+    # ---------------------------------------------------- 载入 / 落盘
+    def load(self) -> None:
+        if not self.enabled or not self.path or not os.path.isfile(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            bad = self.path + ".bad"
+            try:
+                os.replace(self.path, bad)
+                log("WARN", f"上下文文件损坏，已备份为 {os.path.basename(bad)}：{exc}")
+            except Exception:
+                log("WARN", f"上下文文件损坏且备份失败：{exc}")
+            return
+
+        for scope, row in (data.get("scopes") or {}).items():
+            if not isinstance(row, dict):
+                continue
+            cont = row.get("continuous") or {}
+            hist = History.from_dict(row.get("history") or [], self.max_entries, self.system_prompt)
+            hist.set_seq(int(row.get("seq") or 0))
+            self._book[str(scope)] = {
+                "history": hist,
+                "cont": {"active": bool(cont.get("active")),
+                         "last_at": float(cont.get("last_at") or 0.0)},
+                "used_at": float(row.get("used_at") or 0.0),
+            }
+        if self._book:
+            log("INFO", f"已载入 {len(self._book)} 个会话的上下文（{self.path}）")
+
+    def save(self, force: bool = False) -> None:
+        if not self.enabled or not self.path or not self._dirty:
+            return
+        now = time.time()
+        if not force and now - self._last_save < self.interval:
+            return
+        self._last_save = now
+        self._dirty = False
+
+        data = {
+            "_说明": "pc-agent-demo 自动生成：按会话隔离的上下文与连续对话状态。"
+                     "删除本文件 = 让所有会话失忆，不影响其它配置。",
+            "_version": 1,
+            "scopes": {},
+        }
+        for scope, row in self._book.items():
+            data["scopes"][scope] = {
+                "used_at": row["used_at"],
+                "seq": row["history"].seq,
+                "continuous": {"active": row["cont"]["active"],
+                               "last_at": row["cont"]["last_at"]},
+                "history": row["history"].to_dict(),
+            }
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+        except Exception as exc:
+            log("WARN", f"上下文保存失败（不影响运行）：{exc}")
+            self._dirty = True
+
+    # ---------------------------------------------------- 取用
+    def book(self, scope: str) -> dict:
+        row = self._book.get(scope)
+        if row is None:
+            row = {
+                "history": History(self.max_entries, self.system_prompt),
+                "cont": {"active": False, "last_at": 0.0},
+                "used_at": time.time(),
+            }
+            self._book[scope] = row
+            self._prune()
+        row["used_at"] = time.time()
+        self._dirty = True
+        return row
+
+    def history(self, scope: str) -> History:
+        return self.book(scope)["history"]
+
+    def scopes(self) -> list[str]:
+        return sorted(self._book, key=lambda s: -self._book[s]["used_at"])
+
+    def forget(self, scope: str) -> bool:
+        if scope not in self._book:
+            return False
+        del self._book[scope]
+        self._dirty = True
+        self.save(force=True)
+        return True
+
+    def _prune(self) -> None:
+        # 刚取用的 scope 是 used_at 最大的，天然不会被淘汰
+        while len(self._book) > self.max_scopes:
+            victim = min(self._book, key=lambda s: self._book[s]["used_at"])
+            log("INFO", f"会话数超上限（{self.max_scopes}），淘汰最久未用的：{victim}")
+            del self._book[victim]
+
+    # ---------------------------------------------------- 连续对话状态机
+    def is_continuous(self, scope: str, now: float, timeout: float) -> bool:
+        row = self._book.get(scope)
+        if not row or not row["cont"]["active"]:
+            return False
+        if now - row["cont"]["last_at"] <= timeout:
+            return True
+        row["cont"].update(active=False, last_at=0.0)   # 超时 → 自动退出
+        self._dirty = True
+        return False
+
+    def activate_continuous(self, scope: str, now: float) -> None:
+        row = self.book(scope)
+        row["cont"].update(active=True, last_at=float(now))
+        self._dirty = True
+
+    def refresh_continuous(self, scope: str, now: float) -> bool:
+        """已激活则续期，避免「从第一条消息起算固定窗口」聊到一半被强制断开。"""
+        row = self._book.get(scope)
+        if not row or not row["cont"]["active"]:
+            return False
+        row["cont"]["last_at"] = float(now)
+        self._dirty = True
+        return True
+
+    def deactivate_continuous(self, scope: str) -> None:
+        row = self._book.get(scope)
+        if not row:
+            return
+        row["cont"].update(active=False, last_at=0.0)
+        self._dirty = True
+
+
+# ============================================================ 防抖聚合
+@dataclass
+class PendingMessage:
+    """已通过准入判定、等待聚合结算的一条消息。"""
+    sender: str
+    content: str
+    key: str
+    seq: int
+
+
+class Debouncer:
+    """
+    自适应防抖聚合（逐条等价移植自 小清澈3.0.js 的 setupDebounceTimer）。
+
+    插件原逻辑：
+        等待 = BASE_WAIT + 该用户的「习惯性额外停顿」EMA + 冷启动惩罚
+        习惯性停顿：两条消息间隔在 0.5s~15s 之间时，把 (间隔 - 基础等待) 用 EMA(0.7/0.3) 累积
+        冷启动惩罚：距上次发言超过 60s，则按「已连续轮数」递减，最多 4 轮衰减到 0
+    基础等待原为固定 10s，这里改成两档自适应（见 note_round / current_base）。
+
+    差别只有一点：插件用 setTimeout 定时器，这里改成「到期时间戳」，
+    由同步轮询循环检查是否到点 —— 不引入线程，和现有结构最贴合。
+    """
+
+    def __init__(self, cfg: dict):
+        a = cfg["aggregate"]
+        self.enabled = bool(a.get("enabled", True))
+        self.base = float(a.get("base_wait_ms") or 5000)
+        self.fast_wait = float(a.get("fast_wait_ms") or 2000)
+        self.fast_after = max(1, int(a.get("fast_after_single_rounds") or 3))
+        self.cold_penalty = float(a.get("cold_start_penalty_ms") or 6000)
+        self.decay = max(1, int(a.get("decay_turns") or 4))
+        self.cold_gap = float(a.get("cold_start_gap_ms") or 60000)
+        self.h_min = float(a.get("habit_min_interval_ms") or 500)
+        self.h_max = float(a.get("habit_max_interval_ms") or 15000)
+        self.alpha = float(a.get("habit_ema_alpha") or 0.3)
+        self.pending: list[PendingMessage] = []
+        self.due_at = 0.0
+        self._habits: dict[str, dict] = {}
+        # scope -> {"singles": 连续「单条成一轮」的计数, "fast": 是否已切到快档}
+        # 只存内存：重启后回到 5s，最多再观察 3 轮就重新判定。
+        self._rounds: dict[str, dict] = {}
+
+    # ---------------------------------------------------- 两档自适应
+    def _round_state(self, scope: str) -> dict:
+        return self._rounds.setdefault(scope or "", {"singles": 0, "fast": False})
+
+    def current_base(self, scope: str) -> float:
+        """当前生效的基础等待（毫秒）。"""
+        return self.fast_wait if self._round_state(scope)["fast"] else self.base
+
+    def note_round(self, scope: str, count: int) -> None:
+        """
+        每结算一轮就记一笔：这一轮实际提交给 AI 的是几条消息。
+        连续 fast_after 轮都是「单条」→ 切快档；出现一轮多条 → 回落并重新计数。
+        """
+        if not self.enabled:
+            return
+        st = self._round_state(scope)
+        if count <= 1:
+            st["singles"] += 1
+            if st["singles"] >= self.fast_after and not st["fast"]:
+                st["fast"] = True
+                log("AGG", f"连续 {st['singles']} 轮都是单条消息 → 基础等待降到 "
+                           f"{self.fast_wait / 1000:.1f}s")
+        else:
+            if st["fast"]:
+                log("AGG", f"本轮是 {count} 条连发 → 基础等待回到 {self.base / 1000:.1f}s")
+            st["singles"] = 0
+            st["fast"] = False
+
+    # ---------------------------------------------------- 计时
+    def add(self, msg: PendingMessage, scope: str = "") -> float:
+        """收下一条消息并顺延到期时间，返回本次的等待秒数。"""
+        self.pending.append(msg)
+        if not self.enabled:
+            self.due_at = 0.0
+            return 0.0
+        wait_ms = self._compute_wait(msg.sender, scope)
+        self.due_at = time.time() + wait_ms / 1000.0
+        return wait_ms / 1000.0
+
+    def _compute_wait(self, sender: str, scope: str = "") -> float:
+        key = sender or ""
+        base = self.current_base(scope)
+        now_ms = time.time() * 1000.0
+        h = self._habits.setdefault(key, {"last_ms": now_ms - 120000.0, "extra": 0.0, "turns": 0})
+
+        interval = now_ms - h["last_ms"]
+        h["last_ms"] = now_ms
+
+        cold = 0.0
+        if interval > self.cold_gap:
+            h["turns"] = min(h["turns"] + 1, self.decay)
+            cold = self.cold_penalty * (1 - h["turns"] / self.decay)
+        else:
+            h["turns"] = 0
+
+        if self.h_min < interval < self.h_max:
+            extra = max(0.0, interval - base)
+            h["extra"] = h["extra"] * (1 - self.alpha) + extra * self.alpha
+
+        return round(base + h["extra"] + cold)
+
+    def summary(self, scope: str = "") -> str:
+        st = self._round_state(scope)
+        return (f"{self.current_base(scope) / 1000:.1f}s"
+                f"（{'快档' if st['fast'] else '常规'}，"
+                f"单条轮次 {min(st['singles'], self.fast_after)}/{self.fast_after}）")
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.pending) and time.time() >= self.due_at
+
+    def take(self) -> list[PendingMessage]:
+        out = self.pending
+        self.pending = []
+        self.due_at = 0.0
+        return out
+
+    def clear(self) -> None:
+        self.pending = []
+        self.due_at = 0.0
+
+    def countdown(self) -> float:
+        return max(0.0, self.due_at - time.time())
 
 
 # ============================================================ LLM
@@ -1265,28 +1696,70 @@ class OcrReader:
 
 # ============================================================ 主流程
 class Agent:
+    """
+    主流程。与旧版最大的区别：**收消息**和**调模型**被拆成两件事。
+
+        读新消息 → 过准入判定 → 进防抖缓冲（等待窗口内继续收）
+                                            ↓ 到点
+                                   合并成一条 → 调模型 → 发出去
+
+    这样对方连发「在吗」「你在干嘛」「算了」三条，AI 只会看到合并后的一条、只回一次。
+    """
+
     def __init__(self, cfg: dict, dry_run: bool = False):
         self.cfg = cfg
         self.dry_run = dry_run
         self.qq = QQWindow(cfg)
         self.llm = LLMClient(cfg)
         self.ocr = OcrReader(cfg)
-        self.history = History(
-            max_entries=int(cfg["chat"].get("max_history_entries") or 40),
-            system_prompt=cfg["llm"].get("system_prompt") or "",
-        )
+        self.store = ConversationStore(cfg)
+        self.deb = Debouncer(cfg)
+        self.scope = ""
         self._last_reply_at = 0.0
         self._last_msg_key = ""
 
-    # ---------------------------------------------------- 一轮处理
+    # ---------------------------------------------------- 会话身份
+    def current_scope(self) -> str:
+        kind = "group" if self.qq.is_group else "private"
+        return f"{kind}:{self.qq.dialog_title or '(未命名会话)'}"
+
+    def _sync_scope(self) -> None:
+        """窗口标题变了 = 换了一个会话 → 结算旧会话、给新会话建基线、换上下文。"""
+        scope = self.current_scope()
+        if scope == self.scope:
+            return
+        if self.scope:
+            if self.deb.pending:
+                log("BUF", f"会话切换，先把 {len(self.deb.pending)} 条待聚合消息结算掉")
+                self.flush(force=True)
+            self.deb.clear()
+            self.qq.refresh_layout(force=True)
+            kept = self.qq.baseline()
+            log("INFO", f"会话切换 → {scope}（忽略该会话已有 {kept} 条历史消息）")
+        self.scope = scope
+
+    def _cont_timeout(self) -> float:
+        return float(self.cfg["continuous"].get("timeout_seconds") or 1800)
+
+    def _continuous_now(self, scope: str) -> bool:
+        if not self.cfg["continuous"].get("enabled"):
+            return False
+        return self.store.is_continuous(scope, time.time(), self._cont_timeout())
+
+    # ---------------------------------------------------- 一轮：读 → 入队
     def step(self) -> int:
-        """处理一轮新消息，返回处理的条数。"""
+        """读一轮新消息并入队，返回本轮收下的条数（真正调模型在 flush）。"""
         self.qq.refresh_layout()
+        self._sync_scope()
         msgs = self.qq.read_messages()
         fresh = self.qq.split_new(msgs)
         if not fresh:
             return 0
+        return self._ingest(fresh)
 
+    def _ingest(self, fresh: list[Message]) -> int:
+        scope = self.scope
+        hist = self.store.history(scope)
         handled = 0
         for m in fresh:
             if not m.content:
@@ -1297,38 +1770,40 @@ class Agent:
                 if m.direction == "me" and self.cfg["teach"].get("honor_own_outgoing"):
                     body = parse_teach(m.content, self.cfg)
                     if body:
-                        self.history.push("assistant", body, source="teach-self")
+                        hist.push("assistant", body, source="teach-self", teach=True)
                         log("TEACH", f"（我方手输）写入上下文：{clip(body)}")
                         handled += 1
                 continue
 
-            # 白名单：群聊直接跳过（本 demo 只做私聊）
+            # 白名单：群聊直接跳过
             if self.cfg["chat"].get("private_chat_only") and self.qq.is_group:
                 log("SKIP", f"群聊『{self.qq.dialog_title}』已跳过")
                 continue
 
-            # 本 demo 只处理纯文本，图片/语音/文件一律跳过
+            # 只处理纯文本，图片/语音/文件一律跳过（多媒体部分继续悬置）
             if m.kind != "text":
                 log("SKIP", f"非文本消息已跳过（{clip(m.content, 20)}）")
                 continue
 
             log("RECV", f"{m.sender or '对方'}: {clip(m.content)}")
 
-            # ---- 调教语句：不触发 AI，直接写进上下文 ----
+            # ---- 调教语句：不触发 AI，带着自己的 seq 立即写入上下文 ----
+            # 立即写入是为了「调教即生效」；防抖缓冲里那批更早的用户消息，
+            # 结算时会用 push_before_teach 回插到它之前，保证因果不倒置。
             body = parse_teach(m.content, self.cfg)
             if body is not None:
-                self.history.push("assistant", body, source="teach")
+                hist.push("assistant", body, source="teach", teach=True)
                 log("TEACH", f"用户替 AI 说：{clip(body)}")
                 handled += 1
                 continue
 
             # ---- 触发词判定 ----
-            # 群聊默认额外要求触发词：群里消息密集，不加限制会吵到所有人；
-            # 想改成群聊也自由发言，把 chat.group_requires_trigger 设为 false
+            # 连续对话激活期间免触发词（插件同款行为）；
+            # 群聊默认额外要求触发词，想放开就把 chat.group_requires_trigger 设为 false
             need_trigger = (not self.cfg["chat"].get("always_reply")) or (
                 self.qq.is_group and self.cfg["chat"].get("group_requires_trigger", True)
             )
-            if need_trigger:
+            if need_trigger and not self._continuous_now(scope):
                 if not looks_like_trigger(m.content, self.cfg):
                     log("SKIP", f"未命中触发词（{'群聊' if self.qq.is_group else '触发词模式'}）")
                     continue
@@ -1339,7 +1814,7 @@ class Agent:
             if not user_text:
                 continue
 
-            # ---- 冷却 ----
+            # ---- 冷却 / 重复 ----
             cooldown = float(self.cfg["chat"].get("reply_cooldown_seconds") or 0)
             if cooldown > 0 and time.time() - self._last_reply_at < cooldown:
                 log("SKIP", "命中冷却窗口，本条丢弃")
@@ -1347,26 +1822,57 @@ class Agent:
             if m.key == self._last_msg_key:
                 continue
 
-            self.history.push("user", user_text, source="incoming")
+            seq = hist.next_seq()      # 先占号，用于回插定位
+            wait = self.deb.add(PendingMessage(m.sender or "对方", user_text, m.key, seq), scope)
+            if self.deb.enabled:
+                log("BUF", f"入队（缓冲 {len(self.deb.pending)} 条），{wait:.1f}s 后聚合结算"
+                           f"｜基础等待 {self.deb.summary(scope)}")
+            else:
+                log("BUF", f"入队（缓冲 {len(self.deb.pending)} 条，防抖已关闭 → 立即结算）")
             handled += 1
-
-            if self.dry_run:
-                log("DRY", "dry-run：只记录，不调用模型")
-                continue
-
-            reply = self.generate_reply()
-            if reply:
-                self.deliver(reply)
-                self._last_reply_at = time.time()
-                self._last_msg_key = m.key
         return handled
 
-    def generate_reply(self) -> str:
+    # ---------------------------------------------------- 结算：聚合 → 调模型 → 发送
+    def flush(self, force: bool = False) -> bool:
+        """缓冲到期（或 force）则合并这一批消息，调一次模型。返回是否真的结算了。"""
+        if not self.deb.pending:
+            return False
+        if not force and not self.deb.ready:
+            return False
+
+        batch = self.deb.take()
+        scope = self.scope
+        self.deb.note_round(scope, len(batch))     # 记录本轮条数 → 两档自适应
+        hist = self.store.history(scope)
+        combined = "\n".join(f"【{p.sender}】：{p.content}" for p in batch)
+        batch_seq = min((p.seq for p in batch if p.seq), default=0)
+
+        log("AGG", f"聚合 {len(batch)} 条消息 → 一次模型调用")
+        hist.push_before_teach(batch_seq, "user", combined, source="incoming")
+        if self._continuous_now(scope):
+            self.store.refresh_continuous(scope, time.time())   # 连续互动 → 续期
+
+        if self.dry_run:
+            log("DRY", "dry-run：只记录，不调用模型")
+            print(hist.dump(6))
+            self.store.save()
+            return True
+
+        reply = self.generate_reply(scope)
+        if reply:
+            self.deliver(scope, reply)
+            self._last_reply_at = time.time()
+            self._last_msg_key = batch[-1].key
+        self.store.save()
+        return True
+
+    def generate_reply(self, scope: str) -> str:
+        hist = self.store.history(scope)
         try:
-            reply = self.llm.chat(self.history.build_messages())
+            reply = self.llm.chat(hist.build_messages())
         except Exception as exc:
             log("ERR", f"模型调用失败：{exc}")
-            # 把刚推进去的 user 消息留在历史里没关系，下一轮还会带上
+            # 刚推进去的 user 消息留在历史里没关系，下一轮还会带上
             return ""
 
         reply = (reply or "").strip()
@@ -1376,11 +1882,16 @@ class Agent:
         if not reply:
             log("WARN", "模型返回空内容")
             return ""
+
+        # 开口即激活连续对话（插件的 activateContinuous）
+        if self.cfg["continuous"].get("enabled"):
+            self.store.activate_continuous(scope, time.time())
+            log("CONT", f"连续对话已激活（{self._cont_timeout():.0f}s 内该会话免触发词）")
         return reply
 
-    def deliver(self, reply: str) -> None:
+    def deliver(self, scope: str, reply: str) -> None:
         log("SEND", clip(reply, 70))
-        self.history.push("assistant", reply, source="auto")
+        self.store.history(scope).push("assistant", reply, source="auto")
         if self.dry_run:
             return
         if not self.qq.send_text(reply):
@@ -1392,26 +1903,34 @@ class Agent:
             log("ERR", "找不到 QQ 窗口。请确认 QQ 已启动，且带 --force-renderer-accessibility 参数。")
             return 2
         log("INFO", f"已附着 QQ 窗口，标题={self.qq.dialog_title!r}，群聊={self.qq.is_group}")
-        if self.qq.message_list is None:
+        if self.qq.ml_list is None:
             log("WARN", "没定位到消息列表控件，UIA 读取可能拿不到内容（考虑启用 OCR 兜底）")
 
+        self.scope = self.current_scope()
         n = self.qq.baseline()
         log("INFO", f"基线建立完成，忽略已有 {n} 条历史消息")
+        log("INFO", f"当前会话 {self.scope}（上下文 {len(self.store.history(self.scope))} 条，"
+                    f"连续对话={self._continuous_now(self.scope)}）")
         log("INFO", f"进入循环（poll={self.cfg['chat'].get('poll_interval_seconds')}s，"
-                    f"always_reply={self.cfg['chat'].get('always_reply')}）")
+                    f"防抖={'开' if self.deb.enabled else '关'}，"
+                    f"基础等待={self.deb.summary(self.scope)}）")
         log("INFO", "按 Ctrl+C 退出")
 
         interval = float(self.cfg["chat"].get("poll_interval_seconds") or 0.8)
         while True:
             try:
-                before = self.qq.dialog_title
                 self.step()
-                self.qq.refresh_layout()
-                if self.qq.dialog_title != before:
-                    log("INFO", f"会话已切换 → {self.qq.dialog_title!r}（群聊={self.qq.is_group}）")
-                    self.qq.baseline()
+                self.flush()
+                self.store.save()
             except KeyboardInterrupt:
                 log("INFO", "收到退出信号，结束")
+                if self.deb.pending:
+                    log("BUF", f"退出前把剩下的 {len(self.deb.pending)} 条结算掉")
+                    try:
+                        self.flush(force=True)
+                    except Exception as exc:
+                        log("ERR", f"收尾结算失败：{exc}")
+                self.store.save(force=True)
                 return 0
             except Exception as exc:
                 log("ERR", f"循环异常（已忽略继续）：{type(exc).__name__}: {exc}")
@@ -1477,7 +1996,83 @@ def selftest(cfg: dict) -> int:
     print(f"    uiautomation : OK")
     print(f"    pyperclip    : {'OK' if pyperclip else '缺失（发送会退化为 ValuePattern）'}")
     print(f"    OCR 兜底     : {'可用' if OcrReader(cfg).ok else '不可用（未装 pytesseract/Tesseract，属正常）'}")
+
+    print("\n[6] 已移植的文本能力（小清澈3.0.js → PC 端）")
+    a, ct, ps = cfg["aggregate"], cfg["continuous"], cfg["persist"]
+    print(f"    防抖聚合   : {'开' if a.get('enabled') else '关'}"
+          f"（基础等待 {float(a.get('base_wait_ms') or 0) / 1000:.1f}s"
+          f"，连续 {int(a.get('fast_after_single_rounds') or 0)} 轮单条后降到 "
+          f"{float(a.get('fast_wait_ms') or 0) / 1000:.1f}s"
+          f"，冷启动惩罚 {float(a.get('cold_start_penalty_ms') or 0) / 1000:.1f}s）")
+    print(f"    连续对话   : {'开' if ct.get('enabled') else '关'}"
+          f"（超时自动退出 {float(ct.get('timeout_seconds') or 0):.0f}s）")
+    print(f"    上下文持久 : {'开' if ps.get('enabled') else '关'} → {abs_here(ps.get('file') or '')}")
+    store = ConversationStore(cfg)
+    if store.enabled:
+        names = store.scopes()
+        print(f"    已存会话   : {len(names)} 个" + (f"（{', '.join(names[:5])}）" if names else ""))
+    print(f"    多媒体     : 图片识别 / URL 读取 → 继续悬置（按当前要求不移植）")
+
     print("\n自检结束。")
+    return 0
+
+
+def show_state(cfg: dict) -> int:
+    """不开 QQ，把持久化下来的会话上下文列出来。"""
+    print("=" * 72)
+    print("会话上下文（持久化文件内容）")
+    print("=" * 72)
+    store = ConversationStore(cfg)
+    print(f"\n文件：{store.path}")
+    print(f"开关：{'开' if store.enabled else '关'}")
+    if not store.enabled:
+        print("\n[!] persist.enabled=false，不会有任何持久化。")
+        return 0
+    names = store.scopes()
+    if not names:
+        print("\n(空) 还没有任何会话被记录。")
+        return 0
+    now = time.time()
+    for scope in names:
+        row = store._book[scope]
+        cont = row["cont"]
+        alive = cont["active"] and (now - cont["last_at"] <= float(cfg["continuous"].get("timeout_seconds") or 1800))
+        print(f"\n── {scope}")
+        print(f"   消息 {len(row['history'])} 条（seq={row['history'].seq}）"
+              f"，连续对话={'激活' if alive else '未激活'}"
+              f"，最近使用 {time.strftime('%m-%d %H:%M', time.localtime(row['used_at'])) if row['used_at'] else '—'}")
+        print(row["history"].dump(6))
+    return 0
+
+
+def forget(cfg: dict, target: str) -> int:
+    """清空某个会话的上下文。target 支持模糊匹配（命中多个时全部列出，不做删除）。"""
+    store = ConversationStore(cfg)
+    if not store.enabled:
+        print("[X] persist.enabled=false，没有持久化内容可清。")
+        return 2
+    names = store.scopes()
+    if not names:
+        print("(空) 还没有任何会话被记录。")
+        return 0
+
+    exact = target in names
+    hits = [s for s in names if exact or target in s]
+    if not hits:
+        print(f"[X] 没有匹配『{target}』的会话。现有会话：")
+        for s in names:
+            print(f"    {s}")
+        return 2
+    if len(hits) > 1:
+        print(f"『{target}』匹配到多个会话，请写全一点：")
+        for s in hits:
+            print(f"    {s}")
+        return 2
+
+    scope = hits[0]
+    n = len(store._book[scope]["history"])
+    store.forget(scope)
+    print(f"[✓] 已清空 {scope} 的上下文（{n} 条消息），连续对话状态一并重置。")
     return 0
 
 
@@ -1670,8 +2265,10 @@ def main() -> int:
                     default=None, metavar="TEXT",
                     help="只验证能不能把文字写进输入框：写入→回读→清空，绝不发送")
     ap.add_argument("--send", metavar="TEXT", help="向当前会话发一条文本（会真的发出去！）")
+    ap.add_argument("--state", action="store_true", help="不开 QQ，查看持久化下来的会话上下文")
+    ap.add_argument("--forget", metavar="SCOPE", help="不开 QQ，清空某个会话的上下文（支持模糊匹配）")
     ap.add_argument("--force", action="store_true", help="与 --send 配合，允许在群聊里发送")
-    ap.add_argument("--once", action="store_true", help="只跑一轮就退出（调试用）")
+    ap.add_argument("--once", action="store_true", help="只跑一轮就退出（调试用；会跳过防抖直接结算）")
     ap.add_argument("--dry-run", action="store_true", help="只读不发，确认读取是否准确")
     ap.add_argument("--config", default=CONFIG_PATH, help="配置文件路径")
     args = ap.parse_args()
@@ -1691,19 +2288,27 @@ def main() -> int:
         return input_test(cfg, args.input_test)
     if args.send is not None:
         return send_once(cfg, args.send, force=args.force)
+    if args.state:
+        return show_state(cfg)
+    if args.forget is not None:
+        return forget(cfg, args.forget)
 
     agent = Agent(cfg, dry_run=args.dry_run)
     if args.once:
         if not agent.qq.attach():
             log("ERR", "找不到 QQ 窗口。")
             return 2
+        agent.scope = agent.current_scope()
         kept = agent.qq.baseline(skip_last=1)
         log("INFO", f"已附着（{agent.qq.dialog_title!r}，群聊={agent.qq.is_group}）")
-        log("INFO", f"忽略 {kept} 条历史，只把最新 1 条当作新消息")
+        log("INFO", f"忽略 {kept} 条历史，只把最新 1 条当作新消息（调试模式：跳过防抖，立即结算）")
+        log("INFO", f"当前会话 {agent.scope}，上下文 {len(agent.store.history(agent.scope))} 条")
         if not agent.dry_run:
             log("WARN", "未加 --dry-run，会真的回复并发送！建议先加 --dry-run")
         handled = agent.step()
-        log("INFO", f"本轮处理 {handled} 条")
+        log("INFO", f"本轮入队 {handled} 条")
+        agent.flush(force=True)
+        agent.store.save(force=True)
         print("\n最近 3 条解析结果：")
         for m in agent.qq.read_messages(limit=3):
             mark = {"me": "我方", "other": "对方", "unknown": "未知"}.get(m.direction, m.direction)

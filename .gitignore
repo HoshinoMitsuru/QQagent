@@ -9,5 +9,12 @@ pc-agent-demo/probe-stdout.txt
 pc-agent-demo/probe-tree.txt
 pc-agent-demo/peek-fixed.txt
 
+# PC 端本地密钥（绝不入库）
+pc-agent-demo/secrets.local.json
+
+# PC 端运行状态：按会话持久化的上下文
+pc-agent-demo/state/
+pc-agent-demo/*.json.bad
+
 # 手机端阅读用临时 txt 副本（源文件为同名 .js）
 小清澈3.0.txt

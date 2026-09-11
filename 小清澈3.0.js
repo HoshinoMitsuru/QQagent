@@ -1,11 +1,26 @@
 // ==UserScript==
 // @name         小清澈-接入AI聊天（直连独立版·沉浸式陪伴）
 // @author       bilibili@嗅尘紫蝶
-// @version      2.3.0
-// @description  直连 DeepSeek/OpenAI 兼容接口的海豹 JS 插件（不依赖任何本地服务器）。支持 .ai 指令、自动唤起、连续对话模式、多人格切换（仅预设）、触发词(keywordPrefix)、图片识别(视觉API直连)、URL 网页读取。沉浸式陪伴：私聊恒免触发词且不拼接@前缀；群聊默认需触发词（并以图片白名单准入，须由已触发的用户发出），master 可用 .ai on 切到免触发词、.ai off 回到触发词机制。注意：与微信小程序共享上下文为服务器版专属能力，本直连版不支持；自定义人格为服务器版专属，本版仅保留预设人格。
-// @timestamp    2026-09-07
+// @version      3.0.0
+// @description  直连 DeepSeek/OpenAI 兼容接口的海豹 JS 插件（不依赖任何本地服务器）。支持 .ai 指令、自动唤起、连续对话模式、多人格切换（仅预设）、触发词(keywordPrefix)、图片识别(视觉API直连)、URL 网页读取、用户主动调教上下文。沉浸式陪伴：私聊恒免触发词且不拼接@前缀；群聊默认需触发词（并以图片白名单准入，须由已触发的用户发出），master 可用 .ai on 切到免触发词、.ai off 回到触发词机制。注意：与微信小程序共享上下文为服务器版专属能力，本直连版不支持；自定义人格为服务器版专属，本版仅保留预设人格。
+// @timestamp    2026-09-11
 // @license      MIT
 // ==/UserScript==
+// 3.0.0 新增：用户主动调教上下文
+//   理由：AI 每次调用都是全新请求、只靠自携带的历史上下文，所以"改写上下文"就等于"调教"。
+//   玩法：用户发出以「小清澈：」开头的消息（名字与冒号全半角、中英文均兼容），
+//         该消息【不触发 AI 调用】，但会以 assistant 角色写入历史——
+//         即"用户替 AI 说出了本应由 AI 说出的话"，下次对话时 AI 会当作自己说过的话而延续。
+//   要点：
+//     - 识别：`小清澈：xxx` / `小清澈:xxx` / `Claritas-小清澈：xxx`（名字可用 teachNames 配置）
+//             名字与触发词默认的「小清澈，」（逗号）天然区分，不会误触
+//     - 落盘：立即写入历史，即时生效
+//     - 顺序：历史条目记录 _seq 单调序号（不用时间戳，同毫秒会撞车）；
+//             若调教消息抢先落盘、而防抖缓冲里还压着更早的用户消息，
+//             缓冲结算时会把这批用户消息回插到调教条目之前，避免"AI 先说话、用户才提问"的因果颠倒
+//     - 权限：私聊不限；群聊仅 privilegeLevel >= 50（群管理/群主/骰主）可调教
+//     - 记录：静默写入，不回复；配套 `.ai teach` 查看最近调教、`.ai teach undo` 撤销、`.ai teach clear` 清空
+//
 // 2.3.0 合并说明：以 2.2.0 主分支（人格提示词 / 对话文案）为底，合并直连版的 4 项功能修复：
 //   1. fetch 超时保护（本次修正了直连版 imageToText / fetchUrlText 漏传 timeoutMs 导致必超时的回归）
 //   2. .ai off 独立分支（修复群聊开启陪伴后无法关闭的死代码问题）
@@ -13,13 +28,13 @@
 //   4. 连续对话超时改用布尔短路（修复 boolean 被当作秒数传入导致窗口压缩为 1 秒的问题）
 //   另：清理未使用的 stripPrefix。
 //
-// 触发词机制调整（本次）：
+// 触发词机制调整：
 //   - .ai on  = 群聊免触发词，直接对话
 //   - .ai off = 群聊启用触发词机制，须以 keywordPrefix（默认"小清澈，"）开头才会回应（默认状态）
 //   - 该开关原控制的"是否回应"功能改为恒定开启：群聊始终会应答，on/off 只决定要不要喊名字
 //   - 私聊回复不再拼接 "@昵称 " 前缀，与群聊区分开（私聊本就是一对一，@ 属于冗余噪声）
 //
-// 图片白名单（本次）：
+// 图片白名单：
 //   - 群聊处于触发词模式时，图片不再无条件豁免，改为白名单准入：
 //     只有本轮对话中"触发过触发词（或 @ 了小清澈）"的用户所发的图片才会被识别并送入对话
 //   - 免触发词模式与私聊不受限制，全部图片照常接受
@@ -43,6 +58,11 @@
   const CHAT_FETCH_TIMEOUT_MS = 30000;
   const VISION_FETCH_TIMEOUT_MS = 60000;
   const URL_FETCH_TIMEOUT_MS = 15000;
+  // 用户主动调教
+  const DEFAULT_TEACH_NAMES = "小清澈,Claritas-小清澈";
+  const DEFAULT_MAX_TEACH_CHARS = 1000;
+  // 群聊里允许调教所需的最低权限等级：40邀请者 50管理 60群主 100master
+  const TEACH_MIN_PRIVILEGE = 50;
 
   // 预设人格（直连版仅允许在预设间切换，自定义人格为服务器版专属）
   const DEFAULT_PERSONAS = {
@@ -98,6 +118,10 @@
       // URL 网页读取（直连版客户端抓取，不依赖服务器）
       urlReadingEnabled: !!seal.ext.getBoolConfig(ext, "urlReadingEnabled"),
       maxUrlChars: Math.max(200, seal.ext.getIntConfig(ext, "maxUrlChars") || DEFAULT_MAX_URL_CHARS),
+      // 用户主动调教（以「小清澈：」开头，以 assistant 角色写入历史）
+      userTeachEnabled: !!seal.ext.getBoolConfig(ext, "userTeachEnabled"),
+      teachNames: seal.ext.getStringConfig(ext, "teachNames") || DEFAULT_TEACH_NAMES,
+      maxTeachChars: Math.max(50, seal.ext.getIntConfig(ext, "maxTeachChars") || DEFAULT_MAX_TEACH_CHARS),
       // 直连版仅保留预设人格，不允许本地增删自定义人格
       personas: DEFAULT_PERSONAS,
     };
@@ -151,10 +175,191 @@
     return history.slice(history.length - maxItems);
   }
 
-  function pushHistory(ext, scope, role, content, maxTurns) {
+  // 单调递增的事件序号。之所以不用 Date.now()：同一毫秒内到达的两条消息时间戳会相等，
+  // 排序判定就会失准，"谁先发生"这种问题恰恰不允许有平局。
+  let eventSeq = 0;
+  function nextEventSeq() {
+    eventSeq += 1;
+    return eventSeq;
+  }
+
+  /**
+   * 写入一条历史。条目统一附带 _seq（事件序号）与可选的 _teach 标记。
+   * @param beforeSeq 若给定，则插入到「第一条序号晚于它的调教条目」之前。
+   *   AI 每次调用都是全新请求、只靠自携带上下文，上下文里的因果顺序直接决定 AI 的理解。
+   *   调教消息是立即落盘的，而防抖缓冲里可能还压着更早的用户消息——
+   *   若不回插，就会出现"AI 先说了这句话、用户才来提问"的因果颠倒。
+   */
+  function pushHistoryEntry(ext, scope, entry, maxTurns, beforeSeq) {
     const history = loadHistory(ext, scope);
-    history.push({ role: role, content: content });
+    const item = {
+      role: entry.role,
+      content: String(entry.content == null ? "" : entry.content),
+      _seq: Number(entry._seq) || nextEventSeq(),
+    };
+    if (entry._teach) item._teach = true;
+
+    let idx = history.length;
+    if (beforeSeq) {
+      for (let i = 0; i < history.length; i++) {
+        const h = history[i];
+        if (h && h._teach && Number(h._seq || 0) > beforeSeq) { idx = i; break; }
+      }
+    }
+    history.splice(idx, 0, item);
     saveHistory(ext, scope, trimHistory(history, maxTurns));
+  }
+
+  function pushHistory(ext, scope, role, content, maxTurns, beforeSeq) {
+    pushHistoryEntry(ext, scope, { role: role, content: content }, maxTurns, beforeSeq);
+  }
+
+  // ══════════════════════════════════════
+  //  用户主动调教
+  //  用户发「小清澈：xxx」= 替 AI 说出本应由 AI 说的话 → 以 assistant 角色写入历史
+  // ══════════════════════════════════════
+
+  function escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  const teachRegexCache = { source: null, re: null };
+
+  /**
+   * 构造调教识别正则，兼容：
+   *   - 名字：默认 小清澈 / Claritas-小清澈，可由 teachNames 配置（逗号/顿号/空格分隔）
+   *   - 冒号：全角「：」(U+FF1A) 与半角「:」(U+003A)
+   *   - 空白：名字前、冒号前后（\s 已覆盖全角空格 U+3000）
+   *   - 可选 @ 前缀：先 @ 机器人再写「小清澈：」也能识别
+   *   - 英文部分大小写不敏感
+   */
+  function getTeachRegex(namesStr) {
+    const source = String(namesStr || "");
+    if (teachRegexCache.source === source && teachRegexCache.re) return teachRegexCache.re;
+
+    const names = source
+      .split(/[,，、\s]+/)
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean)
+      .map(escapeRegExp);
+    if (!names.length) names.push(escapeRegExp("小清澈"));
+    // 长名字优先，避免「小清澈」抢先匹配掉「Claritas-小清澈」的前缀
+    names.sort(function (a, b) { return b.length - a.length; });
+
+    const re = new RegExp(
+      "^\\s*(?:\\[CQ:at,[^\\]]*\\]\\s*)?(?:" + names.join("|") + ")\\s*[:：]+\\s*([\\s\\S]*)$",
+      "i"
+    );
+    teachRegexCache.source = source;
+    teachRegexCache.re = re;
+    return re;
+  }
+
+  /**
+   * 判定是否为调教消息并取出内容。
+   * 返回 null = 不是调教消息；返回对象时 content 可能为空串（只写了「小清澈：」没写内容）。
+   */
+  function parseTeachMessage(text, c) {
+    if (!c.userTeachEnabled) return null;
+    const m = String(text || "").match(getTeachRegex(c.teachNames));
+    if (!m) return null;
+    return { content: String(m[1] || "").trim() };
+  }
+
+  /** 群聊里仅群管理/群主/骰主可调教；私聊不限 */
+  function canTeach(ctx, msg) {
+    if (msg.messageType === "private") return true;
+    return (Number(ctx && ctx.privilegeLevel) || 0) >= TEACH_MIN_PRIVILEGE;
+  }
+
+  function listTeachEntries(ext, scope) {
+    return loadHistory(ext, scope).filter(function (h) { return h && h._teach; });
+  }
+
+  function shortenText(s, n) {
+    const t = String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+    return t.length > n ? t.slice(0, n) + "…" : t;
+  }
+
+  /**
+   * 处理调教消息：以 assistant 角色写入历史，不触发 AI 调用。
+   * 记完即 return、不进消息缓冲区，这天然保证了"该语句不独立触发 AI 调用"。
+   */
+  function handleTeachMessage(ext, ctx, msg, teach, c, seq) {
+    const scope = scopeKey(ctx, msg);
+    const userId = String(msg.sender.userId);
+
+    if (!teach.content) {
+      console.log(`【调教】用户 ${userId} 发送了空的调教内容，已忽略`);
+      return;
+    }
+    if (!canTeach(ctx, msg)) {
+      console.log(`【调教】用户 ${userId} 权限不足（privilegeLevel=${ctx && ctx.privilegeLevel}），已忽略`);
+      seal.replyToSender(ctx, msg, "小清澈歪了歪头，没听懂这句悄悄话……（只有群里的管理员或骰主，才能教小清澈说话喔）");
+      return;
+    }
+
+    // 调教是纯文本行为：剥离图片 CQ，避免把无法解析的内容塞进上下文
+    let content = stripImages(teach.content);
+    if (content.length > c.maxTeachChars) content = content.slice(0, c.maxTeachChars);
+    if (!content.trim()) {
+      console.log(`【调教】剥离图片后内容为空，已忽略`);
+      return;
+    }
+
+    pushHistoryEntry(ext, scope, {
+      role: "assistant",
+      content: content,
+      _teach: true,
+      _seq: seq,
+    }, c.historyTurns);
+
+    console.log(`【调教】已记录为"用户替 AI 说出的话"：${shortenText(content, 40)}`);
+  }
+
+  /** `.ai teach [undo|clear]`：查看 / 撤销 / 清空调教记录 */
+  function handleTeachCommand(ext, ctx, msg, act) {
+    const scope = scopeKey(ctx, msg);
+    if (!canTeach(ctx, msg)) {
+      seal.replyToSender(ctx, msg, "只有群里的管理员或骰主，才能查看和修改调教记录喔。");
+      return;
+    }
+
+    const history = loadHistory(ext, scope);
+    const items = history.filter(function (h) { return h && h._teach; });
+    const cmd = String(act || "").toLowerCase();
+
+    if (cmd === "clear" || cmd === "reset") {
+      saveHistory(ext, scope, history.filter(function (h) { return !(h && h._teach); }));
+      seal.replyToSender(ctx, msg, `小清澈忘掉了你教过的 ${items.length} 句话。`);
+      return;
+    }
+
+    if (cmd === "undo" || cmd === "del" || cmd === "delete") {
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i] && history[i]._teach) {
+          const removed = history[i].content;
+          history.splice(i, 1);
+          saveHistory(ext, scope, history);
+          seal.replyToSender(ctx, msg, `小清澈忘掉了最后一句：「${shortenText(removed, 40)}」`);
+          return;
+        }
+      }
+      seal.replyToSender(ctx, msg, "没有可以撤销的调教记录喔。");
+      return;
+    }
+
+    if (!items.length) {
+      seal.replyToSender(ctx, msg, "目前还没有调教记录。对我说「小清澈：要说的话」，就能教小清澈说话啦。");
+      return;
+    }
+
+    const recent = items.slice(-5);
+    let out = `小清澈记得你教过的 ${items.length} 句话，最近 ${recent.length} 条：\n`;
+    for (let i = 0; i < recent.length; i++) {
+      out += `${i + 1}. ${shortenText(recent[i].content, 60)}\n`;
+    }
+    seal.replyToSender(ctx, msg, out.trim());
   }
 
   function loadContinuousState(ext, scope) {
@@ -291,7 +496,14 @@
     const history = loadHistory(ext, scope);
     const messages = [];
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
-    for (let i = 0; i < history.length; i++) messages.push(history[i]);
+    // 只取 role / content：history 里的 _seq、_teach 属于本地元数据，不能漏进 API 请求体
+    for (let i = 0; i < history.length; i++) {
+      const h = history[i];
+      if (!h || !h.role) continue;
+      const content = String(h.content == null ? "" : h.content);
+      if (!content) continue;
+      messages.push({ role: h.role, content: content });
+    }
     messages.push({ role: "user", content: prompt });
     return messages;
   }
@@ -320,7 +532,8 @@
   }
 
   // 直连 DeepSeek/OpenAI 兼容接口（不依赖本地服务器）
-  function callAi(ctx, msg, ext, prompt, activateContinuousMode, atPrefix) {
+  // historyBeforeSeq：本批用户消息中最早的事件序号；用于把用户消息回插到"抢先落盘的调教消息"之前
+  function callAi(ctx, msg, ext, prompt, activateContinuousMode, atPrefix, historyBeforeSeq) {
     const c = cfg(ext);
     const text = String(prompt || "").trim();
     if (!text) {
@@ -336,7 +549,7 @@
     const now = Date.now();
     const messages = buildMessages(ext, scope, text);
 
-    pushHistory(ext, scope, "user", text, c.historyTurns);
+    pushHistory(ext, scope, "user", text, c.historyTurns, historyBeforeSeq);
 
     if (activateContinuousMode && c.continuousConversationEnabled) {
       activateContinuous(ext, scope, now);
@@ -705,7 +918,7 @@
   // ══════════════════════════════════════
   const cmdAi = seal.ext.newCmdItemInfo();
   cmdAi.name = "ai";
-  cmdAi.help = "向 DeepSeek/OpenAI 兼容接口发送消息，格式：.ai 你的问题；支持 .ai reset 清空记录，.ai stop 退出连续对话模式，.ai on 群聊免触发词直接对话，.ai off 群聊启用触发词机制（默认，须以「小清澈，」开头，且只识别已触发用户的图片），.ai persona <人格名> 切换人格，.ai list 查看可用人格，.ai img [提示词] 识别图片。私聊中陪伴始终开启且免触发词。";
+  cmdAi.help = "向 DeepSeek/OpenAI 兼容接口发送消息，格式：.ai 你的问题；支持 .ai reset 清空记录，.ai stop 退出连续对话模式，.ai on 群聊免触发词直接对话，.ai off 群聊启用触发词机制（默认，须以「小清澈，」开头，且只识别已触发用户的图片），.ai persona <人格名> 切换人格，.ai list 查看可用人格，.ai teach [undo|clear] 查看/撤销调教记录，.ai img [提示词] 识别图片。私聊中陪伴始终开启且免触发词。发送「小清澈：要说的话」可即时教小清澈说话（不触发回复）。";
   cmdAi.solve = function (ctx, msg, cmdArgs) {
     const first = cmdArgs.getArgN(1);
     if (!first || first === "help") {
@@ -759,6 +972,11 @@
       listPersonas(ext, ctx, msg);
       return seal.ext.newCmdExecuteResult(true);
     }
+    // 调教记录管理：.ai teach 查看 / .ai teach undo 撤销最后一条 / .ai teach clear 清空
+    if (first === "teach" || first === "jiaoxue") {
+      handleTeachCommand(ext, ctx, msg, cmdArgs.getArgN(2));
+      return seal.ext.newCmdExecuteResult(true);
+    }
     if (first === "img" || first === "itt" || first === "image") {
       const imgConfig = cfg(ext);
       const sw = resolveSwitches(ext, ctx, msg);
@@ -804,7 +1022,7 @@
   // ══════════════════════════════════════
   if (seal.ext.find(EXT_NAME)) return;
 
-  const ext = seal.ext.new(EXT_NAME, "嗅尘紫蝶", "2.3.0");
+  const ext = seal.ext.new(EXT_NAME, "嗅尘紫蝶", "3.0.0");
 
   ext.cmdMap["ai"] = cmdAi;
   ext.cmdMap["aichat"] = cmdAi;
@@ -825,6 +1043,17 @@
     const bufferKey = groupId ? `group_${groupId}` : `private_${userId}`;
     const userNickname = msg.sender.card || msg.sender.nickname || `用户${userId}`;
     const now = Date.now();
+    const seq = nextEventSeq(); // 本条消息的全局唯一序号，用于稳定排序
+
+    // ── 用户主动调教：以「小清澈：」开头（全/半角冒号、中英文名字均兼容）──
+    // 该消息不进入缓冲区、不触发 AI 调用，而是立即以 assistant 角色写入历史，
+    // 即"用户替 AI 说出了本应由 AI 说出的话"。判定必须早于触发词逻辑，
+    // 否则当 keywordPrefix 被配成「小清澈：」时会被当成触发词而误触发回复。
+    const teach = parseTeachMessage(text, c);
+    if (teach) {
+      handleTeachMessage(ext, ctx, msg, teach, c, seq);
+      return;
+    }
 
     // 沉浸式开关解析：私聊恒免触发词；群聊由 .ai on/.ai off 决定是否要触发词
     // 群聊一律应答（原"是否回应"开关已恒定开启），这里不再做 autoReply 拦截
@@ -888,6 +1117,7 @@
         userId: userId,
         content: imageAllowed ? r.text : stripImages(r.text),
         timestamp: now,
+        seq: seq,
         hasImages: r.hasImages,
       });
       buffer.lastActiveTime = now;
@@ -995,9 +1225,18 @@
 
         console.log(`【调试】多人对话整合完毕，即将发给AI的内容：\n`, combinedMessage);
 
+        // 本批消息中最早的事件序号。调教消息是立即落盘的，若缓冲里压着更早的用户消息，
+        // 需要让这批用户消息回插到调教条目之前，避免出现"AI 先说话、用户才提问"的因果颠倒
+        let batchSeq = Number.MAX_SAFE_INTEGER;
+        for (let i = 0; i < currentBuffer.messages.length; i++) {
+          const sq = Number(currentBuffer.messages[i] && currentBuffer.messages[i].seq) || 0;
+          if (sq > 0 && sq < batchSeq) batchSeq = sq;
+        }
+        if (batchSeq === Number.MAX_SAFE_INTEGER) batchSeq = 0;
+
         // 调用直连 AI（传入 atString 用于在群聊中 @ 触发者）
         // 连续对话激活时使用 !isContinuous 触发 activateContinuous
-        callAi(ctx, msg, ext, combinedMessage, !isContinuous, atString);
+        callAi(ctx, msg, ext, combinedMessage, !isContinuous, atString, batchSeq);
 
         // 清空缓冲区（包括白名单），下次连续对话重新校验
         delete chatBuffers[bufferKey];
@@ -1035,4 +1274,8 @@
   // URL 网页读取相关配置
   seal.ext.registerBoolConfig(ext, "urlReadingEnabled", true);
   seal.ext.registerIntConfig(ext, "maxUrlChars", DEFAULT_MAX_URL_CHARS);
+  // 用户主动调教相关配置
+  seal.ext.registerBoolConfig(ext, "userTeachEnabled", true);
+  seal.ext.registerStringConfig(ext, "teachNames", DEFAULT_TEACH_NAMES);
+  seal.ext.registerIntConfig(ext, "maxTeachChars", DEFAULT_MAX_TEACH_CHARS);
 })();

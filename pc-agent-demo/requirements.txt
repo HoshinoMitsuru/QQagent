@@ -1,0 +1,19 @@
+# PC 端 QQ 私聊 AI 代理（路线 A）依赖
+#
+# 安装（推荐用隔离 venv，不要污染全局环境）：
+#   python -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt
+#
+# 或直接用 WorkBuddy 的隔离环境：
+#   C:\Users\Psyche\.workbuddy\binaries\python\envs\default\Scripts\python.exe -m pip install -r requirements.txt
+
+uiautomation>=2.0.18      # Windows UIAutomation 封装，读控件树 / 模拟按键
+comtypes>=1.2.0           # uiautomation 的 COM 底层依赖
+pyperclip>=1.8.2          # 剪贴板写入，用于把文本粘贴进 QQ 输入框
+requests>=2.31.0          # 调用 OpenAI 兼容的 /chat/completions
+websockets>=12.0          # cdp_probe.py 用：连 QQ 渲染层的 CDP 调试端口（方案 A）
+
+# ---- 可选：OCR 兜底（UIA 读到空消息时才需要）----
+# 需要额外安装 tesseract-ocr 本体并勾选 chi_sim 中文语言包
+# pytesseract>=0.3.10
+# Pillow>=10.0.0

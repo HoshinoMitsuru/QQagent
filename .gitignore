@@ -1,0 +1,13 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 探针 / 诊断输出（非源码）
+pc-agent-demo/probe-report.json
+pc-agent-demo/probe-stdout.txt
+pc-agent-demo/probe-tree.txt
+pc-agent-demo/peek-fixed.txt
+
+# 手机端阅读用临时 txt 副本（源文件为同名 .js）
+小清澈3.0.txt

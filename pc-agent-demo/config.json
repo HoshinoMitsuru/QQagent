@@ -1,0 +1,48 @@
+{
+  "_说明": "PC 端 QQ AI 代理（路线A）配置文件。所有字段都有内置默认值，缺项不影响运行。",
+  "_密钥说明": "api_key 留空时，会尝试从 api_key_file 读取；若该文件是 JSON，按 api_key_json_keys 顺序找第一个非空值。",
+
+  "llm": {
+    "api_base": "https://api.deepseek.com",
+    "api_key": "",
+    "api_key_file": "D:/Psyche/aichataligera/ai-web-page/wechat_et_qq_client/tools/data/secrets.json",
+    "api_key_json_keys": ["llm.api_key", "deepseek.api_key", "openai.api_key", "api_key", "DEEPSEEK_API_KEY"],
+    "model": "deepseek-chat",
+    "temperature": 1.1,
+    "max_tokens": 800,
+    "timeout_seconds": 60,
+    "system_prompt": "你是『小清澈』，一个温和、真诚、有点黏人的 AI 陪伴者。说话口语化、简短，一次回复不超过三句话。不要用列表和标题，不要像客服一样客套。"
+  },
+
+  "chat": {
+    "self_nickname": "",
+    "_private_chat_only": "false = 群聊也处理；true = 群聊一律跳过",
+    "private_chat_only": false,
+    "_group_requires_trigger": "群聊里是否额外要求触发词。false = 群聊也自由发言（当前按你的要求放开）",
+    "group_requires_trigger": false,
+    "always_reply": true,
+    "trigger_prefixes": ["小清澈", "清澈"],
+    "reply_cooldown_seconds": 1.5,
+    "min_llm_interval_seconds": 2.0,
+    "max_history_entries": 40,
+    "send_with_ctrl_enter": false,
+    "poll_interval_seconds": 0.8,
+    "max_reply_chars": 500
+  },
+
+  "teach": {
+    "enabled": true,
+    "names": ["小清澈", "Claritas-小清澈"],
+    "max_chars": 1000,
+    "honor_own_outgoing": false
+  },
+
+  "uia": {
+    "read_chain": ["uia", "ocr"],
+    "direction_mode": "auto",
+    "ocr_lang": "chi_sim+eng",
+    "ocr_scale": 2.0,
+    "_restore_foreground": "方案C：true = 写完后把前台窗口还给调用前的那个窗口，降低打扰；false = 关掉（QQ 会继续霸占最上层）",
+    "restore_foreground": true
+  }
+}

@@ -110,6 +110,15 @@ TASKS: list[dict] = [
         "desc": "把持久化下来的每个会话的上下文打印出来。不碰 QQ。",
     },
     {
+        "id": "watch", "label": "实时读取监视器", "mode": "agent",
+        "args": ["--watch", "{seconds}"],
+        # 只读：不写上下文、不发送、不切会话，所以可以和常驻并行
+        "concurrent": True, "needs_qq": True, "dangerous": False, "group": "验证",
+        "desc": "盯着**当前打开的那个会话**，把每一条新读到的消息连同方向判定一起打出来。"
+                "专门用来判定「新消息到底有没有被读到」—— 启动后请去 QQ 里发一条消息。",
+        "params": [_p("seconds", "运行秒数", placeholder="60", default="60")],
+    },
+    {
         "id": "input_test", "label": "输入框写入测试", "mode": "agent", "args": ["--input-test"],
         "concurrent": False, "needs_qq": True, "dangerous": False, "group": "验证",
         "desc": "写入一段文字 → 回读 → 清空，**绝不发送**。验证中文能不能进输入框。",
@@ -434,7 +443,21 @@ class Supervisor:
 
     # ------------------------------------------------------ 状态
     def heartbeat(self) -> dict:
-        """读 agent 写的心跳文件。文件不存在 = 还没进循环，或已经退出了。"""
+        """
+        读 agent 写的心跳文件。文件不存在 = 还没进循环，或已经退出了。
+
+        ## stale 阈值为什么不能写死
+
+        原来这里是 `stale = age > 30`。但主循环是**串行**的，而 `调模型` 这一步
+        最长要 `llm.timeout_seconds`（默认 **60 秒**）—— 于是一次正常的模型调用
+        就足以让界面弹出「心跳已停更，进程可能卡住了」。
+
+        那个提示是**必然误报**，而且会把人往错误方向带（去重启一个其实健康的进程）。
+
+        现在阈值由 agent 按**当前阶段自己的合理上限**写进心跳（`stale_after`），
+        这里只负责用。阶段名（`phase`）也一并带出来，于是提示能直接说
+        「卡在『调模型』已 42 秒（上限 75 秒）」而不是一句「进程可能卡住了」。
+        """
         import json
         try:
             if not os.path.isfile(paths.HEARTBEAT_PATH):
@@ -442,8 +465,17 @@ class Supervisor:
             with open(paths.HEARTBEAT_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             data["present"] = True
-            data["age"] = round(time.time() - float(data.get("ts") or 0), 1)
-            data["stale"] = data["age"] > 30
+            now = time.time()
+            data["age"] = round(now - float(data.get("ts") or 0), 1)
+            # agent 给的阶段上限；老版本心跳里没有这个字段时退回 30s
+            try:
+                limit = float(data.get("stale_after") or 0) or 30.0
+            except (TypeError, ValueError):
+                limit = 30.0
+            data["stale_after_seconds"] = round(limit, 1)
+            data["stale"] = data["age"] > limit
+            since = data.get("phase_since")
+            data["phase_seconds"] = round(now - float(since), 1) if since else None
             return data
         except Exception as exc:
             return {"present": False, "error": str(exc)}

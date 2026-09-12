@@ -745,12 +745,67 @@ function renderRun(s) {
   </div>`;
   if (hb.present) {
     html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">当前阶段</div><div class="v" style="font-family:var(--sans);font-size:13px">
+        ${esc(hb.phase || "—")}${hb.phase_seconds != null ? ` <span style="color:var(--faint);font-size:11px">已 ${fmtDur(hb.phase_seconds)}</span>` : ""}</div></div>
+      <div class="stat"><div class="k">当前会话</div><div class="v" style="font-family:var(--sans);font-size:12px">${esc(hb.scope || "—")}</div></div>
+      <div class="stat"><div class="k">上一阶段耗时</div><div class="v" style="font-family:var(--sans);font-size:12px">
+        ${esc(hb.prev_phase || "—")} ${hb.prev_phase_seconds != null ? fmtDur(hb.prev_phase_seconds) : ""}</div></div>
+      <div class="stat"><div class="k">上一轮总耗时</div><div class="v">${hb.last_round_seconds != null ? fmtDur(hb.last_round_seconds) : "—"}</div></div>
+    </div>`;
+    // 各阶段耗时排行：只看「心跳停更」永远看不出慢在哪一步，一张榜一眼就够。
+    const ps = hb.phase_stats || {};
+    const rows = Object.entries(ps)
+      .map(([k, v]) => ({ name: k, total: v[0], n: v[1], worst: v[2] }))
+      .filter(r => r.worst >= 1.5)
+      .sort((a, b) => b.worst - a.worst).slice(0, 4);
+    if (rows.length) {
+      html += `<div class="stat" style="margin-bottom:12px">
+        <div class="k">各阶段耗时（最慢的几步）</div>
+        <div style="margin-top:5px;font-size:12px;font-family:var(--mono);line-height:1.7">
+        ${rows.map(r => `<div>${esc(r.name)}：平均 ${(r.total / Math.max(1, r.n)).toFixed(2)}s
+          ｜最大 ${r.worst}s｜${r.n} 次</div>`).join("")}</div></div>`;
+    }
+    html += `<div class="grid2" style="margin-bottom:12px">
       <div class="stat"><div class="k">队列长度</div><div class="v">${hb.queue_len ?? 0}</div></div>
       <div class="stat"><div class="k">防抖缓冲</div><div class="v">${hb.pending ?? 0}</div></div>
       <div class="stat"><div class="k">扫描次数</div><div class="v">${hb.scans ?? 0}</div></div>
       <div class="stat"><div class="k">命中 / 入队</div><div class="v">${hb.hits ?? 0} / ${hb.enqueued ?? 0}</div></div>
     </div>`;
-    if (hb.stale) html += `<div class="notice warn">${icon("warn")}<div>心跳已停更 ${fmtDur(hb.age)}，进程可能卡住了。建议停止后重启常驻。</div></div>`;
+    // 本轮读取的三段计数：读到的 / 其中新鲜的 / 被准入策略挡掉的。
+    // 「读到了但全被跳过」是最容易被误当成「对方没发消息」的一种故障 ——
+    // 把这三个数摆在界面上，比让人去翻日志强得多。
+    html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">本轮读到消息</div><div class="v">${hb.read ?? 0}</div></div>
+      <div class="stat"><div class="k">其中新增</div><div class="v">${hb.fresh ?? 0}</div></div>
+      <div class="stat"><div class="k">被跳过</div><div class="v">${hb.skipped ?? 0}</div></div>
+      <div class="stat"><div class="k">等待迟到消息结转</div><div class="v">${hb.late_pending ?? 0}</div></div>
+    </div>`;
+    // 「已生成但还没发出去」—— VM 场景下最该盯的一个数。
+    // 它不为 0 就说明已经写好的回复卡在发送环节，挂了越久越可能丢。
+    if ((hb.unsent ?? 0) > 0) {
+      html += `<div class="notice warn">${icon("warn")}<div>
+        有 <b>${hb.unsent}</b> 条回复<b>已经生成好但还没发出去</b>，正在原地重试。
+        ${hb.unsent_detail ? `<br><span style="opacity:.85">${esc(hb.unsent_detail)}</span>` : ""}
+        <br><span style="opacity:.85">这些回复不会丢：它们只等发送链路恢复，重启也会自动继续。
+        如果这个数一直不降，按日志里对应的错误码处理（多半是
+        <span class="ecode">E-SEND-002</span> 或 <span class="ecode">E-FG-001</span>）。</span>
+      </div></div>`;
+    }
+    if ((hb.fresh ?? 0) > 0 && (hb.skipped ?? 0) > 0 && !(hb.queue_len ?? 0)) {
+      html += `<div class="notice warn">${icon("warn")}
+        <div>读到了 <b>${hb.fresh}</b> 条新消息，但<b>全部被跳过</b>，一条都没进入上下文。
+        日志里找 <span class="ecode">E-READ-001</span> 那一行，它会列出每条被跳过时的原因；
+        最常见的是<b>方向判反</b>（对方的消息被认成自己发的）。
+        点「实时读取监视器」可以现场核对每一条的方向判定。</div></div>`;
+    }
+    if (hb.stale) {
+      const where = hb.phase ? `当前阶段是「${esc(hb.phase)}」` : "";
+      html += `<div class="notice warn">${icon("warn")}<div>
+        心跳已停更 ${fmtDur(hb.age)}，超过该阶段的合理上限 ${hb.stale_after_seconds ?? 30}s。${where}
+        ${hb.phase_seconds != null ? `（该阶段已持续 ${fmtDur(hb.phase_seconds)}）` : ""}<br>
+        <span style="opacity:.85">常见原因：模型接口未响应（会一直等到超时）、QQ 窗口被最小化导致
+        UIA 调用阻塞、或虚拟机/vCPU 被抢占。</span></div></div>`;
+    }
   }
   html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">`;
   html += r.running

@@ -88,6 +88,14 @@ FIELDS: list[dict] = [
        "留空就自动从 QQ 顶栏个人卡片识别。识别错了才需要手填。", advanced=True),
     _f("chat.poll_interval_seconds", "轮询间隔（秒）", "number", "behavior", 0.8,
        "每轮读一次消息列表。调大省 CPU，调小更跟手。", step=0.1, minimum=0.2, maximum=5, advanced=True),
+    _f("chat.keep_draft_on_abort", "中止时保留草稿", "bool", "behavior", True,
+       "发送失败时**不删掉**已经粘进输入框的那段回复，队列会带着同一条继续重试。"
+       "关掉它就恢复旧行为（删掉草稿），代价是丢掉一条已生成的回复、"
+       "那批消息可能因此永远没有得到回应。"),
+    _f("chat.send_button_wait_seconds", "发送按钮等待（秒）", "number", "behavior", 3.0,
+       "粘贴之后等 QQ 把发送按钮恢复可用的时间。慢速虚拟机（vCPU 少、无 GPU 加速）上"
+       "这个同步经常超过 1 秒，设太小会反复判成「文本没进输入框」→ 中止并清理输入框，"
+       "表现就是「它粘了字又回来删掉」。", step=0.5, minimum=0.5, maximum=15, advanced=True),
 
     # -------------------------------------------------- 节奏与聚合
     _f("aggregate.enabled", "启用防抖聚合", "bool", "rhythm", True,
@@ -143,8 +151,9 @@ FIELDS: list[dict] = [
        "切换到某个会话后往前读多少条消息作为上下文。", step=5, minimum=5, maximum=200),
 
     # -------------------------------------------------- 前台与稳定性
-    _f("uia.restore_foreground", "用完后归还前台", "bool", "foreground", True,
-       "关闭后 QQ 会一直霸占最上层，很打扰人。建议保持开启。"),
+    _f("uia.restore_foreground", "用完后归还前台", "bool", "foreground", False,
+       "默认**关闭**（VM 场景）：不归还就没有「抢不到前台」这类失败，发送链路更可靠。"
+       "在你自己每天用的电脑上跑，打开它以免 QQ 一直霸占最上层。"),
     _f("uia.direction_mode", "消息方向判定", "select", "foreground", "auto",
        "auto 自动推断左右归属；读到的「我方/对方」反了才需要手动指定。",
        options=[{"value": "auto", "label": "auto — 自动"},
@@ -315,6 +324,7 @@ _LOCAL_DEFAULTS = {
     "chat": {"self_nickname": "", "private_chat_only": False, "always_reply": True,
              "group_requires_trigger": False, "trigger_prefixes": ["小清澈", "清澈"],
              "reply_cooldown_seconds": 1.5, "min_llm_interval_seconds": 2.0,
+             "send_button_wait_seconds": 3.0, "keep_draft_on_abort": True,
              "max_history_entries": 40, "send_with_ctrl_enter": False,
              "poll_interval_seconds": 0.8, "max_reply_chars": 500,
              "nontext_policy": "skip"},
@@ -338,7 +348,7 @@ _LOCAL_DEFAULTS = {
     "teach": {"enabled": True, "names": ["小清澈", "Claritas-小清澈"],
               "max_chars": 1000, "honor_own_outgoing": False},
     "uia": {"read_chain": ["uia", "ocr"], "direction_mode": "auto",
-            "ocr_lang": "chi_sim+eng", "ocr_scale": 2.0, "restore_foreground": True},
+            "ocr_lang": "chi_sim+eng", "ocr_scale": 2.0, "restore_foreground": False},
 }
 
 

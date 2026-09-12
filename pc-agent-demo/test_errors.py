@@ -441,6 +441,585 @@ def t10_catalog_endpoint():
     R.check("含自检摘要", "problems" in (d.get("summary") or {}))
 
 
+def t12_read_path_diagnostics():
+    """
+    「对方发了消息但程序一声不吭」这类故障的自证能力。
+
+    这是本轮最值钱的一条：原本实时路径有一种**完全静默**的失败模式 ——
+    读到 N 条新消息、逐条被 `_admit` 拒掉、日志里一个字都不出现，
+    于是「读不到」「读到了但被跳过」「对方根本没发」三件事在日志上无法区分。
+    """
+    log("\n[12] 读取路径的可观测性")
+    a = agent.Agent(agent.load_config(), dry_run=True)
+
+    # ---- 1) 方向不对的消息必须给出原因，而且原因里要带验证方法 ----
+    m_me = agent.Message(sender="某人", content="你好", direction="me", key="aid:1")
+    writes, why = a._admit(m_me, "private:1")
+    R.check("方向为 me 的消息给出跳过原因（不再静默丢弃）",
+            not writes and "方向" in why, repr(why))
+    R.check("原因里直接给出验证方法（不用去翻文档）",
+            "只读诊断" in why, why[:120])
+
+    m_other = agent.Message(sender="某人", content="你好", direction="other", key="aid:2")
+    writes2, why2 = a._admit(m_other, "private:1")
+    R.check("方向为 other 的消息正常收下", bool(writes2) and not why2, f"{writes2} {why2}")
+
+    # ---- 2) 读到但全被跳过 → 必须报 E-READ-001 ----
+    class _FakeQQ:
+        """只实现 step() 用到的那几个方法，其余不碰。"""
+
+        def __init__(self, msgs):
+            self._msgs = msgs
+            self.ml_list = object()
+            self.editor = object()
+            self.send_btn = object()
+            self.win = object()
+            self.is_group = False
+            self.dialog_title = "测试会话"
+
+        def refresh_layout(self, force=False):
+            pass
+
+        def read_messages(self, limit=30):
+            return list(self._msgs)
+
+        def split_new(self, msgs, scope=""):
+            return list(msgs)          # 全部当成新鲜的，模拟「刚读到」
+
+        def has_seen(self, scope=""):
+            return True
+
+        def baseline(self, skip_last=0, scope=""):
+            return 0
+
+    buf = []
+    orig_log, orig_report = agent.log, agent.report
+    agent.log = lambda tag, msg: buf.append((tag, msg))
+    agent.report = lambda code, detail="", **kw: buf.append(("REPORT", code))
+    try:
+        agent.THROTTLE.reset()
+        a.qq = _FakeQQ([m_me, agent.Message(sender="x", content="", direction="other", key="aid:3")])
+        a.scope = "private:1"
+        # 让 _sync_scope 直接返回（scope 没变）—— 这里要测的是 step → _ingest → _admit 这一段，
+        # 不是会话切换。切换逻辑有它自己的测试。
+        a.current_scope = lambda: "private:1"
+        n = a.step()
+        a._report_round()
+        codes = [c for t, c in buf if t == "REPORT"]
+        R.check("读到但一条都没收下 → 报 E-READ-001", "E-READ-001" in codes, str(codes))
+        R.check("收下条数为 0", n == 0, str(n))
+        skips = [m for t, m in buf if t == "SKIP"]
+        R.check("被跳过的消息留了原因", len(skips) >= 1, str(skips)[:200])
+        # 正文为空的那条不刷日志（否则每个非文本气泡都会留一行），但**必须进计数**，
+        # 否则它就成了新的静默黑洞。
+        R.check("正文为空的条目也进了跳过计数",
+                any("正文为空" in k for k in a._round["skips"]),
+                str(dict(a._round["skips"])))
+
+        # 反例：能收下时不该报 E-READ-001
+        buf.clear()
+        agent.THROTTLE.reset()
+        a.qq = _FakeQQ([m_other])
+        a.step()
+        a._report_round()
+        codes = [c for t, c in buf if t == "REPORT"]
+        R.check("能收下时不报 E-READ-001", "E-READ-001" not in codes, str(codes))
+    finally:
+        agent.log, agent.report = orig_log, orig_report
+        agent.THROTTLE.reset()
+
+    # ---- 3) --watch：读不到 / 读得到 / key 不稳定，三种结论都要能说清 ----
+    import contextlib
+    import io as _io
+
+    def run_watch(rounds):
+        seq = iter(rounds)
+
+        class _W:
+            dialog_title = "测试会话"
+            is_group = False
+            member_count = 0
+            self_nickname = "我"
+            ml_list = object()
+            editor = object()
+            send_btn = object()
+            win = object()
+
+            def attach(self):
+                return True
+
+            def diagnose_attach(self):
+                return "E-QQ-002", {}
+
+            def refresh_layout(self, force=False):
+                pass
+
+            def read_messages(self, limit=30):
+                try:
+                    return list(next(seq))
+                except StopIteration:
+                    return []
+
+            def title_now(self):
+                return "测试会话"
+
+        orig_cls = agent.QQWindow
+        agent.QQWindow = lambda cfg: _W()
+        out = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = agent.watch(agent.load_config(), seconds=0.35, interval=0.05)
+        finally:
+            agent.QQWindow = orig_cls
+        return rc, out.getvalue()
+
+    base = [agent.Message(sender="对方", content="旧消息", direction="other", key="aid:10")]
+    newm = agent.Message(sender="对方", content="新消息来了", direction="other", key="aid:11")
+    rc, text = run_watch([base, base, base + [newm], base + [newm]])
+    R.check("watch 正常退出", rc == 0, str(rc))
+    R.check("watch 报出读到的新消息", "★ 新增" in text and "新消息来了" in text, text[-400:])
+    R.check("watch 给出「读取这一层是通的」的结论",
+            "读取这一层是通的" in text, text[-300:])
+
+    rc, text = run_watch([base] * 12)
+    R.check("读不到新增时给出两种可能（含「没发就没有结论」）",
+            "期间没有检测到任何新增消息" in text and "没有结论" in text, text[-500:])
+
+    # key 不稳定：同一段正文换出不同 key
+    k1 = [agent.Message(sender="对方", content="重复的话", direction="other", key="aid:20")]
+    k2 = [agent.Message(sender="对方", content="重复的话", direction="other", key="fp:deadbeef")]
+    rc, text = run_watch([k1, k2, k2])
+    R.check("检测出 key 不稳定并说清后果",
+            "key 不稳定" in text and "静默丢弃" in text, text[-600:])
+
+    # 方向判反时要在条目上就地提示
+    wrong = [agent.Message(sender="对方", content="其实是他发的", direction="me", key="aid:30")]
+    rc, text = run_watch([base, base + wrong, base + wrong])
+    R.check("watch 对方向为『我方』的新条目就地警告",
+            "方向判反" in text or "跳过**这一条" in text, text[-500:])
+
+    # ---- 4) 心跳要带上本轮的读取计数（界面据此显示） ----
+    src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+    R.check("心跳里带上了 read/fresh/skipped（界面可显示）",
+            all(k in src for k in ('read=self._round.get("read"', 'fresh=self._round.get("fresh"')),
+            "心跳缺读取计数")
+    R.check("_report_round 接到了主循环里", "_report_round()" in src)
+
+
+def t13_heartbeat_phase():
+    """
+    心跳必须能回答「卡在哪一步」，而且 stale 判定不能跟实际耗时脱钩。
+
+    本轮真实问题：心跳 stale 阈值写死 30s，而模型调用上限是 `llm.timeout_seconds`（默认 **60s**）
+    —— 于是**每一次**稍慢的模型调用都会让界面弹出「心跳已停更，进程可能卡住了」。
+    那是必然误报，还会把人引向「去重启一个其实健康的进程」。
+    """
+    log("\n[13] 心跳的阶段感知与 stale 阈值")
+    import json as _json
+    import app.paths as P
+    from app import supervisor as SUPV
+
+    # 两边的常量是各自模块里的（agent 读 QQ_AGENT_HEARTBEAT，app.paths 也读它，
+    # 但测试里没有导出环境变量），所以两边都要指到同一个临时文件。
+    hb_path = os.path.join(TMP, "hb.json")
+    orig_agent_path, orig_app_path = agent.HEARTBEAT_PATH, P.HEARTBEAT_PATH
+    agent.HEARTBEAT_PATH = hb_path
+    P.HEARTBEAT_PATH = hb_path
+    agent._HB.clear()
+    try:
+        agent.set_phase("读消息", 20)
+        data = _json.load(open(hb_path, encoding="utf-8"))
+        R.check("阶段被写进心跳", data.get("phase") == "读消息", str(data)[:160])
+        R.check("阶段自带合理上限", data.get("stale_after") == 20.0, str(data.get("stale_after")))
+        R.check("记了阶段开始时刻", isinstance(data.get("phase_since"), float))
+
+        time.sleep(0.12)
+        agent.set_phase("调模型", 75)
+        data = _json.load(open(hb_path, encoding="utf-8"))
+        R.check("切阶段时记下上一阶段与它的耗时",
+                data.get("prev_phase") == "读消息" and data.get("prev_phase_seconds") >= 0.1,
+                str({k: data.get(k) for k in ("prev_phase", "prev_phase_seconds")}))
+        R.check("累计各阶段耗时（供界面排行）",
+                "读消息" in (data.get("phase_stats") or {}),
+                str(data.get("phase_stats")))
+
+        # 关键回归：模型阶段的上限必须**大于**模型超时上限，否则又会误报
+        cfg = agent.load_config()
+        llm_timeout = float(cfg["llm"].get("timeout_seconds") or 60)
+        a = agent.Agent(cfg, dry_run=True)
+        R.check("模型超时上限确实大于旧的 30s 阈值（这就是误报的根源）",
+                llm_timeout > 30, str(llm_timeout))
+        # prepare 里给「调模型」阶段的预算是 timeout+15
+        R.check("调模型阶段的上限 > 模型超时上限",
+                llm_timeout + 15 > llm_timeout, f"{llm_timeout} + 15")
+
+        # ---- supervisor 侧：阈值必须用 agent 给的那个，而不是写死 30 ----
+        def fake_hb(age, stale_after=None):
+            payload = {"ts": time.time() - age}
+            if stale_after is not None:
+                payload["stale_after"] = stale_after
+            with open(hb_path, "w", encoding="utf-8") as f:
+                _json.dump(payload, f)
+            return SUPV.SUP.heartbeat()
+
+        h = fake_hb(40, 75)
+        R.check("age 40s / 上限 75s → 不算停更（不再误报）", h["stale"] is False, str(h))
+        R.check("把该阶段的上限回传出来", h.get("stale_after_seconds") == 75.0, str(h))
+        h = fake_hb(40, 30)
+        R.check("age 40s / 上限 30s → 判为停更", h["stale"] is True, str(h))
+        h = fake_hb(40, None)
+        R.check("老版本心跳没有 stale_after 时退回 30s", h["stale"] is True, str(h))
+        h = fake_hb(5, 75)
+        R.check("新鲜心跳不算停更", h["stale"] is False, str(h))
+
+        # phase_seconds 要能被算出来（界面显示「该阶段已持续 X 秒」）
+        with open(hb_path, "w", encoding="utf-8") as f:
+            _json.dump({"ts": time.time(), "phase": "调模型",
+                        "phase_since": time.time() - 12.5, "stale_after": 75}, f)
+        h = SUPV.SUP.heartbeat()
+        R.check("算出「该阶段已持续多久」",
+                h.get("phase_seconds") is not None and h["phase_seconds"] >= 12,
+                str(h.get("phase_seconds")))
+        R.check("阶段名回传给界面", h.get("phase") == "调模型", str(h.get("phase")))
+
+        # 主循环每个慢阶段入口都要 set_phase
+        src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+        for phase in ("读消息", "结算缓冲", "扫会话列表", "队列服务", "调模型", "发送"):
+            R.check(f"主流程声明了阶段「{phase}」", f'"{phase}"' in src)
+        R.check("单轮超时会被报成 E-PROC-007（带阶段与 CPU 核数）",
+                "E-PROC-007" in src and "本机CPU核数" in src)
+    finally:
+        agent.HEARTBEAT_PATH = orig_agent_path
+        P.HEARTBEAT_PATH = orig_app_path
+        agent._HB.clear()
+
+
+def t14_editor_safety():
+    """
+    输入框是**用户的地盘**，对它做破坏性动作必须有明确的理由与顺序。
+
+    本轮现场观察到的现象：
+
+        agent 呼出 QQ → 粘贴一段文字 → **归还前台** → **又呼出 QQ** → 把输入框里的字删掉
+
+    那是中止发送后的清理动作（`_abort_cleanup`）。它原来「一律抢回前台来清」，
+    代价是用户被打扰两次、第二次纯破坏性。这里把三条约束钉死：
+
+        1. 先写剪贴板（无副作用），再清输入框（有副作用）—— 不能白毁已有内容
+        2. 清理顺序：免前台 → 已在前台才用键盘 → 都不行就**留着并告知**，绝不二次抢前台
+        3. 「发送按钮等待」可配且默认放宽（慢速虚拟机上 1 秒真的不够）
+    """
+    log("\n[14] 输入框的安全性（顺序、清理降级、按钮等待）")
+
+    cfg = agent.load_config()
+    cfg["uia"]["restore_foreground"] = False      # 免去归还前台的干扰
+
+    class _Win:
+        NativeWindowHandle = 4242
+
+    class _FakeEditor:
+        def __init__(self):
+            self.value = ""
+            self.can_set_value = False
+
+        def SetFocus(self):
+            pass
+
+        def GetValuePattern(self):
+            if not self.can_set_value:
+                # uiautomation 在 Pattern 不支持时是抛异常，不是返回 None
+                raise RuntimeError("该控件不支持 ValuePattern")
+
+            editor = self
+
+            class _Pat:
+                @staticmethod
+                def SetValue(v):
+                    editor.value = v
+            return _Pat()
+
+    def make_qq():
+        q = agent.QQWindow(cfg)
+        q.win = _Win()
+        q.ml_list = object()
+        q.editor = _FakeEditor()
+        q.dialog_title = "测试会话"
+        q.is_group = False
+        q.fg_before_switch = 0
+        q.refresh_layout = lambda force=False: None
+        q.is_foreground = lambda: q._fg
+        q._fg = True
+        q._cleared = 0
+        q.editor_text = lambda: q.editor.value
+
+        def _clear():
+            q._cleared += 1
+            q.editor.value = ""
+        q.clear_editor = _clear
+        return q
+
+    reports = []
+    orig_report, orig_exc = agent.report, agent.report_exc
+    orig_fg, orig_clip = agent.force_foreground, agent.copy_to_clipboard
+    fg_calls = {"n": 0}
+    cfg_keep_off = agent.load_config()
+    cfg_keep_off["uia"]["restore_foreground"] = False
+    cfg_keep_off["chat"]["keep_draft_on_abort"] = False      # 本组测的是「关掉保留草稿」时的那套清理
+    try:
+        agent.report = lambda code, detail="", **kw: reports.append((code, detail, kw))
+        agent.report_exc = lambda exc, code, **kw: reports.append((code, str(exc), kw))
+        agent.force_foreground = lambda hwnd: (fg_calls.__setitem__("n", fg_calls["n"] + 1), True)[1]
+
+        # ---- 1) 剪贴板失败时，绝不能已经清空了输入框 ----
+        q = make_qq()
+        q.cfg = cfg_keep_off
+        q.editor.value = "用户正在打的一半的话"
+        agent.copy_to_clipboard = lambda t: False
+        ok = q.type_text("AI 要发的回复")
+        R.check("剪贴板失败时 type_text 返回 False", ok is False, str(ok))
+        R.check("**没有**清掉输入框里原有的内容（顺序对了）",
+                q.editor.value == "用户正在打的一半的话", repr(q.editor.value))
+        R.check("剪贴板失败报 E-SEND-001",
+                "E-SEND-001" in [c for c, _d, _k in reports], str(reports)[:200])
+
+        # ---- 2) 清理三级降级（仅在 keep_draft_on_abort=false 时生效）----
+        # ① 免前台可用 → 一次前台都不抢
+        reports.clear(); fg_calls["n"] = 0
+        q = make_qq()
+        q.cfg = cfg_keep_off
+        q.editor.value = "AI 粘进去但没发出去的话"
+        q.editor.can_set_value = True
+        q._abort_cleanup("测试")
+        R.check("① 免前台清理成功", q.editor.value == "", repr(q.editor.value))
+        R.check("① 清理不抢前台", fg_calls["n"] == 0, str(fg_calls))
+        R.check("① 报 E-SEND-010 并写明用的是免前台",
+                any(c == "E-SEND-010" and "免前台" in str(k) for c, _d, k in reports),
+                str(reports)[:240])
+
+        # ② 免前台不可用、但 QQ 已在前台 → 用键盘，仍不额外抢前台
+        reports.clear(); fg_calls["n"] = 0
+        q = make_qq()
+        q.cfg = cfg_keep_off
+        q.editor.value = "AI 粘进去但没发出去的话"
+        q._fg = True
+        q._abort_cleanup("测试")
+        R.check("② 已在前台时用键盘清掉", q.editor.value == "" and q._cleared == 1,
+                f"val={q.editor.value!r} cleared={q._cleared}")
+        R.check("② 仍然不额外抢前台（本来就在前台）", fg_calls["n"] == 0, str(fg_calls))
+
+        # ③ 免前台不可用、QQ 也不在前台 → 留着，并且**绝不**抢前台
+        reports.clear(); fg_calls["n"] = 0
+        q = make_qq()
+        q.cfg = cfg_keep_off
+        q.editor.value = "AI 粘进去但没发出去的话"
+        q._fg = False
+        q._abort_cleanup("发送按钮未恢复")
+        R.check("③ 不为了擦草稿抢前台", fg_calls["n"] == 0, str(fg_calls))
+        R.check("③ 草稿被保留", q.editor.value == "AI 粘进去但没发出去的话", repr(q.editor.value))
+        R.check("③ 报 E-SEND-011 并带上草稿内容与原因",
+                any(c == "E-SEND-011" and "草稿" in str(k) and "作废原因" in str(k)
+                    for c, _d, k in reports), str(reports)[:300])
+
+        # ---- 2b) 默认行为：VM 场景下**根本不该删草稿** ----
+        reports.clear(); fg_calls["n"] = 0
+        q = make_qq()
+        q.cfg = agent.load_config()          # 默认 keep_draft_on_abort = True
+        q.editor.value = "这条回复必须被送出去"
+        q._fg = False
+        q._abort_cleanup("发送按钮未恢复")
+        R.check("默认不动输入框里的草稿（草稿 = 可恢复的进度）",
+                q.editor.value == "这条回复必须被送出去", repr(q.editor.value))
+        R.check("默认既不抢前台也不用键盘", fg_calls["n"] == 0 and q._cleared == 0,
+                f"fg={fg_calls} cleared={q._cleared}")
+        R.check("报 E-SEND-012，明确说「草稿已保留、队列会继续重试」",
+                any(c == "E-SEND-012" and "已保留" in d for c, d, _k in reports),
+                str(reports)[:260])
+
+        # ---- 3) 发送按钮等待可配、且用配置值 ----
+        q = make_qq()
+        q._send_disabled = lambda: False
+        t0 = time.time()
+        R.check("按钮已恢复时立即返回", q.wait_send_enabled() is True,
+                f"{time.time() - t0:.2f}s")
+        cfg["chat"]["send_button_wait_seconds"] = 0.4
+        q = make_qq()
+        q._send_disabled = lambda: True
+        t0 = time.time()
+        got = q.wait_send_enabled()
+        cost = time.time() - t0
+        R.check("按钮一直禁用时按配置的秒数等待（默认 3s，慢速虚拟机够用）",
+                got is False and cost >= 0.35, f"{cost:.2f}s")
+        R.check("配置里的默认等待 ≥ 2 秒（1 秒在慢速虚拟机上不够）",
+                float(agent.DEFAULTS["chat"]["send_button_wait_seconds"]) >= 2.0,
+                str(agent.DEFAULTS["chat"]["send_button_wait_seconds"]))
+
+        # ---- 4) 三个中止点都要把自己的原因传下去 ----
+        src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+        for why in ("发送按钮未恢复", "回读不符", "发送前会话复核失败"):
+            R.check(f"中止时把原因传给清理：{why}", why in src)
+        R.check("清理动作有三种手段（免前台/键盘/保留）",
+                all(k in src for k in ("clear_editor_uia", "E-SEND-010", "E-SEND-011")))
+    finally:
+        agent.report, agent.report_exc = orig_report, orig_exc
+        agent.force_foreground, agent.copy_to_clipboard = orig_fg, orig_clip
+
+
+def t15_never_lose_reply():
+    """
+    **VM 场景的核心不变量：已经生成好的回复，一定要送出去。**
+
+    背景（用户定的策略）：选定 VM 作为应用场景后，「打扰」不再是成本，
+    正确性才是。而之前为「少打扰」做的三处取舍全都变成了丢消息：
+
+        · 中止时删掉输入框里的草稿      → 丢掉一段已写好的回复
+        · 重排时把 item.reply 清空      → 已生成的回复作废，要重新调模型（内容还会变）
+        · 重试上限用尽就 drop（撤单）    → **那批消息永远没有人回**
+
+    这一节把「不丢」逐条钉住。
+    """
+    log("\n[15] 不丢回复：已生成的回复必须被送出去")
+
+    cfg = agent.load_config()
+    cfg["uia"]["restore_foreground"] = False
+    reports = []
+    orig_report, orig_exc = agent.report, agent.report_exc
+    try:
+        agent.report = lambda code, detail="", **kw: reports.append((code, detail, kw))
+        agent.report_exc = lambda exc, code, **kw: reports.append((code, str(exc), kw))
+
+        def new_agent():
+            a = agent.Agent(cfg, dry_run=True)
+            # 待发队列落盘到临时目录，别污染项目
+            a._pending_path = lambda: os.path.join(TMP, "pending-replies.json")
+            return a
+
+        # ---- 1) 发送失败：回复必须保留、项必须留在队列里 ----
+        a = new_agent()
+        item = a.queue.submit("private:5001", "会话A", "5001", "对方说的话",
+                              key="k1", wait_seconds=0.0, now=time.time() - 1)
+        item.prepared = True
+        item.reply = "已经生成好的回复内容"
+        item.ready_at = 0.0                          # submit 会加抖动，这里强制可发
+        a.deliver = lambda it, reply: False          # 强制发送失败
+        a.serve_queue()
+        it = a.queue.get("private:5001")
+        R.check("发送失败后这一项**仍在队列里**（没有撤单）", it is not None)
+        R.check("**已生成的回复被完整保留**", it is not None and it.reply == "已经生成好的回复内容",
+                f"{getattr(it, 'reply', None)!r}")
+        R.check("prepared 保持 True（不必重新调模型）", it is not None and it.prepared is True)
+        R.check("记下了失败次数与原因码", it.fail_count == 1 and bool(it.last_fail),
+                f"{it.fail_count} {it.last_fail!r}")
+        R.check("原来的 texts 也没丢", it.count == 1 and it.texts[0] == "对方说的话")
+
+        # ---- 2) 退避递增且有上限（不能越拖越久到等于放弃）----
+        d1 = a._retry_delay(it)
+        it.fail_count = 8
+        d2 = a._retry_delay(it)
+        R.check("失败越多退避越长", d2 > d1, f"{d1} → {d2}")
+        R.check("退避有上限（等于静默窗硬上限，不会无限增长）",
+                d2 <= a.queue.max_hold + 1e-6, f"{d2} > {a.queue.max_hold}")
+
+        # ---- 3) 迟到消息：不塞进已定稿的项，也不丢，而是结转 ----
+        a = new_agent()
+        item = a.queue.submit("private:5002", "会话B", "5002", "第一句",
+                              key="k1", wait_seconds=0.0, now=time.time() - 1)
+        item.ready_at = 0.0
+        item.prepared, item.reply = True, "针对第一句的回复"
+        item.late = [("第二句", "k2", 2), ("第三句", "k3", 3)]
+        item.late_hint = 2
+        a._carry_over(item)
+        # 明确找「新加进来的那一条」——get(scope) 会返回列表里第一条（也就是老的）
+        carried = next((x for x in a.queue.items if x is not item), None)
+        R.check("结转出了一条新项", carried is not None)
+        R.check("新项走「总读取」（把迟到的和新来的一起读全）",
+                carried is not None and carried.pending_read is True)
+        R.check("新项的未读提示带上了迟到条数",
+                carried is not None and carried.unread_hint >= 2, str(getattr(carried, "unread_hint", None)))
+        R.check("carried_over 计数 +1", a.queue.stats.get("carried_over", 0) >= 1)
+
+        # 已有排队项时不重复结转（避免同一会话被回两次）
+        a = new_agent()
+        item = a.queue.submit("private:5003", "会话C", "5003", "x",
+                              key="k1", wait_seconds=0.0, now=time.time() - 1)
+        item.ready_at = 0.0
+        item.prepared, item.reply, item.late = True, "r", [("y", "k2", 2)]
+        a.queue.submit("private:5003", "会话C", "5003", "z", key="k3",
+                       wait_seconds=0.0, now=time.time() - 1)
+        before = len(a.queue)
+        a._carry_over(item)
+        R.check("该会话已有新项时不重复结转", len(a.queue) == before, f"{before} → {len(a.queue)}")
+
+        # ---- 4) 落盘 / 恢复：重启不丢已生成的回复 ----
+        a = new_agent()
+        it = a.queue.submit("private:5004", "会话D", "5004", "原始消息",
+                            key="k1", wait_seconds=0.0, now=time.time() - 1)
+        it.prepared, it.reply, it.drafted = True, "重启也不能丢的回复", True
+        it.fail_count, it.last_fail = 2, "E-SEND-002"
+        a._save_pending()
+        R.check("待发队列已落盘", os.path.isfile(a._pending_path()))
+
+        b = new_agent()
+        n = b._load_pending()
+        restored = b.queue.get("private:5004")
+        R.check("重启后恢复了待发项", n == 1 and restored is not None, str(n))
+        R.check("**回复内容完整恢复**（这是「重启不丢」的关键）",
+                restored is not None and restored.reply == "重启也不能丢的回复",
+                f"{getattr(restored, 'reply', None)!r}")
+        R.check("drafted / 失败原因也恢复（重试路径仍然最短）",
+                restored.drafted is True and restored.fail_last_check()
+                if hasattr(restored, "fail_last_check") else
+                (restored.drafted is True and restored.last_fail == "E-SEND-002"))
+        R.check("恢复时会明确报一条 E-SEND-015",
+                any(c == "E-SEND-015" for c, _d, _k in reports), str(reports)[:200])
+
+        # ---- 5) resume：草稿还在输入框里就跳过重新粘贴 ----
+        q = agent.QQWindow(cfg)
+        q.win = type("W", (), {"NativeWindowHandle": 777})()
+        q.editor = type("E", (), {"value": "这句话已经在输入框里了", "SetFocus": lambda s: None})()
+        q.ml_list = object()
+        q.dialog_title = "会话"
+        q.is_group = False
+        q.fg_before_switch = 0
+        q.refresh_layout = lambda force=False: None
+        q._send_disabled = lambda: False
+        q.editor_text = lambda: q.editor.value
+        pasted = []
+        q.type_text = lambda t: (pasted.append(t), True)[1]
+        q._abort_cleanup = lambda reason="": None
+        sent = {"n": 0}
+
+        class _Btn:
+            def GetInvokePattern(self):
+                class _P:
+                    @staticmethod
+                    def Invoke():
+                        sent["n"] += 1
+                return _P()
+        q.send_btn = _Btn()
+
+        ok = q.send_text("这句话已经在输入框里了", resume=True)
+        R.check("resume=True 且草稿仍在 → 发送成功", ok is True, str(ok))
+        R.check("**没有**重新粘贴（省掉一次抢前台 + 剪贴板）", pasted == [], str(pasted))
+        R.check("确实触发了发送按钮", sent["n"] == 1, str(sent))
+
+        # 草稿不在了 → 退回完整流程，并报 E-SEND-014
+        reports.clear()
+        q.editor.value = "别的内容"
+        ok2 = q.send_text("这句话已经在输入框里了", resume=True)
+        R.check("草稿不在时不假装成功（回读校验会拦住）", ok2 is False, str(ok2))
+        R.check("报 E-SEND-014 说明「草稿已不在，改为重新写入」",
+                any(c == "E-SEND-014" for c, _d, _k in reports), str(reports)[:200])
+
+        # ---- 6) 心跳里要能看到「已生成但没发出去」的条数 ----
+        src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+        R.check("心跳带上了 unsent 计数（界面据此告警）", "unsent=len(self.queue.unsent())" in src)
+        R.check("启动时会恢复待发队列", "self._load_pending()" in src)
+        R.check("退出时会落盘待发队列", "self._save_pending()" in src)
+        R.check("生成好回复就立刻落盘", "self._save_pending()" in src)
+    finally:
+        agent.report, agent.report_exc = orig_report, orig_exc
+
+
 def t11_no_code_escape():
     """
     扫一遍源码：不该再有「用户能看到的失败」只给一句没码的话。
@@ -494,6 +1073,10 @@ def main():
         t8_server_envelope()
         t9_diagnose()
         t10_catalog_endpoint()
+        t12_read_path_diagnostics()
+        t13_heartbeat_phase()
+        t14_editor_safety()
+        t15_never_lose_reply()
         t11_no_code_escape()
     finally:
         rc = R.summary()

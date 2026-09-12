@@ -147,9 +147,47 @@ class QueuedReply:
     prepared: bool = False         # 是否已完成「读 + 生成」
     prepared_at: float = 0.0
 
+    # ---- 「已定稿」状态：回复一旦生成，这一项就**冻结**，只等发出去 ----
+    # drafted   : 回复已经粘进 QQ 输入框，但还没按发送。重试时**原地重发**即可，
+    #             不必重新粘贴、更不必重新调模型。
+    # fail_*    : 发送阶段失败的次数与最后一次原因（带错误码）。
+    drafted: bool = False
+    draft_at: float = 0.0
+    fail_count: int = 0
+    last_fail: str = ""
+
+    # ---- 迟到消息：回复**生成之后**才到的消息 ----
+    # 它们绝不能塞进 texts（那句话已经按旧内容写好了，塞进去就等于「没被回应」），
+    # 也绝不能因为「这一项已经定稿」就被丢掉（那就是「消息永远没人回」）。
+    # 所以单独攒着，等这一项发出去之后再结转成新的一条。
+    late: list = field(default_factory=list)     # [(text, key, seq)]
+    late_hint: int = 0                           # 迟到期间的未读条数（结转时用）
+    late_from_discovery: bool = False            # 迟到消息里是否含「发现」路径来的（决定要不要重读）
+
     @property
     def count(self) -> int:
         return len(self.texts)
+
+    @property
+    def late_count(self) -> int:
+        return len(self.late)
+
+    @property
+    def has_late(self) -> bool:
+        """
+        是否有「定稿之后才到的动静」需要在发完之后结转。
+
+        两种来源：
+          · 实时路径 —— 直接带着正文进 `late` 桶
+          · 发现路径 —— 只有「有动静」这个事实（没有正文），标记在 `late_from_discovery`
+        两者都必须能触发结转，否则发现路径来的迟到消息会被静默丢掉。
+        """
+        return bool(self.late) or bool(self.late_from_discovery)
+
+    @property
+    def frozen(self) -> bool:
+        """已定稿待发：回复生成好了（或已粘进输入框），此时**不接受任何内容改动**。"""
+        return bool(self.prepared or self.drafted)
 
     @property
     def is_group(self) -> bool:
@@ -162,7 +200,61 @@ class QueuedReply:
         return {"scope": self.scope, "display_name": self.display_name, "uin": self.uin,
                 "count": self.count, "merged": self.merged, "attempts": self.attempts,
                 "pending_read": self.pending_read, "prepared": self.prepared,
+                "drafted": self.drafted, "late": self.late_count,
+                "fail_count": self.fail_count, "last_fail": self.last_fail,
                 "ready_in": round(max(0.0, self.ready_at - time.time()), 2)}
+
+    # ---------------------------------------------------- 落盘（重启不丢待发回复）
+    def to_state(self) -> dict:
+        """
+        序列化「需要送达」的全部状态。
+
+        为什么必须把 `reply` 也存下来：这个程序会被反复重启（调试、改配置、加固）。
+        队列只在内存里的话，一次重启就让「已生成但没发出」的回复凭空消失 ——
+        而那批消息的正文此时已经写进上下文、也被标成已读，重启后再也不会被认成新消息，
+        于是**永远不会有回应**。这正是「尽可能避免消息丢失」要堵的洞。
+        """
+        return {
+            "scope": self.scope, "display_name": self.display_name, "uin": self.uin,
+            "texts": list(self.texts), "keys": list(self.keys), "seqs": list(self.seqs),
+            "first_at": self.first_at, "ready_at": self.ready_at,
+            "hard_deadline": self.hard_deadline, "merged": self.merged,
+            "attempts": self.attempts, "pushed": self.pushed,
+            "pending_read": self.pending_read, "unread_hint": self.unread_hint,
+            "reply": self.reply, "prepared": self.prepared, "prepared_at": self.prepared_at,
+            "drafted": self.drafted, "draft_at": self.draft_at,
+            "fail_count": self.fail_count, "last_fail": self.last_fail,
+            "late": [list(x) for x in self.late], "late_hint": self.late_hint,
+            "late_from_discovery": self.late_from_discovery,
+        }
+
+    @classmethod
+    def from_state(cls, d: dict) -> "QueuedReply":
+        it = cls(scope=str(d.get("scope") or ""),
+                 display_name=str(d.get("display_name") or ""),
+                 uin=str(d.get("uin") or ""))
+        it.texts = list(d.get("texts") or [])
+        it.keys = list(d.get("keys") or [])
+        it.seqs = [int(x) for x in (d.get("seqs") or [])]
+        it.first_at = float(d.get("first_at") or 0.0)
+        it.ready_at = float(d.get("ready_at") or 0.0)
+        it.hard_deadline = float(d.get("hard_deadline") or 0.0)
+        it.merged = int(d.get("merged") or 0)
+        it.attempts = int(d.get("attempts") or 0)
+        it.pushed = bool(d.get("pushed"))
+        it.pending_read = bool(d.get("pending_read"))
+        it.unread_hint = int(d.get("unread_hint") or 0)
+        it.reply = str(d.get("reply") or "")
+        it.prepared = bool(d.get("prepared"))
+        it.prepared_at = float(d.get("prepared_at") or 0.0)
+        it.drafted = bool(d.get("drafted"))
+        it.draft_at = float(d.get("draft_at") or 0.0)
+        it.fail_count = int(d.get("fail_count") or 0)
+        it.last_fail = str(d.get("last_fail") or "")
+        it.late = [tuple(x) for x in (d.get("late") or [])]
+        it.late_hint = int(d.get("late_hint") or 0)
+        it.late_from_discovery = bool(d.get("late_from_discovery"))
+        return it
 
 
 # ============================================================ 队列
@@ -188,7 +280,9 @@ class ReplyQueue:
         self.budget = RateBudget(self.cfg)
         self._rng = random.Random(seed)
         self.stats = {"submitted": 0, "merged": 0, "served": 0,
-                      "aborted": 0, "rejected_merge": 0, "duplicate_skipped": 0}
+                      "aborted": 0, "rejected_merge": 0, "duplicate_skipped": 0,
+                      "deferred_to_late": 0, "send_failed": 0, "restored": 0,
+                      "carried_over": 0}
 
     # ---------------------------------------------------- 查询
     def get(self, scope: str) -> Optional[QueuedReply]:
@@ -256,10 +350,22 @@ class ReplyQueue:
         # 未读提示始终取较大者：它是「首见某会话时该保留最后几条」的依据，
         # 中途只增不减才不会漏掉对方后面又发的那几条。
         it.unread_hint = max(it.unread_hint, int(unread_hint))
-        if it.prepared and it.attempts < self.max_attempts:
-            it.prepared = False          # 备好的回复已经对不上现在的内容了 → 作废重来
-            it.reply = ""
-            it.pending_read = True
+
+        # ⚠️ 已定稿待发的项**不作废、不改动**。
+        #
+        # 原实现是 `it.prepared = False; it.reply = ""`（备好的回复对不上新内容了 → 作废重来）。
+        # 在「打扰是主要成本」的前提下那样做合理；但 VM 场景下正确性优先 ——
+        # 作废意味着**一条已经生成的回复被丢掉**，之后要么重新生成（内容会变、还要再花一次
+        # 模型调用），要么在重试上限用尽后被撤单，那就是「这条消息永远没人回」。
+        #
+        # 现在改成：让它先把已定稿的那句发出去，新动静记到 late 桶里，
+        # 等这一项发完再结转成新的一条。**老的先发，新的后发，两边都不丢。**
+        if it.frozen:
+            it.late_from_discovery = True
+            it.late_hint = max(it.late_hint, int(unread_hint))
+            self.stats["deferred_to_late"] += 1
+            return it, False
+
         self.stats["duplicate_skipped"] += 1
         return it, False
 
@@ -286,14 +392,27 @@ class ReplyQueue:
         **核心规则**：用户排队期间又发来一句，决定「并入」还是「另开一次回复」。
 
         返回：
-            'absent'  该 scope 不在队列里 → 调用方按正常路径 submit
-            'merged'  已并入他待提交的上下文（→ 不会再为这句单独回一次）
-            'close'   剩余等待 ≤ 阈值 → 不掺和，调用方另 submit 一条（会单独回一次）
+            'absent'    该 scope 不在队列里 → 调用方按正常路径 submit
+            'merged'    已并入他待提交的上下文（→ 不会再为这句单独回一次）
+            'deferred'  **这一项已经定稿**（回复生成好了/已粘进输入框）→
+                        新消息记进 late 桶，等它发完之后结转成新的一条。
+                        调用方**不要**再 submit —— 内容没丢，只是排到老的后面。
+            'close'     剩余等待 ≤ 阈值 → 不掺和，调用方另 submit 一条（会单独回一次）
         """
         now = time.time() if now is None else now
         it = self.get(scope)
         if it is None:
             return "absent"
+
+        # ⚠️ 已定稿的项：回复是按它当前的 texts 生成的，新消息**不能**并进去 ——
+        # 并进去的结果是「发出去的那句话没涵盖新内容，而新内容已经进了 texts
+        # 不会再被单独处理」，等于这条消息事实上没被回应。
+        # 记到 late 桶里，等这一项发完再结转成新的一条。
+        if it.frozen:
+            it.late.append((text, key, seq))
+            it.late_hint += 1
+            self.stats["deferred_to_late"] += 1
+            return "deferred"
 
         wait = self.remaining_wait(scope, now)
         if wait <= self.merge_threshold:
@@ -324,7 +443,15 @@ class ReplyQueue:
         默认还要风控放行；`ignore_budget=True` 只给「读 + 生成」阶段用 ——
         那一步不发送、不消耗风控额度，可以提前做，让真正排到时能立刻发出去。
 
-        多个候选取 `first_at` 最早的（FIFO），保证不会饿死先来的用户。
+        ## 排序规则（VM 场景下按「正确性优先」重排过）
+
+            1. **已定稿待发的项优先** —— 它们代表「已经答应要发、但还没发出去」的回复。
+               让新来的项抢先会把这条承诺一直往后推（挤压），而要求是
+               「先发出本应发出但未发出的」。
+            2. 定稿但**连续失败多次**的项降权（`fail_count >= 3`）——
+               否则一条永远发不出去的项会霸占循环，把其它会话全饿死。
+               注意只是降权，**不丢弃**：它仍然留在队列里继续重试。
+            3. 其余按 `first_at` FIFO，避免饿死先来的会话。
         """
         now = time.time() if now is None else now
         if not self.items:
@@ -334,7 +461,12 @@ class ReplyQueue:
         cands = [it for it in self.items if it.ready_at <= now]
         if not cands:
             return None
-        cands.sort(key=lambda x: (x.first_at, x.seqs[0] if x.seqs else 0))
+        cands.sort(key=lambda x: (
+            # 0 = 已定稿待发（先发老的）；1 = 普通；2 = 卡住的（让路，但不丢）
+            2 if x.fail_count >= 3 else (0 if x.frozen else 1),
+            x.first_at,
+            x.seqs[0] if x.seqs else 0,
+        ))
         return cands[0]
 
     def drop(self, scope: str, aborted: bool = False) -> Optional[QueuedReply]:
@@ -347,20 +479,80 @@ class ReplyQueue:
         return it
 
     def requeue(self, item: QueuedReply, delay: float = 0.0,
-                now: Optional[float] = None) -> None:
+                now: Optional[float] = None, fail: str = "") -> None:
         """
-        发送前复核失败 → 把这一项放回队尾重排。
+        把这一项放回队尾重排（发送阶段的失败都走这里）。
+
+        **绝不丢数据**：texts / reply / late 全部原样保留。
+        `fail` 是这一次的失败原因（带错误码），会记在 item 上供界面与日志查看。
 
         注意不要把 texts 清掉：上下文还没交给模型、更没发出去，
         原样保留才能在下一次真的发对的时候用上。
         """
         now = time.time() if now is None else now
         item.attempts += 1
+        if fail:
+            item.fail_count += 1
+            item.last_fail = fail
         item.ready_at = now + max(0.0, delay)
         item.hard_deadline = max(item.hard_deadline, now + self.max_hold)
         self.items = [x for x in self.items if x is not item]   # 身份比较，非值比较
         self.items.append(item)
         self.stats["aborted"] += 1
+
+    def note_send_failure(self, item: QueuedReply, reason: str) -> None:
+        """
+        记录一次**发送阶段**的失败（不做重排，只记账）。
+
+        与 `requeue` 分开的原因：`requeue` 会重置 ready_at（delay），
+        而「发送失败」需要的是「尽快原地重试」——因为回复已经生成好、
+        甚至已经粘进输入框了，重试路径极短（校验 + Invoke）。
+        """
+        item.fail_count += 1
+        item.last_fail = reason
+        self.stats["send_failed"] += 1
+
+    # ---------------------------------------------------- 待发队列落盘
+    def dump_state(self) -> dict:
+        return {"version": 1, "saved_at": time.time(),
+                "items": [it.to_state() for it in self.items]}
+
+    def load_state(self, data: dict) -> int:
+        """
+        从磁盘恢复待发队列，返回恢复了几条。
+
+        只恢复「还有事没做完」的项；已经在 `sent` 状态的不存在（发送成功即 drop）。
+        """
+        if not isinstance(data, dict):
+            return 0
+        n = 0
+        for row in (data.get("items") or []):
+            try:
+                it = QueuedReply.from_state(row)
+            except Exception:
+                continue
+            if not it.scope:
+                continue
+            # 恢复后的时间戳可能已经很旧（上次运行留下的）：
+            # 让它们立刻可发，而不是按旧的 ready_at 再等一次
+            now = time.time()
+            it.ready_at = min(it.ready_at or now, now)
+            it.hard_deadline = max(it.hard_deadline, now + self.max_hold)
+            it.fail_count = max(it.fail_count, 0)
+            self.items = [x for x in self.items if x.scope != it.scope]
+            self.items.append(it)
+            n += 1
+        if n:
+            self.stats["restored"] = n
+        return n
+
+    def unsent(self) -> list:
+        """「已经生成好回复、但还没发出去」的项 —— 界面与诊断要看的就是这些。"""
+        return [it for it in self.items if it.frozen]
+
+    def stuck(self) -> list:
+        """连续失败多次、可能永远发不出去的项（仍然留在队列里，不丢）。"""
+        return [it for it in self.items if it.fail_count >= 3]
 
     def served(self, now: Optional[float] = None) -> None:
         """结算成功：记一笔风控用量。"""
@@ -548,7 +740,84 @@ def selftest() -> int:
     it2.reply = "旧回复"
     rq.ensure_pending("private:9001", "小螺", "9001", now=t + 2.0,
                       wait_seconds=5.0, unread_hint=4)
-    case("发现新动静 → 已备好的回复被作废", it2.prepared is False and it2.reply == "")
+    # ⚠️ 契约在 VM 场景下反过来了：已定稿的回复**不再被作废**。
+    # 作废 = 丢掉一条已经生成的回复 = 「这条消息可能永远没人回」。
+    # 现在改成：让它先把定稿那句发出去，新动静记到 late 桶，发完再结转成新的一条。
+    case("已定稿的回复**不**被作废（改为 late 桶）",
+         it2.prepared is True and it2.reply == "旧回复",
+         f"prepared={it2.prepared} reply={it2.reply!r}")
+    case("新动静记进了 late（发现路径没有正文，标记在 late_from_discovery）",
+         it2.has_late is True and it2.late_from_discovery is True,
+         f"has_late={it2.has_late} late={it2.late_count}")
+    case("标记为「来自发现路径」（结转时要重读）", it2.late_from_discovery is True)
+    case("deferred_to_late 计数 +1", rq.stats["deferred_to_late"] == 1)
+
+    # ---------------- 11b. 定稿后不接受并入（否则新消息事实上没被回应）----------------
+    print("\n[11b] 定稿的项不并入新内容，改为 late 桶（保证「都被回应」）")
+    rq = ReplyQueue(_cfg(jitter_seconds=0.0), seed=1)
+    it = rq.submit("private:9100", "乙", "9100", "第一句", now=t, wait_seconds=0.0)
+    it.prepared, it.reply = True, "已定稿的回复"
+    verdict = rq.offer_followup("private:9100", "第二句", "k2", 2, now=t + 1.0)
+    case("已定稿 → 判定为 deferred", verdict == "deferred", f"got {verdict}")
+    case("新内容没并进 texts（那句话已经写好了）", it.count == 1, f"count={it.count}")
+    case("新内容进了 late 桶，不会丢", it.late_count == 1, f"late={it.late_count}")
+    verdict2 = rq.offer_followup("private:9100", "第三句", "k3", 3, now=t + 2.0)
+    case("再来一句仍然进 late 桶", verdict2 == "deferred" and it.late_count == 2)
+    # 未定稿的项行为不变：仍然按 5s 阈值决定并入还是另起
+    it2 = rq.submit("private:9101", "丙", "9101", "甲句", now=t, wait_seconds=20.0)
+    case("未定稿 → 仍然可以并入",
+         rq.offer_followup("private:9101", "乙句", "k4", 4, now=t + 1.0) == "merged")
+
+    # ---------------- 11c. 优先级：已定稿的排前面（先发老的）----------------
+    print("\n[11c] pick 优先级 · 已定稿待发的先发（挤压时不越过未发出的）")
+    rq = ReplyQueue(_cfg(jitter_seconds=0.0), seed=1)
+    old = rq.submit("private:9200", "老", "9200", "老消息", now=t, wait_seconds=0.0)
+    old.prepared, old.reply = True, "老的回复"
+    new = rq.submit("private:9201", "新", "9201", "新消息", now=t + 5.0, wait_seconds=0.0)
+    case("已定稿的项优先（即使它 first_at 更早、新项更晚）",
+         rq.pick(t + 10.0, ignore_budget=True) is old,
+         f"got {rq.pick(t + 10.0, ignore_budget=True).scope}")
+    # 但连续失败多次的项要降权，否则一条永远发不出去的项会饿死所有人
+    old.fail_count = 3
+    case("连续失败多次的定稿项降权（避免霸占循环，但不丢弃）",
+         rq.pick(t + 10.0, ignore_budget=True) is new)
+    case("降权的项仍在队列里（不丢）", old in rq.items)
+    case("stuck() 能列出卡住的项", [x.scope for x in rq.stuck()] == ["private:9200"])
+
+    # ---------------- 11d. 发送失败只记账，不动 ready_at（原地尽快重试）----------------
+    print("\n[11d] note_send_failure · 发送失败要原地尽快重试，而不是排到队尾")
+    rq = ReplyQueue(_cfg(jitter_seconds=0.0), seed=1)
+    it = rq.submit("private:9300", "丁", "9300", "x", now=t, wait_seconds=0.0)
+    before = it.ready_at
+    rq.note_send_failure(it, "E-SEND-002 按钮未恢复")
+    case("fail_count +1", it.fail_count == 1)
+    case("记下了失败原因（带码）", "E-SEND-002" in it.last_fail, it.last_fail)
+    case("没有改动 ready_at（回复已生成，重试路径极短）", it.ready_at == before)
+    case("send_failed 计数 +1", rq.stats["send_failed"] == 1)
+
+    # ---------------- 11e. 待发队列落盘 / 恢复（重启不丢已生成的回复）----------------
+    print("\n[11e] 待发队列落盘 · 重启后继续把没发出的回复发出去")
+    rq = ReplyQueue(_cfg(jitter_seconds=0.0), seed=1)
+    a = rq.submit("private:9400", "戊", "9400", "原文", now=t, wait_seconds=0.0)
+    a.prepared, a.reply, a.texts = True, "生成好但没发出去的话", ["原文"]
+    a.drafted, a.fail_count, a.last_fail = True, 2, "E-SEND-003"
+    b = rq.ensure_pending("private:9401", "己", "9401", now=t, unread_hint=2)[0]
+    state = rq.dump_state()
+    case("落盘包含全部待发项", len(state["items"]) == 2, str(len(state["items"])))
+
+    rq2 = ReplyQueue(_cfg(jitter_seconds=0.0), seed=1)
+    n = rq2.load_state(state)
+    case("恢复条数正确", n == 2, str(n))
+    ra = rq2.get("private:9400")
+    case("**已生成的回复被完整恢复**（这就是「重启不丢」的关键）",
+         ra is not None and ra.reply == "生成好但没发出去的话" and ra.prepared is True,
+         f"{getattr(ra, 'reply', None)!r}")
+    case("drafted / fail_count / last_fail 一并恢复",
+         ra.drafted is True and ra.fail_count == 2 and ra.last_fail == "E-SEND-003")
+    case("恢复后立刻可发（不等旧的时间戳）", ra.ready_at <= time.time() + 1e-6)
+    rb = rq2.get("private:9401")
+    case("占位项也恢复，且保留未读提示", rb is not None and rb.pending_read and rb.unread_hint == 2)
+    case("unsent() 列出「已生成但没发出去」的项", [x.scope for x in rq2.unsent()] == ["private:9400"])
 
     # ---------------- 12. 两阶段：读+生成可早于风控放行 ----------------
     print("\n[12] pick(ignore_budget) · 读+生成可提前，发送仍等风控")

@@ -323,13 +323,31 @@ def run(with_llm: bool = False, with_uia: bool = True) -> dict:
         r = st["resident"]
         hb = st.get("heartbeat") or {}
         if r.get("running"):
+            phase = hb.get("phase")
+            unsent = hb.get("unsent") or 0
             extra = ""
             if hb.get("stale"):
-                extra = f"　⚠️ 心跳已停更 {hb.get('age')}s，进程可能卡住"
-            return Check("proc", "常驻进程", "ok" if not hb.get("stale") else "warn",
-                         f"运行中 {r.get('elapsed')}s · 当前会话 {hb.get('title') or '—'} · "
-                         f"队列 {hb.get('queue_len', 0)}{extra}",
-                         data={"resident": r, "heartbeat": hb})
+                # 说清「卡在哪一步、那一步的上限是多少」——
+                # 只说「心跳停更」会让人误以为是进程死了，其实多半只是某一步慢。
+                extra = (f"　⚠️ 心跳停更 {hb.get('age')}s（该阶段上限 "
+                         f"{hb.get('stale_after_seconds')}s）"
+                         f"，当前阶段「{phase}」已持续 {hb.get('phase_seconds')}s")
+            c = Check("proc", "常驻进程",
+                      "warn" if (hb.get("stale") or unsent) else "ok",
+                      f"运行中 {r.get('elapsed')}s · 阶段 {phase or '—'} · "
+                      f"上一轮 {hb.get('last_round_seconds')}s · "
+                      f"当前会话 {hb.get('title') or '—'} · "
+                      f"队列 {hb.get('queue_len', 0)}{extra}",
+                      data={"resident": r, "heartbeat": hb})
+            if unsent:
+                # 「已生成但没发出去」是 VM 场景下最该重视的一件事：
+                # 回复已经生成，却卡在发送环节 —— 卡久了就可能永远发不出去。
+                c.status = "warn"
+                c.fix = (f"有 {unsent} 条回复已生成但没发出去（正在重试，不会丢）。"
+                         f"看「待发出回复」的失败原因码："
+                         f"{hb.get('unsent_detail') or '（见日志）'}；"
+                         f"对应处理见 E-SEND-013 的说明")
+            return c
         return Check("proc", "常驻进程", "skip", "未运行（正常，需要时点「开始常驻」）",
                      data={"resident": r})
 

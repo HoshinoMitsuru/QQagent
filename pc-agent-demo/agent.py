@@ -389,6 +389,21 @@ DEFAULTS = {
         "enabled": True,
         "timeout_seconds": 1800,
     },
+    # ------------------------------------------------------------ 对话内指令
+    # 移植自插件 小清澈3.0.js 的 .ai 指令集（当前只实现 reset/clear/help）。
+    # 指令不转发给 AI、不写入上下文，只回一句确认语。
+    "commands": {
+        "enabled": True,
+        "prefixes": [".ai", "。ai", "/ai", ".aichat"],
+        # 允许谁下指令：other = 对方；self = 自己账号手输的（会自动排除机器人自己的发言）
+        "accept_from": ["other", "self"],
+        "reply_ack": True,
+        "ack_reset": "小清澈读懂了你的意思，回到了房间，脱衣睡下。",
+        # reset 时是否把「还压在防抖缓冲里、没来得及结算」的消息一起丢掉。
+        # true 才是干净的 reset：否则那几条会在几秒后照常送给 AI，等于没重置。
+        "reset_clears_pending": True,
+        "unknown_hint": "这条指令还没移植到 PC 端，暂时只支持 .ai reset / .ai help。",
+    },
     # ---------------------------------------------------------------- 持久化
     # 上下文按会话（scope）隔离落盘，重启不丢。文件已被 .gitignore 排除。
     "persist": {
@@ -627,6 +642,70 @@ def strip_trigger(text: str, cfg: dict) -> str:
             t = t[len(pre):].lstrip("：: 　,")
             break
     return t
+
+
+# ============================================================ 对话内指令（.ai …）
+# 移植自插件 小清澈3.0.js 的 cmdAi 指令集。
+# 与插件一致的两条铁律：
+#   1) 指令本身**绝不转发给 AI**、也**不写入上下文**（否则 reset 会被自己污染）；
+#   2) 指令是「谁发谁生效」，按会话（scope）隔离 —— 在哪个会话里敲就只影响哪个会话。
+#
+# 插件原指令全表（下表用于「已知但还没移植」时给出准确提示，而不是把指令丢给 AI）
+CMD_CATALOG = {
+    "help":    "查看帮助",
+    "reset":   "清空本会话的上下文，并退出连续对话",
+    "clear":   "同 reset",
+    "stop":    "只退出连续对话，不清空上下文",
+    "end":     "同 stop",
+    "on":      "群聊免触发词",
+    "open":    "同 on",
+    "off":     "群聊启用触发词",
+    "close":   "同 off",
+    "persona": "切换人格",
+    "list":    "列出可用人格",
+    "teach":   "查看 / 撤销 / 清空调教记录",
+    "jiaoxue": "同 teach",
+    "img":     "识别图片",
+    "itt":     "同 img",
+    "image":   "同 img",
+}
+# 目前 PC 端已经实现的
+CMD_DONE = {"help", "reset", "clear"}
+# _admit 的返回值里，用它标记「这一条是指令，不是要写进上下文的内容」。
+# 指令的副作用（清上下文 / 排回执）在 _admit 里就已经结算完了，
+# 调用方只需要知道「这条别再当消息处理」。
+CMD_SENTINEL = "cmd"
+# 按用户要求明确不做 / 多媒体悬置，提示语要区分开，免得以为是漏掉了
+CMD_SKIPPED = {"persona", "list", "img", "itt", "image"}
+
+
+def parse_command(text: str, cfg: dict) -> Optional[tuple[str, list, str]]:
+    """
+    识别对话内指令，返回 (命令名小写, 参数列表, 前缀之后的完整正文)；不是指令则 None。
+
+    兼容插件的 `.ai` / `.aichat`，外加中文句号「。」与斜杠前缀；大小写不敏感、允许前置空白。
+    `.ai` 后面什么都没写 → 返回 ("help", [], "")（与插件的默认行为一致）。
+    """
+    if not cfg["commands"].get("enabled", True):
+        return None
+    t = (text or "").lstrip()
+    if not t:
+        return None
+    # 长的前缀优先，避免 ".aichat" 被 ".ai" 抢先匹配
+    for pre in sorted([p for p in (cfg["commands"].get("prefixes") or []) if p],
+                      key=len, reverse=True):
+        if not t.lower().startswith(pre.lower()):
+            continue
+        rest = t[len(pre):]
+        # 前缀后面必须紧跟分隔符或结束，否则 ".aichat" 会被 ".ai" 当成 "chat"
+        if rest and not (rest[0].isspace() or rest[0] in "：:，,、\u3000"):
+            continue
+        body = rest.strip("：:，,、 \t\u3000")
+        if not body:
+            return ("help", [], "")
+        parts = body.split()
+        return (parts[0].lower(), parts[1:], body)
+    return None
 
 
 # ============================================================ 消息模型
@@ -1060,6 +1139,10 @@ class Debouncer:
 
         return round(base + h["extra"] + cold)
 
+    def reset_rounds(self, scope: str) -> None:
+        """把某个会话的两档判定打回初始（不是搞乱，是 reset 语义的一部分）。"""
+        self._rounds.pop(scope or "", None)
+
     def summary(self, scope: str = "") -> str:
         st = self._round_state(scope)
         return (f"{self.current_base(scope) / 1000:.1f}s"
@@ -1160,6 +1243,49 @@ class RotationState:
 
 
 # ============================================================ LLM
+def _non_ascii(text: str) -> list[tuple[int, str]]:
+    """找出字符串里的非 ASCII 字符，返回 [(下标, 字符)]（下标从 0 起）。"""
+    return [(i, ch) for i, ch in enumerate(text or "") if ord(ch) > 127]
+
+
+def check_ascii_for_header(value: str, what: str) -> None:
+    """
+    检查一个要放进 HTTP 头的值是不是纯 ASCII —— 不是就抛带码的错误。
+
+    ## 为什么值得单独做这件事
+
+    HTTP 头只能用 latin-1 编码，所以密钥里混进一个中文/全角字符，
+    请求会在**发出之前**就抛 `UnicodeEncodeError`。这个异常很容易被兜底逻辑
+    误判成「连不上接口」，然后给出一屏「网络不通 / DNS / 代理」的建议 ——
+    而正确动作只是「把密钥重新粘一遍」。实测发生过一次，用户直接看懵了。
+
+    提前检查的另一个好处：能指出**具体第几个字符**有问题，而不是让人去猜。
+    """
+    bad = _non_ascii(value)
+    if not bad:
+        return
+    # 掩码（界面显示的那串 `sk-1••••••••ghij`）含有 8 个 U+2022，位置正好落在
+    # HTTP 头的 11~18 —— 这是「密钥被掩码覆盖」的**特征指纹**（曾经真的发生过一次，
+    # 那次被误报成网络问题）。认出来就直接点破。
+    if "•" in value:
+        raise EC.AppError(
+            "E-LLM-011",
+            f"{what}看起来**不是真密钥，而是界面上的掩码**（{value[:4]}…{value[-4:]}）。"
+            f"这是旧版本的一个 bug 造成的：保存设置时把掩码当成真密钥写进了配置文件，"
+            f"真实密钥被覆盖了。",
+            {"检查对象": what, "总长度": len(value),
+             "怎么办": "到「模型接入 → API Key」里重新粘贴一次真实密钥（先清空再粘）",
+             "指纹": "值里含 U+2022（•），共 "
+                     f"{sum(1 for ch in value if ch == chr(0x2022))} 个"})
+    where = "、".join(f"第 {i + 1} 个是 {ch!r}（U+{ord(ch):04X}）" for i, ch in bad[:5])
+    more = f"，另有 {len(bad) - 5} 个" if len(bad) > 5 else ""
+    raise EC.AppError(
+        "E-LLM-011",
+        f"{what}里有 {len(bad)} 个非 ASCII 字符：{where}{more}",
+        {"检查对象": what, "总长度": len(value),
+         "说明": "HTTP 头只能用 latin-1，非 ASCII 字符会让请求在发出之前就失败 —— 不是网络问题"})
+
+
 class LLMClient:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -1197,6 +1323,11 @@ class LLMClient:
             raise EC.AppError("E-LLM-001",
                               "config.json 的 llm.api_key 为空，且 api_key_file 里也没找到可用密钥",
                               {"api_base": self.url, "model": self.model})
+        # 发请求之前先做编码检查：密钥/地址里混进非 ASCII 字符时，
+        # 请求会在发出之前就炸，而那个异常极容易被误判成「网络不通」。
+        # 提前拦住，并指出具体第几个字符有问题。
+        check_ascii_for_header(self.api_key, "API Key")
+        check_ascii_for_header(self.url, "接口地址")
         self.wait_turn()
         payload = {
             "model": self.model,
@@ -1229,7 +1360,14 @@ class LLMClient:
         except requests.exceptions.Timeout as exc:
             raise EC.AppError("E-LLM-003", f"请求超时：{exc}", {"url": self.url}) from exc
         except Exception as exc:
-            raise EC.wrap(exc, "E-LLM-002") from exc
+            # ⚠️ 兜底码**不能断言一个具体根因**。
+            #
+            # 这里以前写的是 `EC.wrap(exc, "E-LLM-002")` —— 而 E-LLM-002 的标题是
+            # 「连不上模型接口」。于是任何一个没预料到的异常都会被打成「网络问题」，
+            # 用户拿到一屏「网络不通/DNS/代理」的建议，而真正的根因（比如密钥里混了中文）
+            # 被埋在最后一行「详情」里。**假诊断比不报错更坏。**
+            # 现在兜底到一个中性的码，并明确声明「不代表网络有问题」。
+            raise EC.wrap(exc, "E-LLM-012") from exc
 
         if resp.status_code != 200:
             snippet = resp.text[:300]
@@ -2506,6 +2644,12 @@ class Agent:
         # （见 Agent._report_round）。这类故障原本和「对方根本没发消息」在日志上无法区分。
         self._round = {"read": 0, "fresh": 0, "handled": 0,
                        "skips": collections.Counter()}
+        # 上一次生成失败的**原因码**。调用方靠它判断「要不要再报一条」——
+        # 根因已经报过时就只记后果，避免日志里并列出现两条互相矛盾的报错。
+        self._last_gen_fail = ""
+        # 我们自己刚发出去的原文。用途只有一个：万一模型回了句以 `.ai` 开头的话，
+        # 它会被读回来当成「我方消息」，进而被当成指令 —— 那就成了自己触发自己。
+        self._own_sent = collections.deque(maxlen=30)
 
     # ---------------------------------------------------- 会话身份
     def _uids(self):
@@ -2584,6 +2728,135 @@ class Agent:
             return False
         return self.store.is_continuous(scope, time.time(), self._cont_timeout())
 
+    # ---------------------------------------------------- 对话内指令
+    def _command_allowed(self, m: Message) -> bool:
+        """
+        这条消息是否有资格下指令。
+
+        「我方」的消息要特别小心：机器人自己的回复也会以「我方」的身份出现在
+        消息列表里。万一模型恰好回了一句以 `.ai` 开头的话，就会变成
+        「自己触发自己」的循环 —— 所以这里用 `_own_sent` 把发出去的原文排掉。
+        """
+        allow = self.cfg["commands"].get("accept_from") or ["other"]
+        if m.direction == "me":
+            if m.content in self._own_sent:
+                log("CMD", f"这条『我方』消息是我们自己发出去的回复（{clip(m.content, 24)}）"
+                           f"→ 不当作指令")
+                return False
+            return "self" in allow
+        if m.direction == "other":
+            return "other" in allow
+        return False
+
+    def _help_text(self) -> str:
+        done = "、".join(f".ai {k}" for k in sorted(CMD_DONE))
+        return (f"小清澈现在听得懂的指令：{done}\n"
+                f"· .ai reset —— 忘掉这个会话里聊过的一切（含被教过的话），重新开始\n"
+                f"· .ai help  —— 显示这段说明\n"
+                f"其它指令（.ai stop / on / off / teach / persona / img）还没移植到 PC 端。")
+
+    def _run_command(self, hit, scope: str, sender: str) -> tuple[str, str]:
+        """
+        执行一条对话内指令，返回 (结果, 交给 AI 的正文)。
+
+            ("handled",     "")   已消化：不进上下文、不转发 AI
+            ("ignored",     "")   插件里有、但 PC 端还没移植：回一句说明，同样不转发
+            ("passthrough", text) 不是指令，只是把 `.ai` 当唤起前缀用（`.ai 你好`）：
+                                  剥掉前缀后按普通提问交给 AI —— 与插件行为一致
+        """
+        name, _args, raw = hit
+        c = self.cfg["commands"]
+
+        if name in ("reset", "clear"):
+            hist = self.store.history(scope)
+            n = len(hist)
+            hist.clear()
+            self.store.deactivate_continuous(scope)
+            if c.get("reset_clears_pending", True):
+                # 缓冲里那几条还没结算。不丢掉的话，几秒后它们照样会被送给 AI，
+                # 用户看到的就是「说了 reset，它还在回我刚才的话」。
+                dropped = len(self.deb.pending)
+                self.deb.clear()
+                self.deb.reset_rounds(scope)
+            else:
+                dropped = 0
+            self.store.save(force=True)
+            log("CMD", f"{sender} 发出 .ai reset → 清空 {scope} 的上下文（{n} 条）"
+                       f"、退出连续对话、丢掉 {dropped} 条未结算的缓冲")
+            self._queue_ack(scope, c.get("ack_reset") or "好，我从头开始。")
+            return ("handled", "")
+
+        if name == "help":
+            log("CMD", f"{sender} 发出 .ai help")
+            self._queue_ack(scope, self._help_text())
+            return ("handled", "")
+
+        if name in CMD_CATALOG:
+            if name in CMD_SKIPPED:
+                tip = f"`.ai {name}` 是明确不做的部分（人格切换 / 图片识别），PC 端不会支持。"
+            else:
+                tip = c.get("unknown_hint") or "这条指令还没移植到 PC 端。"
+            log("CMD", f"{sender} 发出 .ai {name} → 未移植，已回绝（不转发给 AI）")
+            self._queue_ack(scope, tip)
+            return ("ignored", "")
+
+        # 不在指令表里 → 按插件的「普通消息」分支走：`.ai 你的问题`
+        log("CMD", f"{sender} 的 `.ai` 后面不是已知指令 → 剥掉前缀交给 AI：{clip(raw, 40)}")
+        return ("passthrough", raw.strip())
+
+    def _queue_ack(self, scope: str, text: str) -> None:
+        """
+        把指令回执排进发送队列，而不是就地 `send_text`。
+
+        为什么不直接发：回执和正常回复一样，必须
+          · 送到**对的那个会话**（可能要切会话，还要过身份复核）
+          · 吃风控额度（否则就成了绕过限速的后门）
+          · 失败能原地重试（`deliver` 那套租约 + 草稿恢复）
+        这些队列已经全做好了，重写一遍只会多一处会出错的地方。
+        """
+        c = self.cfg["commands"]
+        text = (text or "").strip()
+        if not text:
+            return
+        if not c.get("reply_ack", True):
+            log("CMD", f"回执已关闭（commands.reply_ack=false）→ 不发：{clip(text)}")
+            return
+        if self.dry_run:
+            log("CMD", f"dry-run：回执不发送 → {clip(text)}")
+            return
+
+        ident = self._identity.get(scope) or {}
+        display_name = (ident.get("display_name")
+                        or (self.qq.dialog_title if scope == self.scope else "")
+                        or scope.partition(":")[2] or "(未命名会话)")
+        uin = ident.get("uin") or self._uids().uin_of(display_name)
+
+        item = self.queue.get(scope)
+        if item is None:
+            item = self.queue.submit(scope, display_name, uin, text="", wait_seconds=0.0)
+            log("CMD", f"为回执新建队列项：{display_name!r}")
+        elif item.frozen:
+            # 已经备好（甚至已经粘进输入框）的那条回复会被回执顶掉。
+            # 这是 reset 的题中之义：用户要求「忘掉刚才」，那条回复不该再发出去。
+            log("CMD", f"{display_name!r} 原本有一条{'已粘进输入框' if item.drafted else '已备好'}"
+                       f"的回复（{len(item.reply)} 字）→ 被指令回执顶掉，不再发送")
+
+        # 重置这一项：不读正文、不调模型，只把回执发出去
+        item.texts, item.keys, item.seqs, item.batch = [], [], [], []
+        item.pending_read = False
+        item.late, item.late_hint, item.late_from_discovery = [], 0, False
+        item.reply = text
+        item.prepared = True
+        item.prepared_at = time.time()
+        item.drafted = False        # 输入框里若有旧草稿，type_text 会先清空再写
+        item.fail_count = 0
+        item.last_fail = ""
+        item.ready_at = time.time()  # 回执不等静默窗，尽快发
+        item.hard_deadline = max(item.hard_deadline, time.time() + self.queue.max_hold)
+        self.remember_identity(scope, display_name, uin)
+        self._save_pending()
+        log("CMD", f"回执已排队 → {display_name!r}：{clip(text)}")
+
     # ---------------------------------------------------- 准入判定（两条路径共用）
     def _admit(self, m: Message, scope: str) -> tuple[list, str]:
         """
@@ -2602,6 +2875,32 @@ class Agent:
         """
         if not m.content:
             return [], ""
+
+        # 白名单：只跟私聊说话时，群聊一律跳过。
+        # 提到方向判定之前 —— 不服务的会话连指令都不该处理。
+        if self.cfg["chat"].get("private_chat_only") and self.qq.is_group:
+            return [], f"群聊『{self.qq.dialog_title}』已跳过"
+
+        # ---- 对话内指令（.ai …）：不转发给 AI、不写入上下文 ----
+        #
+        # 放在方向判定**之前**：指令既允许来自「对方」，也允许来自「我自己手输的」
+        # （由 commands.accept_from 控制），所以不能等到方向判定之后再处理。
+        # 机器人自己刚发出去的那句话会被 _command_allowed 排除掉，免得自己触发自己。
+        #
+        # 判定放在 _admit 里，是为了让「实时路径」和「总读取路径」共用同一套规则 ——
+        # 否则同一条 `.ai reset` 会因为「当时凑巧有没有开着这个会话」而时灵时不灵。
+        override = ""
+        if m.kind == "text":
+            hit = parse_command(m.content, self.cfg)
+            if hit and self._command_allowed(m):
+                verdict, override = self._run_command(hit, scope, m.sender or "对方")
+                if verdict != "passthrough":
+                    # 已消化：既不写进上下文，也不该被记成「跳过」（那会让人以为漏处理了）。
+                    # 用一个显式的哨兵告知调用方「这条是指令」。
+                    return [(CMD_SENTINEL, hit[0], "")], ""
+                if not override:
+                    return [], ""
+
         if m.direction != "other":
             if m.direction == "me" and self.cfg["teach"].get("honor_own_outgoing"):
                 body = parse_teach(m.content, self.cfg)
@@ -2618,10 +2917,6 @@ class Agent:
                         f"｜若这条其实是对方发的，说明方向判反了："
                         f"跑一次「只读诊断」核对【我方】/【对方】与气泡左右是否一致"
                         f"（key={m.key[:24]} 发送者={m.sender or '?'}）")
-
-        # 白名单：只跟私聊说话时，群聊一律跳过
-        if self.cfg["chat"].get("private_chat_only") and self.qq.is_group:
-            return [], f"群聊『{self.qq.dialog_title}』已跳过"
 
         # 多媒体（图片/语音/文件/动画表情）：由 chat.nontext_policy 决定
         #   "skip"     —— 一律跳过（默认）
@@ -2640,22 +2935,25 @@ class Agent:
                 return [], f"非文本消息没有可用描述（{m.kind}）"
         else:
             desc = ""
-        text_src = desc or m.content
+        # override：`.ai <问题>` 这种「明确点名要让 AI 回答」的形态，
+        # 已经剥掉指令前缀，直接以它为准
+        text_src = override or desc or m.content
 
         # 调教语句：不触发 AI，直接以 assistant 身份写入
         # （非文本的描述串不参与调教解析，免得表情占位串碰巧长得像调教语句）
-        if not desc:
+        if not desc and not override:
             body = parse_teach(m.content, self.cfg)
             if body is not None:
                 return [("assistant", body, "teach")], ""
 
         # 触发词判定：
         # 连续对话激活期间免触发词（插件同款行为）；
-        # 群聊默认额外要求触发词，想放开就把 chat.group_requires_trigger 设为 false
+        # 群聊默认额外要求触发词，想放开就把 chat.group_requires_trigger 设为 false。
+        # `.ai xxx` 属于明确意图，和插件一致，不参与触发词过滤。
         need_trigger = (not self.cfg["chat"].get("always_reply")) or (
             self.qq.is_group and self.cfg["chat"].get("group_requires_trigger", True)
         )
-        if need_trigger and not self._continuous_now(scope):
+        if need_trigger and not override and not self._continuous_now(scope):
             if not looks_like_trigger(text_src, self.cfg):
                 return [], "未命中触发词"
             text = strip_trigger(text_src, self.cfg)
@@ -2714,6 +3012,11 @@ class Agent:
         handled = 0
         for m in fresh:
             writes, why = self._admit(m, scope)
+            if writes and writes[0][0] == CMD_SENTINEL:
+                # 对话内指令：_admit 里已经结算完了（清上下文 / 排回执），
+                # 这里既不写上下文、也不调模型，只把它记成「处理过」。
+                handled += 1
+                continue
             if not writes:
                 if why:
                     log("SKIP", why)
@@ -3009,6 +3312,11 @@ class Agent:
         written = 0
         for m in fresh:
             writes, why = self._admit(m, scope)
+            if writes and writes[0][0] == CMD_SENTINEL:
+                # 指令：不写上下文，回执已经排进发送队列（见 _queue_ack）。
+                # 这里刻意不累加 written —— 调用方靠 `item.prepared` 判断
+                # 「这条不是没读到东西，而是已经定稿待发」，别撤单。
+                continue
             if not writes:
                 if why:
                     log("SKIP", f"[总读取] {why}")
@@ -3040,6 +3348,16 @@ class Agent:
         scope = item.scope
         hist = self.store.history(scope)
 
+        if item.prepared:
+            # 已经定稿（回复备好了 / 或已经是指令回执）→ 什么都不做。
+            #
+            # 正常流程走不到这里（serve_queue 只在 `not item.prepared` 时调 prepare），
+            # 这是给「总读取途中吃到指令」那条路加的保险：那一刻这一项已经被
+            # _queue_ack 置为定稿，若再往下走就会**重新调模型生成一条回复**，
+            # 把回执顶掉 —— 用户敲了 reset，收到的却是一句正常聊天回复。
+            log("QUE", f"{item.display_name!r} 这一项已定稿，跳过读+生成")
+            return True
+
         if item.pending_read:
             set_phase("切会话", 15, target=item.display_name)
             if not self._ensure_session(item):
@@ -3049,6 +3367,15 @@ class Agent:
             set_phase("总读取", 20, target=item.display_name)
             n = self._read_into_history(item)
             if n <= 0:
+                if item.prepared:
+                    # ⚠️ 这一批里吃到了一条对话内指令（`.ai reset` 之类）：
+                    # 它不写上下文，但已经把回执放进 item.reply 并置 prepared。
+                    # 此时**绝不能按「没读到新消息」撤单** —— 那会把回执一起丢掉，
+                    # 用户敲了 reset，却连一句「好」都等不到。
+                    log("CMD", f"{item.display_name!r} 总读取期间处理了对话内指令 → "
+                               f"不撤单，回执待发")
+                    self._save_pending()
+                    return True
                 if item.has_late:
                     # ⚠️ 不能撤单：已经有「迟到消息」的标记在，说明这个会话确实有过动静，
                     # 只是这一次总读取没读到（渲染没跟上 / 被别处读过 / 刚好卡在中间）。
@@ -3081,10 +3408,17 @@ class Agent:
         reply = self.generate_reply(scope)
         if not reply:
             self.queue.drop(scope, aborted=True)
-            # 生成失败的**根因**在 generate_reply 里已经带码报过了（模型侧各状态码分类）。
-            # 这里只说清后果，不重复报同一件事 —— 重复报错本身就是一种混淆。
-            report("E-LLM-009", "本条回复没生成出来，已作废（消息留在上下文里，下一轮仍会带上）",
-                   ctx={"会话": item.display_name})
+            if self._last_gen_fail:
+                # 根因已经在 generate_reply 里**带码报过**了，这里只记后果，不再报第二条。
+                #
+                # 以前这里会再报一条 E-LLM-009「模型返回空内容」，于是日志里并列出现
+                # 「连不上模型接口」和「模型返回空内容」两条 —— 用户根本分不清哪条是原因。
+                # 实测就发生过：两条并列，加上六行网络建议，彻底把人带偏。
+                log("QUE", f"{item.display_name!r} 本条作废（上下文保留，下一轮仍会带上）"
+                           f"｜根因见上面那条 {self._last_gen_fail}")
+            else:
+                report("E-LLM-009", "回复生成结果为空，本条作废（消息留在上下文里，下一轮仍会带上）",
+                       ctx={"会话": item.display_name})
             self.store.save()
             return False
 
@@ -3442,6 +3776,9 @@ class Agent:
         # 把这段文字发到另一个会话的输入框里，是并发化最凶险的一种错发。
         sig = self.qq.chat_signature(force=True)
         log("SEND", f"→ {item.display_name!r}(QQ {item.uin or '未知'}) {clip(reply, 70)}")
+        # 记下自己发出去的原文：这条稍后会以「我方」的身份出现在消息列表里，
+        # 必须能被 _command_allowed 认出来并排除（否则模型回一句 `.ai …` 就会自触发）。
+        self._own_sent.append(reply)
 
         if self.no_send:
             log("DRY", f"彩排模式：已通过①②闸，签名={sig[0]!r}/{len(sig[2])}条，"
@@ -3469,6 +3806,7 @@ class Agent:
         return True
 
     def generate_reply(self, scope: str) -> str:
+        self._last_gen_fail = ""        # 本次生成失败的原因码（供调用方判断要不要再报一条）
         hist = self.store.history(scope)
         try:
             reply = self.llm.chat(hist.build_messages())
@@ -3476,9 +3814,11 @@ class Agent:
             # 模型侧的错误已经按状态码分类好了（密钥/地址/限流/超时/服务端…），
             # 直接透传，不要再包一层「模型调用失败」把码盖掉。
             report(exc.code, exc.detail_text, ctx={**exc.context, "scope": scope})
+            self._last_gen_fail = exc.code
             return ""
         except Exception as exc:
             report_exc(exc, "E-LLM-008", ctx={"scope": scope})
+            self._last_gen_fail = "E-LLM-008"
             # 刚推进去的 user 消息留在历史里没关系，下一轮还会带上
             return ""
 
@@ -3491,6 +3831,7 @@ class Agent:
         if not reply:
             report("E-LLM-009", "模型返回空内容，本条不再重试",
                    ctx={"scope": scope, "max_tokens": self.cfg["llm"].get("max_tokens")})
+            self._last_gen_fail = "E-LLM-009"
             return ""
 
         # 开口即激活连续对话（插件的 activateContinuous）
@@ -3776,6 +4117,27 @@ def selftest(cfg: dict) -> int:
         print(f"    已存会话   : {len(names)} 个" + (f"（{', '.join(names[:5])}）" if names else ""))
     print(f"    多媒体     : 图片识别 / URL 读取 → 继续悬置（按当前要求不移植）")
 
+    print("\n[6b] 对话内指令（.ai）")
+    cm = cfg["commands"]
+    print(f"    开关       : {'开' if cm.get('enabled', True) else '关'}"
+          f"｜前缀 {' '.join(cm.get('prefixes') or [])}"
+          f"｜可下指令的人 {'/'.join(cm.get('accept_from') or [])}")
+    print(f"    回执       : {'开' if cm.get('reply_ack', True) else '关'}"
+          f"｜reset 时{'一并丢掉' if cm.get('reset_clears_pending', True) else '保留'}未结算消息")
+    print(f"    已实现     : {', '.join('.ai ' + k for k in sorted(CMD_DONE))}")
+    print(f"    待移植     : {', '.join('.ai ' + k for k in sorted(set(CMD_CATALOG) - CMD_DONE))}")
+    cases = [(".ai reset", "reset"), (".ai", "help"), ("。ai clear", "clear"),
+             (".aichat help", "help"), (".ai stop", "stop"), (".airest", None),
+             ("小清澈：你好", None)]
+    ok = 0
+    for text, expect in cases:
+        hit = parse_command(text, cfg)
+        got = hit[0] if hit else None
+        if got == expect:
+            ok += 1
+        print(f"    {'✓' if got == expect else '✗'} {text!r:<16} → {got!r}")
+    print(f"    {ok}/{len(cases)} 通过")
+
     print("\n[7] 会话身份与排队风控")
     q = cfg.get("queue") or {}
     ident = cfg.get("identity") or {}
@@ -3845,34 +4207,173 @@ def show_state(cfg: dict) -> int:
     return 0
 
 
+def pending_path() -> str:
+    """
+    待发回复队列的落盘路径。
+
+    提到模块级是为了让 `forget()` 也能用它 —— 「清空上下文」必须连带清掉
+    基于该上下文生成、还没发出去的回复，否则重启后会把它照原样发出来。
+    """
+    return os.path.join(HERE, "state", "pending-replies.json")
+
+
+def drop_pending_for_scope(scope: str) -> list[str]:
+    """
+    从待发队列里删掉某个会话的项，返回**被丢弃的回复内容**（供输出给用户看）。
+
+    为什么必须清：那些回复是**基于即将被清掉的上下文生成的**。
+    不清的话，进程重启时 `_load_pending()` 会把它们恢复并直接发出去 ——
+    用户看到的就是「明明清了上下文，它却还在聊之前那些事」。
+    """
+    path = pending_path()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        report_exc(exc, "E-PATH-003", ctx={"文件": path, "阶段": "清理待发队列"})
+        return []
+    items = data.get("items") or []
+    keep, dropped = [], []
+    for it in items:
+        if str(it.get("scope") or "") == scope:
+            dropped.append(str(it.get("reply") or "")[:70] or "（还没生成回复，只有占位）")
+        else:
+            keep.append(it)
+    if not dropped:
+        return []
+    data["items"] = keep
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception as exc:
+        report_exc(exc, "E-PATH-003", ctx={"文件": path, "阶段": "写回待发队列"})
+        return []
+    return dropped
+
+
+def scope_aliases(cfg: dict) -> list[tuple[str, list[str]]]:
+    """
+    列出「会话键 → 可用来匹配的别名」。
+
+    别名来自取号缓存（昵称 → QQ 号）。**这一步很重要**：会话键长这样
+    `private:3302676083`，而用户脑子里记的是昵称（「光みつる」/「嗅尘紫蝶」）。
+    UI 上写着「支持模糊匹配昵称」但实际只能匹配会话键 —— 于是用户输入昵称时
+    什么都不会被清掉，而他会以为清掉了。这个不一致本身就是个 bug。
+    """
+    out: list[tuple[str, list[str]]] = []
+    try:
+        import qqid
+        store_path = ((cfg.get("identity") or {}).get("store") or qqid.DEFAULT_STORE)
+        if not os.path.isabs(store_path):
+            store_path = abs_here(store_path)
+        uid = qqid.UidStore(store_path)
+    except Exception:
+        uid = None
+
+    conv = ConversationStore(cfg)
+    for scope in conv.scopes():
+        names: list[str] = []
+        if uid is not None:
+            kind, _, ident = scope.partition(":")
+            names = [n for n, info in uid.map.items() if str(getattr(info, "uin", "")) == ident]
+        out.append((scope, names))
+    return out
+
+
 def forget(cfg: dict, target: str) -> int:
-    """清空某个会话的上下文。target 支持模糊匹配（命中多个时全部列出，不做删除）。"""
+    """
+    **彻底**忘记一个会话。
+
+    ## 「彻底」必须包括三样，少清一样内容就会从别的通道回来
+
+    | 要清的 | 不清的后果 |
+    | --- | --- |
+    | ① 会话上下文（history） | 直接就是没清 |
+    | ② 基于该上下文生成、还没发出的回复（`state/pending-replies.json`） | 重启后恢复并**照原样发出去**，看起来像"没清干净" |
+    | ③ 轮转状态里的基线标记与指纹快照 | 「发现」路径的指纹比对基线还指着旧内容 |
+
+    ## 匹配键
+
+    同时接受 **会话键**（`private:3302676083`）与**昵称**（取号缓存里的显示名）。
+    以前只认会话键，而界面提示写的是「会话名或片段」—— 用户按昵称输入时
+    **什么都清不掉**，却以为清掉了。所以匹配不到时会列出「昵称 ↔ 会话键」对照表。
+    """
     store = ConversationStore(cfg)
     if not store.enabled:
         print("[X] persist.enabled=false，没有持久化内容可清。")
         return 2
-    names = store.scopes()
-    if not names:
+    scopes = store.scopes()
+    if not scopes:
         print("(空) 还没有任何会话被记录。")
         return 0
 
-    exact = target in names
-    hits = [s for s in names if exact or target in s]
+    pairs = scope_aliases(cfg)
+    alias_of = dict(pairs)
+
+    def match(scope: str, needle: str) -> bool:
+        if needle == scope or needle in scope:
+            return True
+        return any(needle == n or needle in n for n in alias_of.get(scope, []))
+
+    t = (target or "").strip()
+    exact = [s for s, _a in pairs if t == s] or \
+            [s for s, a in pairs if t in a]
+    hits = exact if exact else [s for s, _a in pairs if match(s, t)]
+
     if not hits:
-        print(f"[X] 没有匹配『{target}』的会话。现有会话：")
-        for s in names:
-            print(f"    {s}")
+        print(f"[X] 没有匹配『{target}』的会话。现有会话（可输入**会话键**或**昵称**）：")
+        for scope, names in pairs:
+            n = len(store._book.get(scope, {}).get("history") or [])
+            print(f"    {scope:<34} 昵称：{' / '.join(names) if names else '（未取号）'}"
+                  f"　上下文 {n} 条")
         return 2
     if len(hits) > 1:
         print(f"『{target}』匹配到多个会话，请写全一点：")
         for s in hits:
-            print(f"    {s}")
+            print(f"    {s}　昵称：{' / '.join(alias_of.get(s, []))}")
         return 2
 
     scope = hits[0]
-    n = len(store._book[scope]["history"])
+    names = alias_of.get(scope, [])
+    hist = store._book.get(scope, {}).get("history") or []
+    n = len(hist)
+
+    print("=" * 72)
+    print(f"彻底忘记：{scope}" + (f"（{' / '.join(names)}）" if names else ""))
+    print("=" * 72)
+
+    # ① 上下文
     store.forget(scope)
-    print(f"[✓] 已清空 {scope} 的上下文（{n} 条消息），连续对话状态一并重置。")
+    print(f"  [✓] 会话上下文：{n} 条 → 已清空")
+
+    # ② 待发回复（这是最容易被忽略、也最容易造成"没清干净"观感的一条）
+    dropped = drop_pending_for_scope(scope)
+    if dropped:
+        print(f"  [✓] 待发回复：{len(dropped)} 条 → 已丢弃")
+        for d in dropped:
+            print(f"        原本要发：{d}")
+        print("        为什么丢弃：它是**基于刚被清掉的上下文生成的**，"
+              "留着就会在新的一轮里发出去，看起来像没清干净")
+    else:
+        print("  [✓] 待发回复：没有（或已被处理）")
+
+    # ③ 轮转状态
+    rot = RotationState(_rot_path(cfg))
+    rot.forget(scope, display_name=(names[0] if names else ""))
+    rot.save()
+    print(f"  [✓] 轮转状态：基线标记与指纹快照 → 已重置")
+
+    print()
+    print("还要知道两件事：")
+    print("  1. QQ 界面上那些历史消息**仍然在屏幕上**。下次启动会重建基线把它们标为已读，")
+    print("     所以正常不会再进上下文。")
+    print("  2. 但如果这个会话是被「发现」路径处理的，界面上的**未读数字**会让最后几条")
+    print("     被重新读进来（这是降级方案唯一能用的线索）。想彻底干净：")
+    print("     先在 QQ 里点开那个会话把未读消掉，再跑一次本命令。")
     return 0
 
 

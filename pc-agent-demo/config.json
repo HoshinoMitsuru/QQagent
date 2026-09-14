@@ -53,6 +53,17 @@
     "timeout_seconds": 1800
   },
 
+  "_commands说明": "对话内指令（移植自插件 小清澈3.0.js 的 .ai 指令集，当前实现 .ai reset / .ai help）。指令本身绝不转发给 AI、也不写进上下文，只回一句回执。accept_from 里 other=对方、self=你自己手输的；机器人自己发出去的话会被自动排除。",
+  "commands": {
+    "enabled": true,
+    "prefixes": [".ai", "。ai", "/ai", ".aichat"],
+    "accept_from": ["other", "self"],
+    "reply_ack": true,
+    "ack_reset": "小清澈读懂了你的意思，回到了房间，脱衣睡下。",
+    "reset_clears_pending": true,
+    "unknown_hint": "这条指令还没移植到 PC 端，暂时只支持 .ai reset / .ai help。"
+  },
+
   "_persist说明": "上下文持久化：按会话（私聊 private:<QQ号> / 群聊 group:<群号>）隔离落盘，重启不丢。state/ 目录已被 .gitignore 排除。",
   "persist": {
     "enabled": true,

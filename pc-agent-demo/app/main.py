@@ -110,6 +110,65 @@ def _read_running_instance() -> dict:
     return {}
 
 
+def _msgbox(title: str, text: str, kind: str = "info", timeout_ms: int = 120_000) -> None:
+    """
+    弹一个原生消息框（带超时，默认 2 分钟）。
+
+    ## 为什么这类「干净退出」必须弹框
+
+    windowed 打包的程序**没有控制台**。如果它在某个分支上正常 return，
+    用户看到的就只有「一闪然后没了」—— 和崩溃长得一模一样，却什么线索都没有。
+    「已经有一个实例在跑，所以本次退出」就属于这种：它是**设计好的行为**，
+    但不告诉用户，就变成了一次无法归因的故障。
+
+    ## 为什么必须带超时
+
+    `MessageBoxW` 是模态的、会**一直阻塞进程**。没人点它的话，进程就永远挂在那里 ——
+    在无人值守的虚拟机上那等于制造了一个僵尸。所以优先用带超时的
+    `MessageBoxTimeoutW`（Windows 上一直有，只是没写进文档），拿不到就退回普通弹框。
+    """
+    try:
+        import ctypes
+        flags = {"info": 0x40, "warn": 0x30, "error": 0x10}.get(kind, 0x40) | 0x1000
+        u32 = ctypes.windll.user32
+        try:
+            # 0x4000 = MB_SERVICE_NOTIFICATION 之外的那个带超时版本；
+            # 返回值 32000 = 超时自动关闭
+            u32.MessageBoxTimeoutW(None, text, title, flags, 0, timeout_ms)
+        except Exception:
+            u32.MessageBoxW(None, text, title, flags)
+    except Exception:
+        pass
+
+
+def _takeover_existing() -> int:
+    """
+    `--takeover`：把已经在跑的实例结束掉，然后自己正常启动。
+
+    这是为「换了 exe、旧的还在跑」这种情况准备的 —— 否则新程序会一路安静退出，
+    而用户完全看不出为什么。单实例锁本身是对的（避免两个进程抢同一个 QQ 输入框），
+    但它需要一个明确的「我就是要接管」的出口。
+    """
+    from . import platform_win as pw
+    prev = _read_running_instance()
+    pids = [int(prev["pid"])] if prev.get("pid") else []
+    # 光靠 ui.json 里的 pid 不够（可能已经不是那个进程了），按进程名再扫一遍
+    for row in pw.list_processes(("qq-agent.exe",)) or []:
+        if row["pid"] not in pids:
+            pids.append(row["pid"])
+    mine = os.getpid()
+    killed = []
+    for pid in pids:
+        if pid == mine:
+            continue
+        if pw.kill_pid(pid):
+            killed.append(pid)
+    print(f"已结束 {len(killed)} 个旧实例：{killed}" if killed else "没有找到需要结束的旧实例")
+    if killed:
+        time.sleep(1.0)          # 等句柄释放（单实例锁是内核对象，进程退出即释放）
+    return 0
+
+
 def run_ui(safe: bool = False) -> int:
     """
     safe=True 时进入「安全启动」：不自动拉起 QQ、不自动开始常驻、不开托盘、不开浏览器，
@@ -131,20 +190,67 @@ def run_ui(safe: bool = False) -> int:
     BUS.emit(f"数据目录：{paths.DATA_DIR}（{paths.DATA_DIR_REASON}）", tag="BOOT", source="ui")
 
     # ---- 单实例：第二个实例不要去抢端口，直接把浏览器指向已经在跑的那个
+    #
+    # ⚠️ 这一条会**安静地 return**，而 windowed 程序没有控制台 ——
+    # 用户看到的就是「双击后一闪然后没了」，和崩溃长得一模一样。
+    # 所以：既写日志，也弹一个说清楚原因的消息框（含 pid 与强制接管的办法）。
     if not pw.acquire_single_instance():
         prev = _read_running_instance()
-        port = prev.get("port")
-        token = prev.get("token")
-        if port and token:
-            url = f"http://127.0.0.1:{port}/?t={token}"
-            BUS.emit(f"检测到已有一个控制台在运行，直接把浏览器指向它：{url}",
+        port, token = prev.get("port"), prev.get("token")
+        pid = prev.get("pid")
+        where = f"（pid {pid}，端口 {port}）" if pid or port else ""
+
+        # ---- 「换了新版本」时自动接管 ----
+        # 升级 exe 是个常态操作，而旧实例多半还在跑（可能只剩托盘图标）。
+        # 这时如果只是安静退出，用户看到的就是「双击 → 一闪 → 没了」，
+        # 完全无从判断。所以：**发现是另一个 exe 目录/版本在跑 → 自动接管**。
+        prev_exe = str(prev.get("exe") or "")
+        if prev_exe and os.path.abspath(prev_exe) != os.path.abspath(sys.executable):
+            BUS.emit(f"检测到运行中的是**另一个版本**（{prev_exe}）→ 自动接管：先结束它再启动本版本",
                      tag="BOOT", source="ui")
-            _open_browser(url)
-            time.sleep(1.0)
-            return 0
-        BUS.emit("检测到已有一个控制台在运行，但它没有留下端口记录。"
-                 "请检查托盘图标，或先在任务管理器里结束重复的进程。", tag="WARN", source="ui")
-        return 1
+            if pid:
+                pw.kill_pid(int(pid))
+                time.sleep(1.5)          # 等内核对象释放（单实例锁随之释放）
+            if pw.acquire_single_instance():
+                BUS.emit("旧版本已结束，本次接管理成功", tag="BOOT", source="ui")
+                prev, port, token, pid = {}, None, None, None
+                where = ""
+            else:
+                BUS.emit("结束旧实例之后仍然拿不到单实例锁，请手动在任务管理器里结束 qq-agent.exe",
+                         tag="ERR", source="ui")
+
+        if prev or (port and token):
+            # 到这里说明旧实例还在、且和我们是同一个 exe（重复双击）
+            BUS.emit(f"已经有一个控制台在运行{where} → 本次启动**正常退出**，不是崩溃。"
+                     f"要强制换成本次这个新版本，请用 --takeover 启动。",
+                     tag="BOOT", source="ui")
+            if port and token:
+                url = f"http://127.0.0.1:{port}/?t={token}"
+                BUS.emit(f"正在把这个地址交给浏览器：{url}", tag="BOOT", source="ui")
+                if safe:
+                    BUS.emit("（安全启动：不打开浏览器、不弹提示框，直接退出）",
+                             tag="BOOT", source="ui")
+                    return 0
+                _open_browser(url)
+                time.sleep(1.0)
+                _msgbox("QQAgent 已经有一个在运行", (
+                    f"已经有一个控制台在运行{where}，所以本次启动正常退出了 —— 这**不是崩溃**。\n\n"
+                    f"已经把这个地址交给浏览器：\n{url}\n\n"
+                    f"想做的是「换成本次这个新版本」？\n"
+                    f"① 托盘图标右键 → 退出 QQAgent（或任务管理器里结束 qq-agent.exe）\n"
+                    f"② 再双击一次\n\n"
+                    f"或者一步到位：\n"
+                    f"  qq-agent.exe --takeover"))
+                return 0
+            if safe:
+                BUS.emit("（安全启动：不弹提示框）", tag="BOOT", source="ui")
+                return 1
+            _msgbox("QQAgent 已经有一个在运行", (
+                f"已经有一个控制台在运行{where}，但它没有留下端口记录"
+                f"（可能上一次是异常退出的）。\n\n"
+                f"请在任务管理器里结束所有 qq-agent.exe，然后再双击本程序。\n"
+                f"或者直接：\n  qq-agent.exe --takeover"), "warn")
+            return 1
 
     if not pw.is_admin():
         BUS.emit("当前不是管理员权限：自启注册、VM 加固、结束 QQ 进程会失败。"
@@ -178,7 +284,11 @@ def run_ui(safe: bool = False) -> int:
         import json
         with open(os.path.join(paths.STATE_DIR, "ui.json"), "w", encoding="utf-8") as f:
             json.dump({"port": port, "host": host, "token": server.TOKEN,
-                       "pid": os.getpid(), "started_at": time.time()},
+                       "pid": os.getpid(), "started_at": time.time(),
+                       # 记下 exe 路径：下一次启动若发现「运行中的是另一个路径」，
+                       # 就知道是用户在换版本，可以直接自动接管而不是安静退出。
+                       "exe": sys.executable,
+                       "argv": sys.argv[:1]},
                       f, ensure_ascii=False)
     except Exception:
         pass
@@ -292,9 +402,52 @@ def run_ui(safe: bool = False) -> int:
 
 
 # ============================================================ 入口
+def _crash_report(exc: BaseException, argv: list[str]) -> str:
+    """
+    把启动期崩溃写成一份**能直接发出去**的报告。
+
+    ## 为什么非要有这个
+
+    windowed 打包的程序没有控制台。启动阶段一旦抛异常，用户看到的只有
+    「双击 → 一闪 → 没了」，而 PyInstaller 的窗口化回溯对话框在中文 Windows 上
+    经常被安全软件拦掉或一闪而过。结果就是：**唯一的证据也没了**。
+
+    所以这里把回溯、参数、环境、数据目录一起落到 `logs/ui-crash.log`，
+    并弹一个消息框告诉用户文件在哪 —— 至少有东西可发。
+    """
+    import traceback
+    from . import paths
+    lines = [
+        "=" * 72,
+        f"启动崩溃　{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 72,
+        f"参数　　：{argv}",
+        f"版本　　：{__import__('app', fromlist=['x']).__version__}",
+        f"打包模式：{paths.is_frozen()}",
+        f"exe 目录：{paths.exe_dir()}",
+        f"数据目录：{paths.DATA_DIR}（{paths.DATA_DIR_REASON}）",
+        f"Python　：{sys.version.split()[0]}　{sys.executable}",
+        "",
+        "回溯：",
+    ]
+    lines += traceback.format_exception(type(exc), exc, exc.__traceback__)
+    text = "".join(x if x.endswith("\n") else x + "\n" for x in lines)
+    try:
+        paths.ensure_dirs()
+        p = os.path.join(paths.LOG_DIR, "ui-crash.log")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+        return p
+    except Exception:
+        return ""
+
+
 def main() -> int:
     _ensure_stdio()
     argv = sys.argv[1:]
+
+    if argv and argv[0] == "qqid":
+        return run_script("qqid", argv[1:])
 
     if argv:
         head = argv[0]
@@ -304,6 +457,14 @@ def main() -> int:
             return run_script("qqid", argv[1:])
         if head == "--safe":
             return run_ui(safe=True)
+        if head == "--takeover":
+            # 接管模式：先结束已经在跑的旧实例，再正常启动。
+            # 为「换了 exe、旧的还在跑，于是新的一路安静退出」这种情况准备的。
+            # 允许再跟 --safe（测试/只想接管后静默跑起来时用）。
+            code = _takeover_existing()
+            if code:
+                return code
+            return run_ui(safe=("--safe" in argv[1:]))
         if head in ("--version", "-V"):
             from . import __version__
             print(f"QQAgent {__version__}")
@@ -311,6 +472,7 @@ def main() -> int:
         if head in ("--help", "-h"):
             print("QQAgent —— QQ AI 代理控制台\n")
             print("  qq-agent.exe                启动控制台（默认）")
+            print("  qq-agent.exe --takeover     先结束已在运行的旧实例，再用本版本启动")
             print("  qq-agent.exe --safe         安全启动：不自动拉起 QQ / 不开托盘 / 不开浏览器")
             print("  qq-agent.exe --run-agent X  以 agent.py 的身份运行 X（内部使用）")
             print("  qq-agent.exe --run-qqid X   以 qqid.py 的身份运行 X（内部使用）")

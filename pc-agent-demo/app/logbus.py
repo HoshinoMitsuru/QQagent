@@ -18,6 +18,7 @@ from __future__ import annotations
 import collections
 import json
 import os
+import sys
 import queue
 import re
 import threading
@@ -55,7 +56,19 @@ class LogBus:
     # ---------------------------------------------------------- 写入
     def emit(self, text: str, *, tag: str = "UI", source: str = "ui",
              level: str | None = None) -> dict:
-        """记一条**已经成行**的日志。"""
+        """
+        记一条**已经成行**的日志。
+
+        除了写文件与推给订阅者，还会**回显到 stdout**（前提是 stdout 是个真流）。
+
+        ## 为什么必须回显
+
+        `build.bat console` 产出的诊断版，存在的唯一意义就是「让用户看见发生了什么」。
+        如果日志只进文件，用户双击后看到的是一个**全黑的空窗口** ——
+        和 windowed 版的「一闪就没了」一样没有信息量，诊断版就白做了。
+
+        windowed 版里 stdout 被换成 devnull，回显自然不会发生（也不会报错）。
+        """
         with self._lock:
             self._seq += 1
             row = {
@@ -69,6 +82,7 @@ class LogBus:
             }
             self._buf.append(row)
             subs = list(self._subs)
+        self._echo(row)
         payload = json.dumps(row, ensure_ascii=False)
         for q in subs:
             try:
@@ -83,6 +97,22 @@ class LogBus:
                     pass
         self._write_file(row)
         return row
+
+    def _echo(self, row: dict) -> None:
+        """
+        把日志回显到 stdout —— 只在本进程真的有控制台时。
+
+        判据用「stdout 不是 None 且不是 devnull」：windowed 打包时
+        `app/main._ensure_stdio()` 会把它指向 devnull，这时全程静默（也不报错）。
+        """
+        try:
+            out = sys.stdout
+            if out is None or getattr(out, "name", "") == os.devnull:
+                return
+            out.write(f"[{row['clock']}] {row['tag']:<5} {row['text']}\n")
+            out.flush()
+        except Exception:
+            pass        # 回显是纯观测，绝不能因为写 stdout 失败影响主流程
 
     def feed(self, raw: str, *, source: str = "agent") -> None:
         """喂一段可能不完整的文本，按行切分后 emit（供子进程 stdout 泵使用）。"""

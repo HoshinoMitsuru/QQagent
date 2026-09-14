@@ -42,7 +42,6 @@ agent.py 原来的会话主键是**昵称**（`private:<昵称>`）。昵称可�
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re

@@ -19,6 +19,8 @@ test_errors.py —— 错误体系的自测
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -1020,6 +1022,453 @@ def t15_never_lose_reply():
         agent.report, agent.report_exc = orig_report, orig_exc
 
 
+def t16_static_sanity():
+    """
+    静态体检：拦「我编辑时把自己搞死」这一类错误。
+
+    ## 为什么需要它
+
+    同一个错误我已经犯过两次：编辑时把上一行的**换行吃掉**，
+    于是下一个定义被并进了注释行。例如
+
+        # ================================================= 端口def is_port_free(port: int) -> bool:
+
+    结果 `is_port_free` 变成注释，运行时才在 `pick_port` 里抛
+    `NameError: name 'is_port_free' is not defined`。
+    而 `compileall` **抓不到**（注释掉一行是合法的 Python），
+    `test_ui.py` 也抓不到（它不走那条代码路径）。
+
+    当时的后果很严重：windowed exe 没有控制台，用户看到的就是
+    「双击 → 一闪 → 没了」，而且**这一版已经发出去过**。
+
+    所以这里上两道闸：一道是不依赖外部工具的「注释里出现 def」扫描，
+    一道是 pyflakes 的「未定义名」检查（这类错误的通用解）。
+    """
+    log("\n[16] 静态体检（拦编辑事故）")
+    import re
+    import subprocess
+
+    roots = ["app", "."]
+    skip_dirs = {"build", "dist", "__pycache__", ".git", "state", "logs", ".venv"}
+    files = []
+    for r in roots:
+        base = os.path.join(HERE, r)
+        for cur, dirs, names in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for n in names:
+                if n.endswith(".py"):
+                    files.append(os.path.join(cur, n))
+    # 去重必须归一化路径：否则 "./app/x.py" 与 "app/x.py" 会被当成两个文件（pyflakes 报两遍）
+    files = sorted({os.path.normpath(f) for f in files})
+    R.check("收集到待检源码", len(files) >= 15, str(len(files)))
+
+    # ---- ① 注释行里出现了 def/class：几乎一定是换行被吃掉 ----
+    #
+    # 用 tokenize 取**真正的注释 token**，而不是「以 # 开头的行」——
+    # 后者会把文档字符串里的代码示例也算进来（本文件里就有），而且
+    # 「中文旁边没有词边界」这种事会让正则悄悄失效。
+    # 另外不能依赖 `\b`：中文也是 \w，所以中文直接紧挨着一个函数定义的开头时
+    # **没有词边界**，而那种形态恰好就是这个扫描要抓的。
+    # 用「前面不是 ASCII 标识符字符」代替 `\b`。
+    # （本段刻意不写出那个形态的字面样子，否则它自己就会被这条规则命中。）
+    import io
+    import tokenize
+
+    pat = re.compile(r"(?<![A-Za-z0-9_])(def|class)\s+\w+\s*[\(:]")
+    suspects = []
+    for p in files:
+        try:
+            with open(p, encoding="utf-8") as f:
+                for tok in tokenize.generate_tokens(f.readline):
+                    if tok.type != tokenize.COMMENT:
+                        continue
+                    if pat.search(tok.string):
+                        suspects.append(f"{os.path.relpath(p, HERE)}:{tok.start[0]} "
+                                        f"{tok.string.strip()[:70]}")
+        except Exception as exc:
+            suspects.append(f"{os.path.relpath(p, HERE)} 无法解析：{exc}")
+    R.check("没有「定义被并进注释」的行", not suspects,
+            "\n      " + "\n      ".join(suspects[:6]))
+
+    # ---- ② pyflakes：未定义名 / 未定义局部变量 ----
+    try:
+        r = subprocess.run([sys.executable, "-m", "pyflakes", *files],
+                           capture_output=True, timeout=120,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        out = (r.stdout + r.stderr).decode("utf-8", "replace")
+        missing = "No module named pyflakes" in out
+    except Exception as exc:
+        out, missing = f"{type(exc).__name__}: {exc}", True
+
+    if missing:
+        R.check("pyflakes 可用（未安装则跳过未定义名检查）", True)
+        log("      （未安装 pyflakes，跳过未定义名检查：pip install pyflakes 可启用）")
+    else:
+        # 只关心会**在运行时炸掉**的两类；unused import / f-string 之类的风格问题不在此列
+        critical = [ln for ln in out.splitlines()
+                    if "undefined name" in ln or "undefined local" in ln]
+        R.check("没有未定义名（pyflakes）", not critical,
+                "\n      " + "\n      ".join(critical[:8]))
+        if VERBOSE:
+            for ln in out.splitlines()[:20]:
+                log(f"      {ln}")
+
+    # ---- ③ 关键模块必须能被导入（抓 import 期的 NameError / 语法级破坏）----
+    r = subprocess.run([sys.executable, "-c",
+                        "import sys; sys.path.insert(0, r'%s');"
+                        "import app.main, app.server, app.supervisor, app.qqctl,"
+                        " app.settings, app.platform_win, app.diagnose, app.errors,"
+                        " app.logbus, app.paths, app.runtime, app.tray,"
+                        " error_codes, reply_queue; print('IMPORT_OK')" % HERE],
+                       capture_output=True, timeout=120, cwd=HERE,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    out2 = (r.stdout + r.stderr).decode("utf-8", "replace")
+    R.check("全部模块可导入（无 import 期错误）", "IMPORT_OK" in out2, out2[-300:])
+
+    # ---- ④ 关键公开函数真的存在（这次就是栽在这一条上）----
+    r = subprocess.run([sys.executable, "-c",
+                        "import sys; sys.path.insert(0, r'%s');"
+                        "from app import platform_win as pw, main;"
+                        "need = ['is_port_free', 'pick_port', 'kill_pid',"
+                        " 'acquire_single_instance', 'list_processes',"
+                        " 'open_in_explorer', 'apply_vm_hardening'];"
+                        "miss = [n for n in need if not callable(getattr(pw, n, None))];"
+                        "m = [n for n in ['run_ui', 'run_script', '_takeover_existing',"
+                        " '_crash_report', '_msgbox'] if not callable(getattr(main, n, None))];"
+                        "print('MISSING', miss + m)" % HERE],
+                       capture_output=True, timeout=60, cwd=HERE,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    out3 = (r.stdout + r.stderr).decode("utf-8", "replace")
+    R.check("启动链路依赖的公开函数都在（is_port_free / kill_pid / _takeover_existing …）",
+            "MISSING []" in out3, out3[-200:])
+
+
+def _code_only(path: str) -> str:
+    """
+    取源码里**真正的代码 token**（去掉注释），拼成一个便于子串搜索的字符串。
+
+    为什么不能直接读文件文本：解释性注释里经常会引用「以前是这么写的」旧代码，
+    直接搜文本会把注释也算命中。这次的判据恰好就是这个 —— 注释里写了
+    「这里以前写的是 EC.wrap(exc, "E-LLM-002")」，于是检查误报。
+    注释是给下一个人看的关键信息，不能为了迁就检查而删掉它；
+    该修的是检查本身。
+
+    只去掉 COMMENT，**不去掉 STRING** —— 因为要搜的那个片段里就含字符串字面量。
+    """
+    import io
+    import tokenize
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for tok in tokenize.generate_tokens(f.readline):
+            if tok.type == tokenize.COMMENT:
+                continue
+            out.append(tok.string)
+    return " ".join(out)
+
+
+def t17_misdiagnosis_guard():
+    """
+    假诊断比不报错更坏。这一节守住「不许把不相干的异常硬套成某个具体根因」。
+
+    现场真实事故：密钥里混进了中文 → 请求在发出之前抛 `UnicodeEncodeError`
+    → 兜底逻辑给成 `E-LLM-002「连不上模型接口」`
+    → 用户拿到一屏「网络不通 / DNS / 代理」的建议，而正确动作只是把密钥重粘一遍。
+    还紧接着又报了一条「模型返回空内容」，两条并列，彻底分不清哪条是原因。
+    """
+    log("\n[17] 不许假诊断（兜底码不得断言根因）")
+    import requests
+
+    code = agent.LLMClient
+    cfg = agent.load_config()
+
+    # ---- ① UnicodeEncodeError 必须归到 E-LLM-011，而不是任何网络码 ----
+    R.check("UnicodeEncodeError 不再被归到 E-LLM-002",
+            EC.wrap(UnicodeEncodeError("latin-1", "x", 11, 19, "bad"), "E-LLM-012").code
+            == "E-LLM-011",
+            EC.wrap(UnicodeEncodeError("latin-1", "x", 11, 19, "bad"), "E-LLM-012").code)
+
+    # ---- ② 发请求之前就要拦住，并指出具体位置 ----
+    bad_cfg = dict(cfg)
+    bad_cfg["llm"] = dict(cfg["llm"])
+    bad_cfg["llm"]["api_key"] = "sk-abcd中文八个字efgh"
+    orig_post = agent.requests.post
+    called = {"n": 0}
+    agent.requests.post = lambda *a, **k: (called.__setitem__("n", called["n"] + 1), None)[1]
+    try:
+        agent.LLMClient(bad_cfg).chat([{"role": "user", "content": "hi"}])
+        got = None
+    except EC.AppError as e:
+        got = e
+    finally:
+        agent.requests.post = orig_post
+    R.check("含非 ASCII 的密钥 → 报 E-LLM-011", got is not None and got.code == "E-LLM-011",
+            str(got)[:120])
+    R.check("**根本没有发出请求**（在发之前就拦住了）", called["n"] == 0, str(called))
+    R.check("指出了具体第几个字符有问题（可照做）",
+            got is not None and "第 8 个" in got.detail_text and "中" in got.detail_text,
+            getattr(got, "detail_text", "")[:160])
+    R.check("明确否认「这是网络问题」",
+            got is not None and "不是网络问题" in json.dumps(got.context, ensure_ascii=False),
+            str(getattr(got, "context", {}))[:200])
+    R.check("E-LLM-011 的 fixes 也写了「不是网络问题」",
+            any("不是网络问题" in f for f in EC.get("E-LLM-011")["fixes"]),
+            str(EC.get("E-LLM-011")["fixes"])[:200])
+
+    # 接口地址里混中文同样要拦下
+    bad2 = dict(cfg)
+    bad2["llm"] = dict(cfg["llm"])
+    bad2["llm"]["api_base"] = "https://api.deepseek.com/中文"
+    try:
+        agent.LLMClient(bad2).chat([{"role": "user", "content": "hi"}])
+        got2 = None
+    except EC.AppError as e:
+        got2 = e
+    R.check("接口地址含非 ASCII → 也报 E-LLM-011", got2 is not None and got2.code == "E-LLM-011",
+            str(got2)[:100])
+
+    # ---- ③ 保存时就该拦住，不让它进配置文件 ----
+    SET.ensure_config_file(); SET.ensure_secrets_file()
+    base = SET.as_ui_payload()["values"]
+    bad3 = dict(base)
+    bad3["llm.api_key"] = "sk-带中文的密钥"
+    r = SET.save(bad3)
+    R.check("保存含非 ASCII 的密钥被拦下",
+            not r.get("ok") and any(e["code"] == "E-LLM-011" for e in r.get("errors", [])),
+            str(r)[:200])
+
+    # ---- ④ 兜底码必须中性：标题不能断言根因 ----
+    title = EC.get("E-LLM-012")["title"]
+    R.check("兜底码 E-LLM-012 的标题不断言根因（不再写「连不上」）",
+            "连不上" not in title and "网络" not in title, title)
+    R.check("兜底码明确说明「能确定的网络错误会各自报码」",
+            any("不代表网络有问题" in f for f in EC.get("E-LLM-012")["fixes"]),
+            str(EC.get("E-LLM-012")["fixes"])[:200])
+    R.check("agent 里的兜底不再用 E-LLM-002",
+            'EC.wrap(exc, "E-LLM-002")' not in _code_only(os.path.join(HERE, "agent.py")),
+            "兜底仍在用「连不上接口」这个码")
+
+    # ---- ⑤ 失败之后不许再报一条互相矛盾的后续错误 ----
+    a = agent.Agent(agent.load_config(), dry_run=True)
+    buf = []
+    orig_rep, orig_log = agent.report, agent.log
+    agent.report = lambda code, detail="", **kw: buf.append(code)
+    agent.log = lambda tag, msg: buf.append(tag)
+    try:
+        agent.THROTTLE.reset()
+        a._last_gen_fail = "E-LLM-011"          # 模拟「根因已报过」
+        a.generate_reply = lambda scope: ""     # 生成失败
+        item = a.queue.submit("private:6001", "会话", "6001", "x",
+                              key="k", wait_seconds=0.0, now=time.time() - 1)
+        item.ready_at = 0.0
+        item.prepared, item.reply = True, "占位"
+        a.deliver = lambda it, reply: True
+        a.serve_queue()
+        # 走的是「生成失败」分支吗？这里其实是 prepared 路径，直接调 prepare 更准
+        buf.clear()
+        agent.THROTTLE.reset()
+        a2 = agent.Agent(agent.load_config(), dry_run=True)
+        a2._last_gen_fail = "E-LLM-011"
+        a2.generate_reply = lambda scope: ""
+        it2 = a2.queue.submit("private:6002", "会话2", "6002", "x",
+                              key="k", wait_seconds=0.0, now=time.time() - 1)
+        it2.ready_at = 0.0
+        a2.prepare(it2)
+        R.check("根因已报过时不再并列第二条 E-LLM-009",
+                "E-LLM-009" not in buf, str(buf))
+        R.check("但仍留下一句「后果」说明（不含错误码）", "QUE" in buf, str(buf))
+    finally:
+        agent.report, agent.log = orig_rep, orig_log
+        agent.THROTTLE.reset()
+
+
+def t18_mask_never_overwrites_key():
+    """
+    **掩码绝不能被当成真密钥写进配置** —— 那会静默覆盖真实密钥。
+
+    现场事故的完整链条（三处 bug 叠在一起）：
+
+        ① `_is_mask()` 的判据错（只认「全是 •」），而 `_mask()` 生成的是
+           `sk-1••••••••ghij`（首尾各留 4 位）→ 掩码被判成「用户真的填了 key」
+        ② 于是保存设置时把掩码写进 secrets.local.json → **真实密钥被覆盖**（数据丢失）
+        ③ 之后调用模型用这个假密钥 → `UnicodeEncodeError: latin-1 position 11-18`
+           （`Bearer ` 占 7 字符，正好对上那 8 个 •）
+        ④ 而我的兜底把这个编码错误报成「E-LLM-002 连不上模型接口」→ **假诊断**
+
+    这一节守住 ①③④，尤其是 ② 那条数据丢失。
+    """
+    log("\n[18] 掩码不得被当成真密钥（数据丢失回归）")
+    import json as _json
+    from app import settings as SET
+
+    SET.ensure_config_file(); SET.ensure_secrets_file()
+    real = "sk-1234567890abcdefghij"
+    mask = f"{real[:4]}{'•' * 8}{real[-4:]}"
+
+    # ---- ① 判据本身 ----
+    R.check("掩码生成格式不变（首尾各留 4 位）", mask == "sk-1••••••••ghij", mask)
+    R.check("`_is_mask` 认得这个掩码（曾经认不出 → 真密钥被覆盖）",
+            SET._is_mask(mask) is True, f"_is_mask({mask!r}) 返回了 False")
+    R.check("纯 • 的短密钥掩码也认得", SET._is_mask("•" * 6) is True)
+    R.check("真密钥不会被误判成掩码", SET._is_mask(real) is False)
+    R.check("空串不算掩码", SET._is_mask("") is False)
+
+    # ---- ② 回传掩码时不得改动已存的密钥 ----
+    _json.dump({"llm": {"api_key": real}},
+               open(SET.paths.SECRETS_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    vals = dict(SET.as_ui_payload()["values"])
+    R.check("界面拿到的是掩码而不是明文", vals.get("llm.api_key") == mask,
+            str(vals.get("llm.api_key"))[:40])
+    r = SET.save(vals)            # 模拟「界面上什么都没改，直接点保存」
+    R.check("保存成功（掩码不该拦下正常保存）", r.get("ok") is True, str(r)[:200])
+    after = _json.load(open(SET.paths.SECRETS_PATH, encoding="utf-8"))
+    R.check("**真实密钥没有被掩码覆盖**",
+            after.get("llm", {}).get("api_key") == real,
+            f"存盘后变成了 {after.get('llm', {}).get('api_key')!r}")
+
+    # ---- ③ 已经被写坏的配置要能被点破（save 时）----
+    _json.dump({"llm": {"api_key": mask}},
+               open(SET.paths.SECRETS_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    r = SET.save(dict(SET.as_ui_payload()["values"]))
+    msgs = [e["message"] for e in r.get("errors", [])]
+    R.check("配置里存着掩码时，保存会点破",
+            not r.get("ok") and any("不是真密钥" in m and "掩码" in m for m in msgs),
+            str(msgs)[:200])
+    R.check("并指明是哪个文件", any("secrets.local.json" in m for m in msgs), str(msgs)[:200])
+
+    # ---- ④ 运行时也要点破（而不是报成网络问题）----
+    cfg = agent.load_config()
+    try:
+        agent.LLMClient(cfg).chat([{"role": "user", "content": "hi"}])
+        got = None
+    except EC.AppError as e:
+        got = e
+    R.check("运行时用掩码当密钥 → 报 E-LLM-011 而不是网络码",
+            got is not None and got.code == "E-LLM-011", str(got)[:120])
+    R.check("说法里点明「这是掩码、不是真密钥」",
+            got is not None and "掩码" in got.detail_text, getattr(got, "detail_text", "")[:160])
+    R.check("给出 U+2022 指纹（可据此确认就是这个问题）",
+            got is not None and "U+2022" in str(got.context.get("指纹", "")),
+            str(getattr(got, "context", {}))[:200])
+    R.check("**不是**把网络列为原因",
+            got is not None and "网络" not in " ".join(EC.get(got.code)["causes"][:1]),
+            str(EC.get("E-LLM-011")["causes"])[:120])
+
+    # ---- ⑤ 掩码里的 • 位置要与真实报错对得上（11~18）----
+    header = "Bearer " + mask
+    pos = [i for i, ch in enumerate(header) if ord(ch) > 127]
+    R.check("掩码在 HTTP 头里的非 ASCII 位置正好是 11~18（与现场报错一致）",
+            pos == list(range(11, 19)), str(pos))
+
+
+def t19_forget_is_thorough():
+    """
+    「清空上下文」必须**彻底** —— 少清一样，内容就会从别的通道回来。
+
+    现场事故：用户在界面上清了上下文、重启进程，但 22:31 的回复仍然在聊清除前
+    22:16 的马克思话题。查下来有两条通道：
+
+        ① `forget` 只认**会话键**（`private:3302676083`），而界面写的是
+           「会话名或片段」→ 用户输入昵称**什么都清不掉**，却以为清掉了
+        ② 基于旧上下文生成、还没发出的回复存在 `pending-replies.json` 里，
+           `forget` 不管它 → 进程重启时恢复并**照原样发出去**
+    """
+    log("\n[19] 「彻底忘记」必须真的彻底")
+    import json as _json
+
+    def build(home):
+        cfg = agent.load_config()
+        store = agent.ConversationStore(cfg)
+        h = store.history("private:10086")
+        h.push("user", "【对方】：清除前的话题", source="incoming")
+        store.save(force=True)
+        os.makedirs(os.path.dirname(agent.pending_path()), exist_ok=True)
+        _json.dump({"version": 1, "items": [
+            {"scope": "private:10086", "display_name": "甲", "uin": "10086",
+             "reply": "基于旧上下文生成的回复", "prepared": True,
+             "texts": [], "keys": [], "seqs": []},
+            {"scope": "private:10087", "display_name": "乙", "uin": "10087",
+             "reply": "别动我", "prepared": True,
+             "texts": [], "keys": [], "seqs": []},
+        ]}, open(agent.pending_path(), "w", encoding="utf-8"), ensure_ascii=False)
+        return cfg
+
+    # ---- ① 待发回复必须一起清掉，且**不能误伤别的会话** ----
+    agent.HERE = TMP
+    cfg = build(TMP)
+    dropped = agent.drop_pending_for_scope("private:10086")
+    R.check("丢弃了目标会话的待发回复", len(dropped) == 1 and "旧上下文" in dropped[0],
+            str(dropped))
+    left = _json.load(open(agent.pending_path(), encoding="utf-8"))["items"]
+    R.check("**没有误伤**其它会话的待发回复",
+            len(left) == 1 and left[0]["scope"] == "private:10087",
+            str([x.get("scope") for x in left]))
+    R.check("返回内容里有可读的回复摘要（会被打印给用户）",
+            dropped and "旧上下文" in dropped[0], str(dropped))
+
+    # ---- ② forget 之后三样都干净 ----
+    cfg = build(TMP)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = agent.forget(cfg, "private:10086")
+    out = buf.getvalue()
+    R.check("forget 正常返回", rc == 0, str(rc))
+    R.check("上下文已清空",
+            "private:10086" not in agent.ConversationStore(agent.load_config()).scopes(),
+            str(agent.ConversationStore(agent.load_config()).scopes()))
+    left = _json.load(open(agent.pending_path(), encoding="utf-8"))["items"]
+    R.check("待发回复已从盘上清掉（重启不会再发出去）",
+            all(x["scope"] != "private:10086" for x in left),
+            str([x.get("scope") for x in left]))
+    R.check("输出里明确说了「要丢弃待发回复」及原因",
+            "已丢弃" in out and "基于刚被清掉的上下文" in out, out[-400:])
+
+    # ---- ③ 匹配不到时必须列出「昵称 ↔ 会话键」对照（否则用户不知道输什么）----
+    cfg = build(TMP)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = agent.forget(cfg, "这个名字不存在")
+    out = buf.getvalue()
+    R.check("匹配不到时返回 2", rc == 2, str(rc))
+    R.check("列出了现有的会话键", "private:10086" in out, out[-300:])
+    R.check("并说明可以输入昵称或会话键",
+            "昵称" in out and "会话键" in out, out[-300:])
+
+    # ---- ④ 昵称必须能匹配上（这是用户实际会输入的东西）----
+    cfg = build(TMP)
+    # 造一份取号缓存，让「甲」这个昵称对到 private:10086
+    import qqid
+    store_path = os.path.join(TMP, "state", "uid-map.json")
+    os.makedirs(os.path.dirname(store_path), exist_ok=True)
+    _json.dump({"version": 1, "by_name": {
+        "甲": {"uin": "10086", "display_name": "甲", "card_name": "甲",
+               "source": "test", "at": time.time()}}},
+        open(store_path, "w", encoding="utf-8"), ensure_ascii=False)
+    cfg["identity"] = dict(cfg.get("identity") or {})
+    cfg["identity"]["store"] = store_path
+    aliases = dict(agent.scope_aliases(cfg))
+    R.check("昵称能对上正确的会话键",
+            aliases.get("private:10086") == ["甲"], str(aliases))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = agent.forget(cfg, "甲")          # 用户按昵称输入
+    R.check("**按昵称也能清掉**（原来只能按会话键，输入昵称会静默什么都没清）",
+            rc == 0 and "private:10086" not in
+            agent.ConversationStore(agent.load_config()).scopes(),
+            f"rc={rc}")
+
+    # ---- ⑤ 界面上那个任务的描述必须与真实行为一致 ----
+    import app.supervisor as SUPV
+    task = [t for t in SUPV.TASKS if t["id"] == "forget"][0]
+    R.check("任务描述写清了「三样都要清」",
+            "上下文" in task["desc"] and "没发出的回复" in task["desc"],
+            task["desc"][:120])
+    R.check("参数提示写的是「昵称或会话键」（原来是「会话名或片段」，误导）",
+            "昵称" in task["params"][0]["label"] and "会话键" in task["params"][0]["label"],
+            task["params"][0]["label"])
+    R.check("二次确认里说明了会丢弃待发回复",
+            "丢弃" in task.get("confirm", ""), task.get("confirm", "")[:120])
+
+
 def t11_no_code_escape():
     """
     扫一遍源码：不该再有「用户能看到的失败」只给一句没码的话。
@@ -1077,6 +1526,10 @@ def main():
         t13_heartbeat_phase()
         t14_editor_safety()
         t15_never_lose_reply()
+        t16_static_sanity()
+        t17_misdiagnosis_guard()
+        t18_mask_never_overwrites_key()
+        t19_forget_is_thorough()
         t11_no_code_escape()
     finally:
         rc = R.summary()

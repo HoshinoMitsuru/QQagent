@@ -126,6 +126,28 @@ def acquire_single_instance(name: str = "Global\\QQAgent-WebUI") -> bool:
         return True
 
 
+def kill_pid(pid: int, tree: bool = True) -> bool:
+    """
+    结束一个进程（默认连子进程一起）。
+
+    用 taskkill 而不是 TerminateProcess：壳会派生 agent 子进程，
+    只杀父进程会把子进程丢下继续跑（那个子进程会一直占着 QQ 的输入框）。
+    """
+    if not pid or pid == os.getpid():
+        return False
+    try:
+        import subprocess
+        cmd = ["taskkill", "/F"]
+        if tree:
+            cmd.append("/T")
+        cmd += ["/PID", str(pid)]
+        r = subprocess.run(cmd, capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 # ============================================================ 端口
 def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

@@ -12,6 +12,9 @@ test_text_port.py — 离线冒烟测试：验证「小清澈3.0.js → PC 端�
     3) 上下文持久化：按会话隔离、存档/重载一致、损坏文件不致命
     4) 连续对话：开口即激活、活跃期续期、超时自动退出
     5) 端到端（dry-run）：Agent.step() 只入队，flush() 才结算
+    6) 对话内指令解析：`.ai reset` 的各种写法与别名，以及「不是指令」的反例
+    7) `.ai reset` 端到端：清上下文 + 退连续对话 + 丢缓冲 + 排回执，且不转发给 AI
+    8) 总读取路径：指令在 prepare 里被吃掉时不能撤单（否则回执会一起丢）
 """
 
 from __future__ import annotations
@@ -45,6 +48,23 @@ def make_cfg(tmpdir: str) -> dict:
     })
     cfg["llm"]["system_prompt"] = "（测试用 system prompt）"
     return cfg
+
+
+def new_agent(cfg: dict, tmpdir: str, dry_run: bool = False, title: str = "小明"):
+    """
+    造一个不碰 QQ、不联网的 Agent：窗口用假的，QQ 号查询也短路掉。
+
+    `title` 建议每个用例各不相同 —— 上下文文件是共用的，标题相同就会串味
+    （scope 一样 = 同一个会话）。
+    """
+    import types
+    ag = A.Agent(cfg, dry_run=dry_run)
+    ag.qq = FakeQQ(title=title)
+    ag._uid_store = types.SimpleNamespace(uin_of=lambda name: "")
+    # 待发队列的落盘路径在 agent 里是写死的，测试里改到临时目录
+    ag._pending_path = lambda: os.path.join(tmpdir, "pending-replies.json")
+    ag.scope = ag.current_scope()
+    return ag
 
 
 # ------------------------------------------------------------------ 1. 防抖聚合
@@ -307,6 +327,156 @@ def test_end_to_end(cfg: dict) -> None:
           ag.deb.current_base(ag.scope) == 5000.0, ag.deb.summary(ag.scope))
 
 
+# ------------------------------------------------------------------ 6. 对话内指令
+def test_command_parse(cfg: dict) -> None:
+    print("\n[6] 对话内指令：解析")
+    cases = [
+        (".ai reset",            ("reset",  [], "reset")),
+        (".ai clear",            ("clear",  [], "clear")),
+        (".ai",                  ("help",   [], "")),
+        (".ai help",             ("help",   [], "help")),
+        ("。ai reset",            ("reset",  [], "reset")),   # 中文句号
+        ("/ai   reset",          ("reset",  [], "reset")),   # 斜杠 + 多空格
+        (".aichat reset",        ("reset",  [], "reset")),   # 别名
+        (".AI RESET",            ("reset",  [], "RESET")),   # 大小写不敏感
+        (".ai：reset",            ("reset",  [], "reset")),   # 全角冒号
+        ("   .ai stop",          ("stop",   [], "stop")),
+        (".ai 今天天气怎么样",      ("今天天气怎么样", [], "今天天气怎么样")),
+        (".airest",              None),                       # 前缀后必须有分隔符
+        ("小清澈：你好",           None),                       # 调教语句不是指令
+        ("今天 .ai reset",        None),                       # 前缀必须在开头
+        ("",                     None),
+    ]
+    for text, expect in cases:
+        got = A.parse_command(text, cfg)
+        check(f"{text!r} → {expect}", got == expect, f"实际 {got}")
+
+    off = A._deep_merge(cfg, {"commands": {"enabled": False}})
+    check("commands.enabled=false → 一律不认", A.parse_command(".ai reset", off) is None)
+
+
+def test_command_reset(cfg: dict, tmpdir: str) -> None:
+    print("\n[7] 对话内指令：.ai reset（端到端，离线）")
+    ag = new_agent(cfg, tmpdir, title="指令对象")
+    scope = ag.scope
+    check("会话 scope 取自窗口标题", scope == "private:指令对象", scope)
+
+    hist = ag.store.history(scope)
+    hist.push("user", "【小明】：在吗", source="incoming")
+    hist.push("assistant", "在的～", source="auto")
+    hist.push("assistant", "以后要叫我小清澈", source="teach", teach=True)
+    ag.store.activate_continuous(scope, time.time())
+    check("前置：上下文 3 条 + 连续对话已激活",
+          len(hist) == 3 and ag._continuous_now(scope))
+
+    # 先塞一条还没结算的 —— reset 必须把它一起丢掉
+    ag.qq.feed("小明", "我还在打字")
+    ag.step()
+    check("前置：缓冲里有 1 条未结算", len(ag.deb.pending) == 1)
+    check("前置：普通消息照常进缓冲",
+          ag.deb.pending[0].content == "我还在打字")
+
+    ag.qq.feed("小明", ".ai reset")
+    n = ag.step()
+    check("指令被计入本轮处理（不是被跳过）", n == 1)
+    check("上下文被清空（含被教过的话）", len(hist) == 0)
+    check("连续对话已退出", not ag._continuous_now(scope))
+    check("未结算的缓冲被一并丢掉", len(ag.deb.pending) == 0)
+
+    item = ag.queue.get(scope)
+    check("回执已排进发送队列", item is not None)
+    check("回执内容 = commands.ack_reset",
+          item is not None and item.reply == cfg["commands"]["ack_reset"])
+    check("回执项已定稿（不会再调模型）", bool(item and item.prepared))
+    check("回执项不带任何上下文正文", bool(item) and item.texts == [])
+    check("reset 没有把自己写进上下文（长度仍为 0）", len(hist) == 0)
+
+    # ---- 已知但未移植的指令：回绝，且不转发给 AI ----
+    ag.qq.feed("小明", ".ai stop")
+    ag.step()
+    item = ag.queue.get(scope)
+    check("未移植指令 → 回一句说明", bool(item) and "没移植" in (item.reply or ""),
+          (item.reply[:40] if item else ""))
+    check("未移植指令不写上下文", len(ag.store.history(scope)) == 0)
+
+    # ---- `.ai 你的问题`：剥掉前缀按普通提问交给 AI（插件同款行为）----
+    # 先把上一条回执当成「已经发出去了」，否则新消息会走「定稿待发 → 记进迟到桶」
+    # 那条路（也对，但就不是这里要验的东西了）。
+    ag.queue.drop(scope)
+    ag.qq.feed("小明", ".ai 今天天气怎么样")
+    ag.step()
+    check("`.ai 问题` 进的是防抖缓冲（不是被吞掉）",
+          len(ag.deb.pending) == 1 and ag.deb.pending[0].content == "今天天气怎么样",
+          str([p.content for p in ag.deb.pending]))
+    ag.flush(force=True)
+    it2 = ag.queue.get(scope)
+    check("交给 AI 的正文已剥掉 `.ai` 前缀",
+          bool(it2) and any("今天天气怎么样" in t and ".ai" not in t for t in it2.texts),
+          str(it2.texts) if it2 else "无队列项")
+
+    # ---- _admit 层面的判定：指令绝不产生 user 写入 ----
+    writes, _why = ag._admit(
+        A.Message(sender="小明", content=".ai reset", direction="other", key="kzz"), scope)
+    check("_admit 对指令返回哨兵而非 user 写入",
+          bool(writes) and writes[0][0] == A.CMD_SENTINEL, str(writes))
+
+    # ---- 谁能下指令 ----
+    only_other = A._deep_merge(cfg, {"commands": {"accept_from": ["other"]}})
+    ag3 = new_agent(only_other, tmpdir)
+    check("accept_from=['other'] 时，我方手输的指令不生效",
+          not ag3._command_allowed(
+              A.Message(sender="我", content=".ai reset", direction="me", key="km")))
+    check("accept_from=['other'] 时，对方仍可下指令",
+          ag3._command_allowed(
+              A.Message(sender="小明", content=".ai reset", direction="other", key="ko")))
+
+    ag4 = new_agent(cfg, tmpdir, title="我方对照对象")
+    ag4.store.history(ag4.scope).push("user", "【小明】：别忘了这条", source="incoming")
+    ag4._own_sent.append(".ai reset")          # 模拟「我们自己刚发出去过这句」
+    ag4.qq.feed("我", ".ai reset", direction="me")
+    ag4.step()
+    check("自己发出去的回复不会被当成指令（上下文没被动）",
+          len(ag4.store.history(ag4.scope)) == 1)
+    check("我方手输的指令仍然生效（默认 accept_from 含 self）",
+          bool(ag4._command_allowed(
+              A.Message(sender="我", content=".ai help", direction="me", key="kh"))))
+
+    # ---- dry-run：照样清上下文，但绝不发送 ----
+    ag5 = new_agent(cfg, tmpdir, dry_run=True, title="彩排对象")
+    ag5.store.history(ag5.scope).push("user", "【小明】：x", source="incoming")
+    ag5.qq.feed("小明", ".ai reset")
+    ag5.step()
+    check("dry-run 下 reset 依然生效（上下文清空）", len(ag5.store.history(ag5.scope)) == 0)
+    check("dry-run 下不排任何待发回执", ag5.queue.get(ag5.scope) is None)
+
+
+def test_command_total_read_path(cfg: dict, tmpdir: str) -> None:
+    print("\n[8] 对话内指令：总读取路径（不撤单）")
+    ag = new_agent(cfg, tmpdir, title="总读取对象")
+    scope = ag.scope
+    ag.store.history(scope).push("user", "【小明】：旧上下文", source="incoming")
+
+    item, created = ag.queue.ensure_pending(scope, "小明", "", wait_seconds=0.0)
+    check("占位队列项已建立（pending_read）", created and item.pending_read)
+
+    # 第一次总读取会顺手建基线（把当前可见消息记成已读），
+    # 所以要先把基线做掉，之后再喂进来的才算「新消息」。
+    ag._read_into_history(item)
+    ag.qq.feed("小明", ".ai reset")
+
+    # 走真实时序：prepare → 切会话 → 总读取 → 在读取途中吃到指令
+    ag._ensure_session = lambda it: True       # 不切会话（离线）
+    ok = ag.prepare(item)
+    check("prepare 不撤单（没按『没读到新消息』作废）", ok is True)
+    check("队列项仍在（回执没被丢）", ag.queue.get(scope) is not None)
+    check("上下文已被这次总读取清空", len(ag.store.history(scope)) == 0)
+    check("回执已定稿且内容正确",
+          item.prepared and item.reply == cfg["commands"]["ack_reset"], item.reply[:30])
+    check("prepare 没有再去调模型（没有把回执顶掉）", item.texts == [])
+    check("连续对话没有被这次读取激活（generate_reply 没跑）",
+          not ag._continuous_now(scope))
+
+
 # ------------------------------------------------------------------ main
 def main() -> int:
     tmpdir = tempfile.mkdtemp(prefix="pcagent-test-")
@@ -321,6 +491,9 @@ def main() -> int:
         test_persist(cfg)
         test_continuous(cfg)
         test_end_to_end(cfg)
+        test_command_parse(cfg)
+        test_command_reset(cfg, tmpdir)
+        test_command_total_read_path(cfg, tmpdir)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

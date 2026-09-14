@@ -34,16 +34,19 @@ from . import paths
 def _f(path: str, label: str, ftype: str, group: str, default: Any,
        hint: str = "", *, secret: bool = False, advanced: bool = False,
        options: list | None = None, step: float | None = None,
-       minimum: float | None = None, maximum: float | None = None) -> dict:
+       minimum: float | None = None, maximum: float | None = None,
+       placeholder: str | None = None) -> dict:
     return {"path": path, "label": label, "type": ftype, "group": group,
             "default": default, "hint": hint, "secret": secret, "advanced": advanced,
-            "options": options, "step": step, "minimum": minimum, "maximum": maximum}
+            "options": options, "step": step, "minimum": minimum, "maximum": maximum,
+            "placeholder": placeholder}
 
 
 GROUPS = [
     {"id": "model", "title": "模型接入", "desc": "OpenAI 兼容接口。绝大多数情况只需要填 API Key。"},
     {"id": "behavior", "title": "对话行为", "desc": "谁会被回、回多长、以及非文本消息怎么处理。"},
     {"id": "rhythm", "title": "节奏与聚合", "desc": "对方连发多条时合并成一次调用，避免刷屏。"},
+    {"id": "commands", "title": "对话内指令", "desc": "在 QQ 里以 .ai 开头下指令。指令本身不会转发给模型，也不会写进上下文。"},
     {"id": "risk", "title": "风控与排队", "desc": "决定能同时服务几个会话。改大之前先读并发评估文档。"},
     {"id": "discovery", "title": "多会话发现", "desc": "扫会话列表找新消息。这是「降级方案」的核心开关。"},
     {"id": "foreground", "title": "前台与稳定性", "desc": "关于抢前台、OCR 兜底、方向判定的取舍。"},
@@ -112,6 +115,25 @@ FIELDS: list[dict] = [
        "AI 在某个会话开口后，一段时间内该会话免触发词。"),
     _f("continuous.timeout_seconds", "连续对话时长（秒）", "number", "rhythm", 1800,
        "30 分钟没有来回就退出连续状态。", step=60, minimum=30, maximum=86400),
+
+    # -------------------------------------------------- 对话内指令
+    _f("commands.enabled", "启用对话内指令", "bool", "commands", True,
+       "关掉之后 `.ai reset` 之类会被当成普通消息交给模型。"),
+    _f("commands.accept_from", "谁可以下指令", "tags", "commands", ["other", "self"],
+       "other = 对方（聊天对象）；self = 你自己在 QQ 里手输的。"
+       "机器人自己的发言会被自动排除，不用担心自己触发自己。",
+       placeholder="other"),
+    _f("commands.reply_ack", "指令回执", "bool", "commands", True,
+       "执行完要不要回一句确认话。关掉就静默执行。"),
+    _f("commands.ack_reset", "reset 回执文案", "text", "commands",
+       "小清澈读懂了你的意思，回到了房间，脱衣睡下。",
+       "`.ai reset` 成功后发出去的那句话。"),
+    _f("commands.reset_clears_pending", "reset 一并丢掉未结算消息", "bool", "commands", True,
+       "打开后，`.ai reset` 会把还没轮到 AI 的那几条一起丢掉。"
+       "关掉的话它们几秒后照常被回复，看起来就像「说了 reset 却没生效」。"),
+    _f("commands.prefixes", "指令前缀", "tags", "commands",
+       [".ai", "。ai", "/ai", ".aichat"],
+       "回车分隔。前缀后必须跟空格或冒号，所以 `.aichat` 不会被 `.ai` 抢走。", advanced=True),
 
     # -------------------------------------------------- 风控与排队
     _f("queue.max_replies_per_minute", "每分钟最多回复", "number", "risk", 12,
@@ -334,6 +356,11 @@ _LOCAL_DEFAULTS = {
                   "habit_min_interval_ms": 500, "habit_max_interval_ms": 15000,
                   "habit_ema_alpha": 0.3},
     "continuous": {"enabled": True, "timeout_seconds": 1800},
+    "commands": {"enabled": True, "prefixes": [".ai", "。ai", "/ai", ".aichat"],
+                 "accept_from": ["other", "self"], "reply_ack": True,
+                 "ack_reset": "小清澈读懂了你的意思，回到了房间，脱衣睡下。",
+                 "reset_clears_pending": True,
+                 "unknown_hint": "这条指令还没移植到 PC 端，暂时只支持 .ai reset / .ai help。"},
     "persist": {"enabled": True, "file": "state/conversations.json",
                 "save_interval_seconds": 3.0, "max_scopes": 50},
     "identity": {"enabled": True, "store": "state/uid-map.json",
@@ -476,8 +503,29 @@ def _coerce(field: dict, value: Any) -> Any:
 
 
 def _is_mask(value: str) -> bool:
-    """前端把掩码原样回传时不能当成「用户真的填了 key」。"""
-    return bool(value) and set(value) <= set("•")
+    """
+    判断前端回传的是不是**掩码**，而不是用户真的填了密钥。
+
+    ## 这里曾经是一个会**覆盖真密钥**的 bug
+
+    `_mask()` 生成的是 `{key[:4]}{'•' * 8}{key[-4:]}`（例如 `sk-1••••••••ghij`），
+    首尾**各带着真密钥的 4 个字符**。而原来的判据是
+
+        set(value) <= set("•")      # 只有「全是 •」才算掩码
+
+    于是这个掩码被判成「用户真的填了 key」→ 被当成新密钥写进 `secrets.local.json`
+    → **真实密钥被掩码覆盖掉**。之后所有模型调用都用这个假密钥，
+    报出来的却是 `UnicodeEncodeError: latin-1 ... position 11-18`（`Bearer ` 共 7 字符，
+    正好对上那 8 个 `•` 的位置）—— 一个看起来完全像网络问题的报错。
+
+    判据放宽成「**出现了 • 就当掩码**」：真实的 API Key 不会包含 U+2022。
+    """
+    return bool(value) and "•" in value
+
+
+def looks_like_mask(value: str) -> bool:
+    """给诊断用的显式命名：这个字符串看起来是掩码（= 配置已经被污染）。"""
+    return _is_mask(value)
 
 
 def validate(payload: dict) -> dict:
@@ -510,9 +558,32 @@ def validate(payload: dict) -> dict:
     if not (inline_key or sec_key or typed):
         add(errors, "E-LLM-001", "API Key 还没填 —— 不填的话模型调不通")
 
+    # 已配置的密钥如果本身是掩码，说明它被写坏过（历史 bug：掩码被当成真密钥存盘）。
+    # 这种情况下模型**一定调不通**，而且报出来的是编码错误（看起来像网络问题）。
+    # 在这里直接点破，比让用户去猜强得多。
+    for label, stored in (("secrets.local.json", sec_key), ("config.json 内联 api_key", inline_key)):
+        if stored and looks_like_mask(stored):
+            add(errors, "E-LLM-011",
+                f"{label} 里存的**不是真密钥，而是界面上的掩码**（{_mask(stored)}）—— "
+                f"请到「模型接入 → API Key」里重新粘贴一次真实密钥")
+
     model = str(payload.get("llm.model") or "").strip()
     if not model:
         add(errors, "E-CFG-007", "模型名不能为空")
+
+    # 密钥/地址必须是纯 ASCII：HTTP 头只能用 latin-1，混进一个中文就会让请求
+    # 在**发出之前**失败，而且那个异常极易被误判成「网络不通」。
+    # 在保存时就拦住，比等到调用模型时报错更好 —— 那时用户已经在看别的日志了。
+    for path, label in (("llm.api_key", "API Key"), ("llm.api_base", "接口地址")):
+        val = str(payload.get(path) or "")
+        if _is_mask(val):
+            continue
+        bad = [(i, ch) for i, ch in enumerate(val) if ord(ch) > 127]
+        if bad:
+            where = "、".join(f"第 {i + 1} 个是 {ch!r}" for i, ch in bad[:4])
+            add(errors, "E-LLM-011",
+                f"{label}里有 {len(bad)} 个非 ASCII 字符：{where}"
+                f"（只粘 `sk-` 开头那一串，不要带引号/空格/中文注释）")
 
     # 风控两项是「取更严格者」。配出矛盾组合时实际速率会远低于预期（甚至趋近 0），
     # 这是最容易被误当成「程序卡住」的一种配置错误 —— 所以必须提示，但不该拦死。

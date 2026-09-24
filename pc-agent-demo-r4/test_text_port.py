@@ -15,6 +15,7 @@ test_text_port.py — 离线冒烟测试：验证「小清澈3.0.js → PC 端�
     6) 对话内指令解析：`.ai reset` 的各种写法与别名，以及「不是指令」的反例
     7) `.ai reset` 端到端：清上下文 + 退连续对话 + 丢缓冲 + 排回执，且不转发给 AI
     8) 总读取路径：指令在 prepare 里被吃掉时不能撤单（否则回执会一起丢）
+    10) 文本写入路径的选择：auto 在独立桌面上必须自己切到窗口消息
 """
 
 from __future__ import annotations
@@ -478,6 +479,69 @@ def test_command_total_read_path(cfg: dict, tmpdir: str) -> None:
 
 
 # ------------------------------------------------------------------ main
+def test_write_route(cfg: dict) -> None:
+    """
+    「文本往哪条路写」的判定 —— 这一条是补的回归测试。
+
+    ## 为什么必须有
+
+    `uia.write_mode` 原先**没有默认值**，`type_text` 缺省当 `clipboard`。
+    于是走隐藏桌面（独立桌面）时，每次都去抢前台，而那张桌面上
+    `SetForegroundWindow` 恒返 0 —— **每次发送都报 E-FG-001**，
+    看着像偶发故障，其实是 100% 失败。
+
+    判定依赖「当前在哪张桌面」，所以这里把三个桌面探针都换成假的来测
+    （真调要看机器状态，测不出所有组合）。
+    """
+    print("\n[10] 文本写入路径的选择（auto / clipboard / wmchar × 桌面）")
+    real_mine, real_input = A._current_thread_desktop_name, A._input_desktop_name
+
+    def with_desktops(mine: str, inp: str):
+        A._current_thread_desktop_name = lambda: mine
+        A._input_desktop_name = lambda: inp
+
+    def route(mode: str, mine: str, inp: str) -> tuple[str, bool]:
+        c = A._deep_merge(cfg, {"uia": {"write_mode": mode}})
+        q = A.QQWindow(c)
+        return q._route_write_mode(), A._independent_desktop()
+
+    try:
+        # 普通桌面
+        with_desktops("Default", "Default")
+        check("普通桌面：auto → clipboard（V1 老路不变）",
+              route("auto", "Default", "Default")[0] == "clipboard")
+        check("普通桌面：显式 wmchar 照配执行",
+              route("wmchar", "Default", "Default")[0] == "wmchar")
+
+        # 独立桌面（R4）
+        with_desktops("QQAgentHidden", "Default")
+        r, indep = route("auto", "QQAgentHidden", "Default")
+        check("独立桌面：auto → wmchar（不再抢前台）", r == "wmchar", r)
+        check("独立桌面：判定为独立桌面", indep is True)
+        r, _ = route("clipboard", "QQAgentHidden", "Default")
+        check("独立桌面：显式 clipboard 也会改用 wmchar（那条路必然失败）",
+              r == "wmchar", r)
+
+        # 锁屏：输入桌面切到 Winlogon —— **不能**被当成独立桌面
+        with_desktops("Default", "Winlogon")
+        check("锁屏（输入桌面=Winlogon）不被误判成独立桌面",
+              route("auto", "Default", "Winlogon")[1] is False)
+        check("锁屏时 auto 仍走 clipboard（锁屏该报锁屏，不是换路径）",
+              route("auto", "Default", "Winlogon")[0] == "clipboard")
+
+        # 探针问不出来
+        with_desktops("", "")
+        check("桌面名问不出来时不乱猜（按普通桌面）",
+              route("auto", "", "")[1] is False)
+
+        # 值写错
+        with_desktops("Default", "Default")
+        check("write_mode 写了不认识的值 → 按 auto 处理",
+              route("keyboard", "Default", "Default")[0] == "clipboard")
+    finally:
+        A._current_thread_desktop_name, A._input_desktop_name = real_mine, real_input
+
+
 def main() -> int:
     tmpdir = tempfile.mkdtemp(prefix="pcagent-test-")
     print("=" * 72)
@@ -494,6 +558,7 @@ def main() -> int:
         test_command_parse(cfg)
         test_command_reset(cfg, tmpdir)
         test_command_total_read_path(cfg, tmpdir)
+        test_write_route(cfg)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

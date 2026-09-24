@@ -473,6 +473,26 @@ DEFAULTS = {
         # 发送链路不再有抢前台的环节，重试也更容易成功。
         # 在你自己每天用的电脑上跑，就改回 true。
         "restore_foreground": False,
+
+        # 文本怎么写进输入框。三档：
+        #
+        #   auto（默认） 按**当前桌面**自动选：有前台概念的普通桌面走剪贴板
+        #                （V1 原路）；独立桌面（R4 那张看不见的桌面）走窗口消息。
+        #   clipboard   强制剪贴板 + Ctrl+V（需要前台）
+        #   wmchar      强制窗口消息直投（不需要前台）
+        #
+        # ## 为什么默认是 auto，而不是二选一
+        #
+        # 这两条路各有**物理上不成立**的场合：
+        #   · 剪贴板路要抢前台 —— 独立桌面上 `SetForegroundWindow` 恒返 0，
+        #     必然失败（还只报一句 E-FG-001，看着像偶发问题）；
+        #   · 窗口消息路在用户桌面上虽然也能用，但它是「绕过输入队列」的写法，
+        #     不该在一条本来跑得通的链路上主动换掉。
+        #
+        # 原来这里**没有这个默认值**，`type_text` 缺省当 clipboard ——
+        # 于是有人跑隐藏桌面时忘了手改配置，每次发送都撞 E-FG-001。
+        # 让程序自己认桌面，比让人记得改配置可靠。
+        "write_mode": "auto",
     },
 }
 
@@ -1879,6 +1899,101 @@ def _input_desktop_locked() -> bool:
         return False
 
 
+# ---- 「我是不是在另一张桌面上」--------------------------------------------
+# R4（V2）会建一张用户看不见的桌面，把 QQ 启动上去。那张桌面上**没有前台窗口这个概念**：
+# `GetForegroundWindow()` 恒为 NULL、`SetForegroundWindow()` 恒返 0。
+# 凡是依赖前台的路径在上面都**必然失败**，而不是「偶尔失败」。
+# 所以需要能自己认出来，别让用户去手改配置。
+UOI_NAME = 2
+DESKTOP_SWITCHDESKTOP = 0x0100
+DESKTOP_READOBJECTS = 0x0001
+
+
+def _desktop_name(handle) -> str:
+    """取一个 HDESK 的名字（'Default' / 'Winlogon' / 'QQAgentHidden' …）。"""
+    if not handle:
+        return ""
+    try:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        u32.GetUserObjectInformationW.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        u32.GetUserObjectInformationW.restype = wintypes.BOOL
+        buf = ctypes.create_unicode_buffer(256)
+        need = wintypes.DWORD()
+        ok = u32.GetUserObjectInformationW(handle, UOI_NAME, buf,
+                                           ctypes.sizeof(buf), ctypes.byref(need))
+        return buf.value if ok else ""
+    except Exception:
+        return ""
+
+
+def _current_thread_desktop_name() -> str:
+    try:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        u32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        u32.GetThreadDesktop.restype = wintypes.HANDLE
+        k32.GetCurrentThreadId.restype = wintypes.DWORD
+        h = u32.GetThreadDesktop(k32.GetCurrentThreadId())
+        return _desktop_name(h)          # 这个句柄不用关（属于本线程）
+    except Exception:
+        return ""
+
+
+def _input_desktop_name() -> str:
+    """当前**输入**桌面的名字。失败返回空串（多半是锁屏或权限不足）。"""
+    try:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        u32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        u32.OpenInputDesktop.restype = wintypes.HANDLE
+        u32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        h = u32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS | DESKTOP_SWITCHDESKTOP)
+        if not h:
+            return ""
+        try:
+            return _desktop_name(h)
+        finally:
+            u32.CloseDesktop(h)
+    except Exception:
+        return ""
+
+
+def _independent_desktop() -> bool:
+    """
+    本进程是不是跑在一张**独立的（用户看不见的）桌面**上 —— 也就是 R4 那张。
+
+    ## 判据（三条，按顺序）
+
+        1. 本线程所在桌面的名字 == 输入桌面的名字
+              → 这是用户正在用的桌面，有前台概念 → **不是**独立桌面。
+        2. 输入桌面打不开
+              → 多半是锁屏或权限不足。**不能**当成独立桌面：
+                此时我们其实还在自己的桌面上，只是输入被 Winlogon 占了。
+        3. 输入桌面名叫 'Winlogon'
+              → 同上，是锁屏，不是独立桌面。
+        其余情况（名字不同，且对方不是 Winlogon）→ 独立桌面。
+
+    ## 为什么必须能认出来
+
+    在独立桌面上，剪贴板那条写入路径（抢前台 → Ctrl+V）**必然失败**：
+    `SetForegroundWindow` 恒返 0。而它在用户桌面上是能用的。
+    所以「用哪种写入方式」不该由用户手配 —— 手配的结果就是
+    有人跑隐藏桌面时忘了改，然后每次发送都撞 `E-FG-001`（实测发生过）。
+    """
+    mine = _current_thread_desktop_name()
+    inp = _input_desktop_name()
+    if not mine:
+        return False                     # 问不出来就别乱猜，按普通桌面走
+    if not inp:
+        return False                     # 锁屏/权限不足：那是在自己桌面上
+    if mine.lower() == inp.lower():
+        return False                     # 同一张桌面：有前台
+    if inp.lower() == "winlogon":
+        return False                     # 锁屏：输入桌面切走了，但我们仍在自己的桌面
+    return True
+
+
 def _desktop_locked() -> bool:
     """
     桌面是不是锁着（或屏保挡着）。
@@ -2524,6 +2639,73 @@ class QQWindow:
             report("E-FG-003", "归还前台失败，QQ 会继续留在最上层",
                    ctx={"目标窗口": prev_fg, "当前前台": _foreground_title()})
 
+    def _note_write_route(self, mode: str, why: str, forced: bool) -> None:
+        """把「这次为什么用这条写入路径」说一次（同一个理由只说一次，不刷屏）。"""
+        self.write_mode_resolved = mode
+        key = f"{mode}|{why}"
+        if getattr(self, "_write_route_noted", "") == key:
+            return
+        self._write_route_noted = key
+        line = f"写入路径 = {mode}（{why}）"
+        if forced:
+            log("WARN", line + " —— 配置里的 write_mode 在这张桌面上不可能成功，已自动改用可行的那条")
+        else:
+            log("INFO", line)
+
+    def _route_write_mode(self) -> str:
+        """
+        决定这次用哪条写入路径：`'clipboard'` 还是 `'wmchar'`。
+
+        ## 为什么这是一个函数，而不是一行配置比较
+
+        因为「哪条路能用」取决于**当前在哪张桌面上**，而那是运行期事实：
+
+            普通桌面（用户正在用的）  剪贴板路可用（抢得到前台）
+            独立桌面（R4 那张）       剪贴板路**必然失败**（SetForegroundWindow 恒返 0）
+
+        实测踩过：`uia.write_mode` 原先**没有默认值**，`type_text` 缺省当 clipboard，
+        于是隐藏桌面路线上每次发送都报 `E-FG-001 抢前台失败`，
+        而它看着像偶发故障（其实 100% 失败）。
+
+        ## 三种取值的行为
+
+            auto（默认）  按桌面自动选，把选择结果记一次日志
+            wmchar        强制窗口消息
+            clipboard     强制剪贴板；**但如果当前是独立桌面，仍会改用 wmchar** ——
+                          因为在那种桌面上 clipboard 不是「可能失败」而是「不可能成功」，
+                          照配执行等于每轮报一次假故障。改走 wmchar 时会出一条 WARN
+                          说明配置被环境覆盖（不静默改人的配置）。
+        """
+        raw = (self.cfg.get("uia", {}).get("write_mode") or "auto").strip().lower()
+        if raw not in ("auto", "clipboard", "wmchar"):
+            # 值写错了不静默当默认 —— 那会让人以为自己配的生效了
+            if not getattr(self, "_write_mode_warned", False):
+                self._write_mode_warned = True
+                log("WARN", f"uia.write_mode={raw!r} 不是 auto/clipboard/wmchar 之一，"
+                            f"按 auto 处理（按当前桌面自动选）")
+            raw = "auto"
+
+        if raw == "wmchar":
+            self._note_write_route("wmchar", "配置指定", forced=False)
+            return "wmchar"
+
+        indep = _independent_desktop()
+        if raw == "clipboard" and not indep:
+            self._note_write_route("clipboard", "配置指定", forced=False)
+            return "clipboard"
+
+        if indep:
+            forced = raw == "clipboard"
+            self._note_write_route(
+                "wmchar",
+                "独立桌面上没有前台窗口可用，剪贴板路径必然失败" if forced
+                else "独立桌面（隐藏桌面）自动选择",
+                forced=forced)
+            return "wmchar"
+
+        self._note_write_route("clipboard", "普通桌面自动选择", forced=False)
+        return "clipboard"
+
     def type_text(self, text: str) -> bool:
         """
         把文本写进输入框：聚焦 → 清空 → 剪贴板粘贴。**只写不发送**。
@@ -2541,8 +2723,8 @@ class QQWindow:
         # ---- V2 / V1 的分岔口 ----
         # clipboard = V1 原路：抢前台 → 剪贴板 → Ctrl+V（服务用户桌面上的 QQ）
         # wmchar    = V2 新路：窗口消息直投（服务隐藏桌面上的 QQ，见 _type_via_wmchar）
-        # 默认仍是 clipboard，所以 V1 的行为一字未改；V2 由 config.json 显式打开 wmchar。
-        if (self.cfg.get("uia", {}).get("write_mode") or "clipboard").lower() == "wmchar":
+        # auto      = 按当前桌面自己选（默认，见 DEFAULT_CONFIG 里那段说明）
+        if self._route_write_mode() == "wmchar":
             return self._type_via_wmchar(text)
 
         if self.editor is None:
@@ -2821,9 +3003,15 @@ class QQWindow:
 
         # 兜底才用回车，且必须确认前台 —— 否则宁可失败也不发（见文件上方踩坑说明）
         if not self.is_foreground():
-            report("E-SEND-008", "Invoke 失败且 QQ 不在前台，拒绝发送回车（防止按键漏到其它窗口）",
+            # ⚠️ 独立桌面上「不在前台」不是异常，而是**这张桌面的常态**（没有前台可言）。
+            # 所以这里的措辞要分两种情况，否则人会去查一个不存在的抢前台问题。
+            indep = _independent_desktop()
+            report("E-SEND-008",
+                   "发送按钮的 Invoke 失败，且回退用的回车需要前台 —— 已放弃本次发送"
+                   + ("（这张独立桌面上不存在前台，回车这条路本来就走不通）" if indep else ""),
                    ctx={"发送按钮": "已定位" if self.send_btn is not None else "未定位",
-                        "当前前台": _foreground_title()})
+                        "当前前台": _foreground_title(),
+                        "独立桌面": indep})
             return False
         auto.SendKeys("{Enter}")
         return True
@@ -4895,14 +5083,27 @@ def input_test(cfg: dict, text: str) -> int:
     if not qq.wait_send_enabled(1.0):
         print(f"    [!] {diag_line('E-SEND-002')}")
 
-    # type_text 已经把焦点还给你了，这里要清空就得再借一次前台，清完立刻归还
+    # type_text 已经把焦点还给你了，这里要清空就得再借一次前台，清完立刻归还。
+    # 独立桌面上「借前台」是做不到的（那里没有前台）—— 先试免前台那条（ValuePattern），
+    # 再不成就如实说明跳过，不要打一个看起来像失败的 False。
     prev_fg = _fg_hwnd()
     cleared = False
-    if force_foreground(qq.hwnd):
+    how = ""
+    if qq.clear_editor_uia():                 # 免前台：走 ValuePattern.SetValue("")
+        cleared, how = True, "免前台（ValuePattern）"
+    elif _independent_desktop():
+        how = "跳过：这张独立桌面上没有前台窗口可借，键盘清理用不了"
+    elif force_foreground(qq.hwnd):
         cleared = qq.clear_editor()
+        how = "借前台后键盘清理"
         time.sleep(0.4)
         restore_foreground(prev_fg)
-    print(f"[4] 清空输入框 = {cleared}，发送按钮禁用 = {qq._send_disabled()}")
+    print(f"[4] 清空输入框 = {cleared}"
+          + (f"（{how}）" if how else "（没能清掉，输入框里留着这段测试文本）")
+          + f"，发送按钮禁用 = {qq._send_disabled()}")
+    print(f"    写入路径 = {qq.write_mode_resolved or qq._route_write_mode()}"
+          f"（独立桌面={_independent_desktop()}，write_mode 配置="
+          f"{(cfg.get('uia') or {}).get('write_mode')!r}）")
 
     ok = got == text
     if ok:

@@ -2,19 +2,23 @@
   "_说明": "PC 端 QQ AI 代理（路线A）配置文件。所有字段都有内置默认值，缺项不影响运行。",
   "_密钥说明": "api_key 留空时，会尝试从 api_key_file 读取（相对路径按本目录解析）；若该文件是 JSON，按 api_key_json_keys 顺序找第一个非空值。secrets.local.json 已被 .gitignore 排除，密钥不会进仓库。",
   "_警示": "不要把 api_key 直接写在这一行下面的 llm.api_key 里 —— 本仓库会推到公开 Gitee。",
-
   "llm": {
     "api_base": "https://api.deepseek.com",
     "api_key": "",
     "api_key_file": "secrets.local.json",
-    "api_key_json_keys": ["llm.api_key", "deepseek.api_key", "openai.api_key", "api_key", "DEEPSEEK_API_KEY"],
+    "api_key_json_keys": [
+      "llm.api_key",
+      "deepseek.api_key",
+      "openai.api_key",
+      "api_key",
+      "DEEPSEEK_API_KEY"
+    ],
     "model": "deepseek-flash",
     "temperature": 1.1,
     "max_tokens": 800,
     "timeout_seconds": 60,
     "system_prompt": "你是『小清澈』，一个温和、真诚、有点黏人的 AI 陪伴者。说话口语化、简短，一次回复不超过三句话。不要用列表和标题，不要像客服一样客套。"
   },
-
   "chat": {
     "self_nickname": "",
     "_private_chat_only": "false = 群聊也处理；true = 群聊一律跳过",
@@ -22,7 +26,10 @@
     "_group_requires_trigger": "群聊里是否额外要求触发词。false = 群聊也自由发言（当前按你的要求放开）",
     "group_requires_trigger": false,
     "always_reply": true,
-    "trigger_prefixes": ["小清澈", "清澈"],
+    "trigger_prefixes": [
+      "小清澈",
+      "清澈"
+    ],
     "reply_cooldown_seconds": 1.5,
     "min_llm_interval_seconds": 2.0,
     "max_history_entries": 40,
@@ -32,7 +39,6 @@
     "_nontext说明": "图片/语音/文件/动画表情怎么处理。skip = 一律跳过（默认，最省额度）；describe = 拿 QQ 气泡里的占位文本（如 [动画表情]）当正文继续走，让 AI 自己决定回不回。改 describe 前请注意：不显未读数字的会话里，一个表情也会触发一次模型调用。",
     "nontext_policy": "skip"
   },
-
   "_aggregate说明": "防抖聚合（移植自 小清澈3.0.js）：对方连发多条时合并成一次模型调用。等待 = 基础等待 + 习惯性额外停顿(EMA) + 冷启动惩罚。基础等待两档自适应：同一会话连续 fast_after_single_rounds 轮都只有单条消息 → 降到 fast_wait_ms；一旦出现某轮 ≥2 条（又在连发）→ 回到 base_wait_ms 并重新计数。",
   "aggregate": {
     "enabled": true,
@@ -46,24 +52,29 @@
     "habit_max_interval_ms": 15000,
     "habit_ema_alpha": 0.3
   },
-
   "_continuous说明": "连续对话模式（移植自 小清澈3.0.js）：AI 在某个会话开口后，该会话在 timeout_seconds 内免触发词；超时自动退出。",
   "continuous": {
     "enabled": true,
     "timeout_seconds": 1800
   },
-
   "_commands说明": "对话内指令（移植自插件 小清澈3.0.js 的 .ai 指令集，当前实现 .ai reset / .ai help）。指令本身绝不转发给 AI、也不写进上下文，只回一句回执。accept_from 里 other=对方、self=你自己手输的；机器人自己发出去的话会被自动排除。",
   "commands": {
     "enabled": true,
-    "prefixes": [".ai", "。ai", "/ai", ".aichat"],
-    "accept_from": ["other", "self"],
+    "prefixes": [
+      ".ai",
+      "。ai",
+      "/ai",
+      ".aichat"
+    ],
+    "accept_from": [
+      "other",
+      "self"
+    ],
     "reply_ack": true,
     "ack_reset": "小清澈读懂了你的意思，回到了房间，脱衣睡下。",
     "reset_clears_pending": true,
     "unknown_hint": "这条指令还没移植到 PC 端，暂时只支持 .ai reset / .ai help。"
   },
-
   "_persist说明": "上下文持久化：按会话（私聊 private:<QQ号> / 群聊 group:<群号>）隔离落盘，重启不丢。state/ 目录已被 .gitignore 排除。",
   "persist": {
     "enabled": true,
@@ -71,7 +82,6 @@
     "save_interval_seconds": 3.0,
     "max_scopes": 50
   },
-
   "_identity说明": "会话主键用 QQ 号（state/uid-map.json 缓存）而不是昵称。首次遇到某个会话需要『打开资料卡取号』，会抢前台一次；之后只读缓存。取号命令：python qqid.py --enroll-all",
   "identity": {
     "enabled": true,
@@ -79,7 +89,6 @@
     "enroll_on_demand": true,
     "require_qq_uin": false
   },
-
   "_queue说明": "回复排队 + 风控限速。真实约束不是性能而是账号风控：个人号高频发送会被限制。max_replies_per_minute 与 min_interval_seconds 是决定『能服务几个用户』的唯一两个数，调大前请先读 并发能力评估与优化方向.md §9。",
   "queue": {
     "enabled": true,
@@ -97,7 +106,6 @@
     "_重试上限": "发送前复核（标题/QQ号/会话签名）连续失败这么多次就放弃并撤单，防止无限重排。",
     "max_attempts": 3
   },
-
   "_discovery说明": "多会话『发现』（降级方案）。桌面 UI 上每个会话只保留最新一条消息的节选，摘要不足以构造上下文，所以这里只做发现：扫会话列表的未读徽标/摘要指纹 → 占位排队（不碰前台、不读正文）→ 出队时才切过去做一次『上下文总读取』并交给 AI（见 agent.prepare）。",
   "discovery": {
     "enabled": true,
@@ -115,18 +123,22 @@
     "_状态文件": "哪些会话已建基线 + 上次看到的指纹快照。丢了会导致重启后重复建基线（吞掉重启瞬间的未读）。",
     "state_file": "state/rotation.json"
   },
-
   "teach": {
     "enabled": true,
-    "names": ["小清澈", "Claritas-小清澈"],
+    "names": [
+      "小清澈",
+      "Claritas-小清澈"
+    ],
     "max_chars": 1000,
     "honor_own_outgoing": false
   },
-
   "_write_mode说明": "V2 的写入路径。clipboard = V1 原路（抢前台 → 剪贴板 → Ctrl+V，服务用户桌面上的 QQ）；wmchar = 窗口消息直投（服务隐藏桌面上的 QQ）。隐藏桌面上 clipboard 必失效：它的终点是 OS 输入队列，而队列只服务当前 input desktop 的前台窗口。实测 wmchar 在隐藏桌面上第一档（零激活）就落地。",
   "uia": {
-    "write_mode": "wmchar",
-    "read_chain": ["uia", "ocr"],
+    "write_mode": "auto",
+    "read_chain": [
+      "uia",
+      "ocr"
+    ],
     "direction_mode": "auto",
     "ocr_lang": "chi_sim+eng",
     "ocr_scale": 2.0,

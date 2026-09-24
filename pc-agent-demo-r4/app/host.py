@@ -628,6 +628,10 @@ def start_daemon(*, desktop_name: str = "", profile: str = "", qq_exe: str = "",
         out["error"] = f"E-PROC-001 常驻宿主已经在运行（pid {st['pid']}，已运行 {st['uptime']}s）"
         return out
 
+    # 清哨兵必须在**拉起来之前**：上一次停止留下的 state/STOP 会让新起的
+    # 回复循环一进循环就退出（现象是「点启动，转一圈就变已停止」）。
+    clear_stop_sentinels("本次启动之前")
+
     name = desktop_name or desktop.DEFAULT_NAME
     r = desktop.create(name)
     if not r["ok"]:
@@ -681,6 +685,42 @@ def start_daemon(*, desktop_name: str = "", profile: str = "", qq_exe: str = "",
                 break
         out["ready"] = daemon_status()
     return out
+
+
+def clear_stop_sentinels(reason: str = "") -> list[str]:
+    """
+    清掉两个停止哨兵，返回真正被清掉的文件名。
+
+    ## 为什么必须有这一步（实测会「启动就停」）
+
+    停止流程是两段式的：宿主收到 `hostd.stop` → **自己写 `state/STOP`**
+    让 agent 优雅收尾 → 然后自己退出。问题是那两个哨兵**退出时不会被清**：
+
+      · `HOSTD_STOP` 由 `stop_daemon` 在确认宿主退掉之后删（这一条是对的）；
+      · `state/STOP` **谁都不删** —— 只有 V1 那条路（`app/supervisor.py`）会清。
+
+    于是隐藏桌面这条路：停一次 → `state/STOP` 留在磁盘上 → **下次启动
+    `agent.run_forever()` 一进循环就看到哨兵，立刻退出**。
+    用户看到的现象是「点启动，它转一圈就变成已停止」，而日志里只有一句
+    「收到停止哨兵」——完全联想不到是上一次留下的文件。
+
+    所以：**启动前清一次、停止后也清一次**。启动前那次是为了消化
+    「上次异常退出留下的」；停止后那次是为了让下一次「无论从哪进来」都干净
+    （比如有人直接 `python -m app.hostd` 手工拉起，绕过了 start_daemon）。
+    """
+    cleared: list[str] = []
+    for path, label in ((paths.STOP_PATH, "state/STOP（回复循环）"),
+                        (HOSTD_STOP, "hostd.stop（宿主）")):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                cleared.append(label)
+        except Exception:
+            pass
+    if cleared and reason:
+        BUS.emit(f"已清掉上次留下的停止哨兵：{'、'.join(cleared)}（{reason}）",
+                 tag="INFO", source="host")
+    return cleared
 
 
 def stop_daemon(timeout: float = 20.0) -> dict:
@@ -741,6 +781,8 @@ def stop_daemon(timeout: float = 20.0) -> dict:
     except Exception:
         pass
     out["final"] = daemon_status()
+    # 收尾时把 agent 的停止哨兵也清掉：下一次启动不该继承这一次的「停止意图」。
+    clear_stop_sentinels("上次停止的收尾")
     return out
 
 

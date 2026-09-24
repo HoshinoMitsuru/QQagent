@@ -176,6 +176,15 @@ FIELDS: list[dict] = [
     _f("uia.restore_foreground", "用完后归还前台", "bool", "foreground", False,
        "默认**关闭**（VM 场景）：不归还就没有「抢不到前台」这类失败，发送链路更可靠。"
        "在你自己每天用的电脑上跑，打开它以免 QQ 一直霸占最上层。"),
+    _f("uia.write_mode", "文本写入路径", "select", "foreground", "auto",
+       "**auto（推荐）**：程序按当前桌面自己选 —— 普通桌面走剪贴板（抢前台 + Ctrl+V），"
+       "独立桌面（隐藏桌面）走窗口消息。"
+       "为什么要留这个选项：这两条路各有**物理上不成立**的场合，"
+       "而 auto 就是用来免掉「跑隐藏桌面时忘了改配置」的 —— 那样每次发送都会报抢前台失败。"
+       "除非在排查写入问题，否则不用动它。",
+       options=[{"value": "auto", "label": "auto — 按桌面自动（推荐）"},
+                {"value": "wmchar", "label": "wmchar — 窗口消息（不需要前台）"},
+                {"value": "clipboard", "label": "clipboard — 剪贴板（需要前台）"}]),
     _f("uia.direction_mode", "消息方向判定", "select", "foreground", "auto",
        "auto 自动推断左右归属；读到的「我方/对方」反了才需要手动指定。",
        options=[{"value": "auto", "label": "auto — 自动"},
@@ -385,7 +394,11 @@ _LOCAL_DEFAULTS = {
     "teach": {"enabled": True, "names": ["小清澈", "Claritas-小清澈"],
               "max_chars": 1000, "honor_own_outgoing": False},
     "uia": {"read_chain": ["uia", "ocr"], "direction_mode": "auto",
-            "ocr_lang": "chi_sim+eng", "ocr_scale": 2.0, "restore_foreground": False},
+            "ocr_lang": "chi_sim+eng", "ocr_scale": 2.0, "restore_foreground": False,
+            # ⚠️ 这份是 agent.DEFAULTS 的副本，`test_ui.py` 会逐键比对两者。
+            # 加字段时**两边都要加** —— 漏了就会在测试里报「缺失=['uia.xxx']」，
+            # 而症状是「界面上能看到这个配置项、但它的默认值和 agent 实际用的不一样」。
+            "write_mode": "auto"},
 }
 
 

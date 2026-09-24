@@ -190,6 +190,12 @@ def stop_requested() -> bool:
     return os.path.isfile(host.HOSTD_STOP)
 
 
+#: 宿主是否已经在收尾。看门线程是守护线程，主流程跑完 `finally` 之后它**可能还会醒一次**；
+#: 那时它若又去写 `state/STOP`，就会在最后一步把刚清掉的哨兵**重新写回磁盘** ——
+#: 下一次启动于是「一进循环就收到停止哨兵」。这个标志就是用来堵这个竞态的。
+_EXITING = False
+
+
 def _ask_agent_to_stop() -> None:
     """
     代写 agent 的停止哨兵，让回复循环**优雅**退出（而不是被强杀）。
@@ -199,6 +205,8 @@ def _ask_agent_to_stop() -> None:
     直接结束进程的话，「对方发了消息、我们的回复已经生成好却永远没发出去」
     就成了一种静默丢消息的路径。
     """
+    if _EXITING:
+        return                      # 已经在收尾了，别再往磁盘上写哨兵（见 _EXITING 的说明）
     try:
         os.makedirs(paths.STATE_DIR, exist_ok=True)
         with open(paths.STOP_PATH, "w", encoding="utf-8") as f:
@@ -598,6 +606,8 @@ def main() -> int:
         # `reason` 一律写（复盘用），`error` 只在失败时写 ——
         # 界面靠 error 决定「要不要把这次退出当成故障摆在最上面」，
         # 正常停止也写 error 的话，每次停止都会弹一条红框。
+        global _EXITING
+        _EXITING = True            # 先堵住看门线程，再清哨兵（否则它会写回来）
         beat(phase=PHASE_DONE, stopped=True, rc=rc, reason=reason,
              error=(reason if rc else ""),
              uptime=round(time.time() - started, 1))

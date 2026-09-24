@@ -430,7 +430,8 @@ def as_ui_payload() -> dict:
     """给前端的：字段声明 + 当前值（key 只给掩码）。"""
     merged = load_merged()
     app = load_app_settings()
-    raw_cfg = _read_json(paths.CONFIG_PATH)
+    # 这里原本还读过一次 config.json（raw_cfg），但从未被使用 ——
+    # merged 已经包含它，所以那次读盘是纯浪费，已删除。
     secret = resolve_api_key_display()
 
     values: dict = {}

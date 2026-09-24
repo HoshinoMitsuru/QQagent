@@ -159,6 +159,14 @@ def clip(text: str, n: int = 60) -> str:
 # 几分钟就把日志埋掉 —— 连第一现场都找不回来。见 error_codes.Throttle 的说明。
 THROTTLE = EC.Throttle(window=60.0)
 
+# 「这一条是**自己发出去的**消息」——跳过它是正常行为，不是异常。
+# `_admit` 用它开头，`_report_round` 靠它把"正常跳过"和"可疑跳过"分开：
+#
+#   刚发完一条回复，下一轮就会把我们自己那条读回来。如果把这算成
+#   「读到了但一条都没进上下文」，就会**每发一次消息误报一次 E-READ-001**
+#   —— 实测现场出现过，而且报的是「方向判反」，完全指向错误方向。
+SKIP_SELF = "自己发的消息"
+
 # 最近一次报出的错误码。
 # 用途：队列项需要能说明「自己为什么没发出去」——只留一个失败计数没有排查价值。
 _LAST_CODE: dict = {"code": ""}
@@ -724,6 +732,14 @@ class Message:
     rect: tuple = (0, 0, 0, 0)
     kind: str = "text"   # "text" | "nontext"（图片/语音/文件等）
     ts: str = ""         # QQ 只在时间间隔较大时显示，可能为空
+    # 方向是**怎么**判出来的：class | nick | position | last_only | default | ocr
+    #
+    # 为什么必须记下来：光看 `direction == "me"` 分不清两件完全不同的事 ——
+    #   · 「有明确证据是我自己发的」（class 标记 / 发送者就是我）→ 正常跳过
+    #   · 「靠头像左右位置猜的」→ 猜反了就把对方的消息丢掉了，值得报警
+    # 没这个字段时，`_report_round` 只能一律当可疑，于是**自己刚发出去的消息
+    # 被读回来时就会误报一次 E-READ-001**（实测现场出现过）。
+    dir_src: str = ""
 
 
 class History:
@@ -1284,6 +1300,41 @@ def check_ascii_for_header(value: str, what: str) -> None:
         f"{what}里有 {len(bad)} 个非 ASCII 字符：{where}{more}",
         {"检查对象": what, "总长度": len(value),
          "说明": "HTTP 头只能用 latin-1，非 ASCII 字符会让请求在发出之前就失败 —— 不是网络问题"})
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def norm_text(s: str) -> str:
+    """把文本归一化成「只剩可见字符」，用于写入/回读的比对。"""
+    return _WS_RE.sub("", s or "")
+
+
+def text_matches(want: str, got: str) -> bool:
+    """
+    回读校验：输入框里的内容是不是我们要发的那一段。
+
+    ## 为什么必须归一化空白，不能直接子串比较
+
+    QQ 的编辑器是 contenteditable，**段落是各自独立的节点**；
+    `collect_texts()` 是按节点拼文本的，段落之间不会补 `\\n`。
+    于是模型输出里的「空行分段」在回读时**必然**对不上 —— 实测现场：
+
+        期望 = …）⏎⏎……我听见了。      ← 模型输出里有空行
+        实际 = …）……我听见了。童声…    ← 回读拿到的没有
+
+    直接子串比较于是**永远失败**，而这不止是"那一条发不出去"：
+
+    `editor_contains()` 用的是同一个判据（判断「草稿还在不在输入框里」），
+    于是它每次都判「不在」→ 每轮都重新粘贴 → 又失败 → **无限重试**。
+    实测那条回复重试到了**第 224 次**（每 30 秒一次，将近两小时）。
+
+    归一化之后仍能挡住真正的内容错误（写错字、发错人），
+    只是不再区分换行/空格的表现形式。这个取舍是明确的：
+    **少一个空行，远好过两个小时发不出去。**
+    """
+    w, g = norm_text(want), norm_text(got)
+    return bool(w) and w in g
 
 
 class LLMClient:
@@ -2134,16 +2185,23 @@ class QQWindow:
                 content = "".join(collect_texts(node, 6)).strip()
 
         # ---- 方向判定：class > 昵称 > 头像水平位置 ----
+        # 同时记下**依据**（dir_src）：它决定这条「不是对方发的」是「有证据」还是「靠猜」。
+        # 只有"靠猜"的那种才值得报警。
+        dir_src = "class" if direction != "unknown" else ""
         if mode == "last_only":
             direction = "other" if idx == total - 1 else "unknown"
+            dir_src = "last_only"
         else:
             if direction == "unknown" and self_nick and sender == self_nick:
                 direction = "me"
+                dir_src = "nick"       # 发送者就是我们自己 → 有证据
             if direction == "unknown" and mode in ("auto", "position") and avatar_left is not None:
                 # 对方头像在左（x≈1049），自己头像在右；用消息区中线切分最稳
                 direction = "me" if avatar_left > center_x else "other"
+                dir_src = "position"   # 靠位置推断 → 可能反
             if direction == "unknown" and mode == "auto":
                 direction = "other"
+                dir_src = "default"
 
         # ---- 非文本判定：去掉 [图片]/[语音] 这类占位后如果什么都不剩 ----
         kind = "text" if re.sub(r"\[[^\]]*\]", "", content).strip() else "nontext"
@@ -2152,7 +2210,7 @@ class QQWindow:
             key = fingerprint_of(sender, content, str(idx))
         return Message(
             sender=sender, content=content, direction=direction,
-            key=key, rect=_rect(item), kind=kind, ts=ts,
+            key=key, rect=_rect(item), kind=kind, ts=ts, dir_src=dir_src,
         )
 
     # ---------------------------------------------------- 新消息切分
@@ -2231,12 +2289,12 @@ class QQWindow:
 
         这是「回复已经写进去、只差按发送」的判据 —— 也就是**可恢复的进度**。
         VM 场景下它决定了两件事：重试时要不要重新粘贴、以及这条回复还算不算数。
+
+        ⚠️ 必须用 `text_matches`（归一化空白）而不是子串比较：
+        用子串比较时，任何含段落换行的回复都会被判成「草稿不在」，
+        于是每轮都重新粘贴、每轮都失败 —— 实测把一个会话卡了两小时。
         """
-        want = (text or "").strip()
-        if not want:
-            return False
-        got = self.editor_text().strip()
-        return bool(got) and want in got
+        return text_matches(text, self.editor_text())
 
     # ---------------------------------------------------- 会话身份 / 发送前复核
     def message_ids(self, limit: int = 8) -> list[str]:
@@ -2439,13 +2497,22 @@ class QQWindow:
             self._abort_cleanup("发送按钮未恢复")
             return False
 
-        # 回读校验：确认输入框里真的是我们要发的内容，防止发出错误内容
+        # 回读校验：确认输入框里真的是我们要发的内容，防止发出错误内容。
+        #
+        # ⚠️ 用归一化空白后的比较，不要用原始子串比较。
+        # QQ 编辑器的段落是独立节点，回读拿不到段间的 `\n`，
+        # 而模型输出经常带空行分段 —— 原始比较会**永远失败**（实测卡了两小时）。
         got = self.editor_text()
-        if want and want not in got:
-            report("E-SEND-003", "输入框回读不符，已中止发送",
+        if want and not text_matches(want, got):
+            report("E-SEND-003", "输入框回读与预期不符，已中止发送",
                    ctx={"期望": clip(want, 40), "实际": clip(got, 40)})
             self._abort_cleanup("回读不符")
             return False
+        if want and want not in got:
+            # 归一化后一致、但原始文本不一致：几乎总是段落换行的表现形式差异。
+            # 明确记一条 INFO，免得以后有人以为是「校验被弱化了」。
+            log("INFO", f"回读文本与原文仅在空白/换行上有差异（归一化后一致，长度 "
+                        f"{len(want)} → {len(got)}）→ 照常发送")
 
         # ---- 发送前最后一道闸：此刻会话还是不是原来那个？----
         if guard is not None:
@@ -2911,9 +2978,15 @@ class Agent:
             # 原来的写法是 `return [], ""`（静默丢弃），后果很严重：
             # 一旦方向判反（对方的消息被认成自己发的），这条消息会被悄悄扔掉，
             # **日志里一个字都不出现** —— 表现就是「对方明明发了消息，程序一声不吭」。
-            # 而且它和「对方根本没发消息」在日志上完全无法区分，只能靠猜。
-            # 现在把原因写出来，并在里面直接给出验证方法。
-            return [], (f"方向判定为『{m.direction}』（自己发的/系统消息）→ 跳过"
+            #
+            # 而且这里要**区分两种性质完全不同的情况**（靠 `dir_src`）：
+            #   · class / nick：有明确证据是我自己发的 → 正常，`_report_round` 不会报警
+            #   · position / last_only：靠猜的 → 猜反就会丢消息，必须报警
+            if m.dir_src in ("class", "nick"):
+                return [], (f"{SKIP_SELF}（依据：{'class 标记' if m.dir_src == 'class' else '发送者就是我'}）"
+                            f"｜发送者={m.sender or '?'}")
+            return [], (f"方向判定为『{m.direction}』（依据："
+                        f"{'位置推断' if m.dir_src == 'position' else m.dir_src or '未知'}）→ 跳过"
                         f"｜若这条其实是对方发的，说明方向判反了："
                         f"跑一次「只读诊断」核对【我方】/【对方】与气泡左右是否一致"
                         f"（key={m.key[:24]} 发送者={m.sender or '?'}）")
@@ -2992,19 +3065,31 @@ class Agent:
 
         现在只要有「读到但全被跳过」，就打出一行带原因分布的汇总 ——
         一眼就能看出是方向判反、触发词没命中、还是非文本被策略挡了。
+
+        **但要排除「全是自己刚发出去的消息」**：那是完全正常的
+        （我们自己发的回复下一轮就会被读回来）。把它算成异常，
+        会变成「每发一条消息就误报一次方向判反」，比不报还坏。
         """
         r = self._round
         if not r or not r["fresh"] or r["handled"]:
             return
-        dist_items = r["skips"].most_common(5)
-        dist = "；".join(f"{k.split('｜')[0]} ×{v}" for k, v in dist_items) or "（没有记录到原因）"
-        top = dist_items[0][0] if dist_items else ""
+        # 剔掉「自己发的」这类正常跳过之后，还有没有真正可疑的？
+        suspicious = {k: v for k, v in r["skips"].items() if not k.startswith(SKIP_SELF)}
+        self_count = sum(v for k, v in r["skips"].items() if k.startswith(SKIP_SELF))
+        if not suspicious:
+            if self_count:
+                log("INFO", f"本轮读到的 {self_count} 条全是我们自己发出去的消息"
+                            f"（被读回来了）→ 正常跳过，不处理")
+            return
+        dist_items = sorted(suspicious.items(), key=lambda kv: -kv[1])[:5]
+        dist = "；".join(f"{k.split('｜')[0]} ×{v}" for k, v in dist_items)
+        top = dist_items[0][0]
         report("E-READ-001",
                f"本轮读到 {r['fresh']} 条新消息（共读 {r['read']} 条），"
                f"但一条都没进入上下文",
                ctx={"跳过原因分布": dist,
                     "会话": self.scope,
-                    "方向可疑": "是 —— 见原因里的「方向判定」" if "方向判定" in top else "否"})
+                    "方向可疑": "是 —— 见原因里的「方向判定」" if "方向判定为" in top else "否"})
 
     def _ingest(self, fresh: list[Message], scope: str = "") -> int:
         scope = scope or self.scope
@@ -3478,6 +3563,7 @@ class Agent:
             # 重试路径很短（校验 + Invoke），因为 `deliver` 已经把「草稿还在不在输入框里」
             # 记到了 `item.drafted` 上，下一轮直接走 `send_text(resume=True)`。
             self.queue.note_send_failure(item, reason=_LAST_CODE.get("code") or "E-SEND-008")
+            self._note_stuck(item)          # 反复失败要说一次，但不能刷屏
             self.queue.requeue(item, delay=self._retry_delay(item))
             log("QUE", f"{item.display_name!r} 未发出，保持原回复原地重试"
                        f"（第 {item.fail_count} 次失败｜{item.last_fail}｜"
@@ -3489,13 +3575,44 @@ class Agent:
     # ---------------------------------------------------- 待发回复的保全
     def _retry_delay(self, item) -> float:
         """
-        发送失败后的退避。
+        发送失败后的退避阶梯。
 
-        比原来的固定 1 秒更宽，但**不是放弃**：随失败次数递增，上限就是静默窗硬上限。
-        回复已经生成好了，早一点晚一点发出去都行，但**必须发出去**。
+        ## 为什么不能用「小基数 × 失败次数，30 秒封顶」
+
+        原式是 `min(max_hold, base * (1 + fail_count * 1.5))` —— 上限只有 30 秒。
+        后果是：**一条永远过不去的项会变成每 30 秒一次的无限重试**。
+        实测现场：那条回复重试到**第 224 次**，将近两小时，日志被它刷满。
+
+        「绝不丢消息」不等于「永不放弃且不减速」。这里的处理是：
+
+            前几次快速重试（瞬时故障能自愈：按钮没恢复、签名没稳定）
+            → 逐步拉长到 10 分钟一次（长期故障不再占用循环与前台）
+
+        **仍然不丢弃**：项留在队列里，只是来得越来越慢。
         """
-        base = float(self.cfg["chat"].get("poll_interval_seconds") or 0.8)
-        return min(self.queue.max_hold, base * (1 + item.fail_count * 1.5))
+        base = max(0.8, float(self.cfg["chat"].get("poll_interval_seconds") or 0.8))
+        ladder = [base * 2, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0]
+        idx = max(0, min(int(item.fail_count) - 1, len(ladder) - 1))
+        return ladder[idx]
+
+    def _note_stuck(self, item) -> None:
+        """
+        一条回复反复发不出去时，报一次 `E-SEND-013`（不撤单）。
+
+        这个码定义了却一直**没有被触发过** —— 而上一次现场里它本该是唯一
+        能说明「有一条卡住了两小时」的那条日志。现在接上：
+        第 5 次失败报一次，之后每 20 次再报一次（有抑制器兜着，不会刷屏）。
+        """
+        n = int(item.fail_count)
+        if n == 5 or (n > 5 and n % 20 == 0):
+            report("E-SEND-013",
+                   f"'{item.display_name}' 的这条回复已经连续 {n} 次发不出去"
+                   f"（退避已拉长到 {self._retry_delay(item):.0f} 秒一次，**不会丢弃**）",
+                   ctx={"会话": item.display_name, "失败次数": n,
+                        "最后一次原因": item.last_fail,
+                        "回复长度": len(item.reply or ""),
+                        "回复开头": clip(item.reply or "", 50),
+                        "草稿是否还在输入框": item.drafted})
 
     def _carry_over(self, item) -> None:
         """

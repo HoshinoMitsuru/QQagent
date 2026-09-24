@@ -762,7 +762,7 @@ python -X utf8 agent.py --no-send              # 常驻循环彩排：完整链�
 python -X utf8 agent.py --send "测试"           # 真发一条
 python -X utf8 agent.py --dry-run              # 常驻循环，只读不发
 python -X utf8 agent.py                        # 常驻循环，正式运行（Ctrl+C 退出）
-python -X utf8 probe.py --depth 30 --dump      # 重新导出控件树
+python -X utf8 archive/probe.py --depth 30 --dump      # 重新导出控件树
 
 # 会话身份（取 QQ 号）
 python -X utf8 qqid.py --list                  # 列会话 + 已缓存 QQ 号
@@ -784,8 +784,8 @@ python -X utf8 test_live_chain.py --live --target "某会话"           # 真机
 python -X utf8 test_live_chain.py --live --target "某会话" --send    # 真机联调并真的发出去
 
 # 前台依赖探查（决定能不能放到虚拟机/后台跑，只读诊断）
-python -X utf8 probe_minimized.py              # 最小化后 UIA 还能读到什么（会最小化再还原）
-python -X utf8 probe_switch_nofg.py            # 切会话能否免前台（会真切会话并切回）
+python -X utf8 archive/probe_minimized.py              # 最小化后 UIA 还能读到什么（会最小化再还原）
+python -X utf8 archive/probe_switch_nofg.py            # 切会话能否免前台（会真切会话并切回）
 ```
 
 > `--once` 会**跳过防抖直接结算**，方便调试；常驻模式才走完整等待窗口。
@@ -938,9 +938,9 @@ Windows **默认禁止后台进程抢前台窗口**。单纯调 `SetForegroundWi
 
 ```powershell
 "D:\QQ.exe" --remote-debugging-port=9222 --remote-allow-origins=* --force-renderer-accessibility
-python -X utf8 cdp_probe.py                # 1) 验证端口与可注入目标
-python -X utf8 cdp_probe.py --dom          # 2) 定位输入框 / 消息列表
-python -X utf8 cdp_probe.py --type "测试"   # 3) 实测写入（绝不发送）
+python -X utf8 archive/cdp_probe.py                # 1) 验证端口与可注入目标
+python -X utf8 archive/cdp_probe.py --dom          # 2) 定位输入框 / 消息列表
+python -X utf8 archive/cdp_probe.py --type "测试"   # 3) 实测写入（绝不发送）
 ```
 
 > `cdp_probe.py` 的 HTTP 探测、错误分支、WebSocket 会话层（握手 / 事件交错跳过 / 错误透传）**均已自测通过**；

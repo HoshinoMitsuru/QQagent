@@ -121,7 +121,9 @@ class LogBus:
                 continue
             m = _LINE_RE.match(line)
             if m:
-                clock, tag, text = m.group(1), (m.group(2) or ""), m.group(3)
+                # group(1) 是行首时间戳，这里不用它 ——
+                # emit() 会盖自己的时间戳（以实际写入时刻为准）。
+                tag, text = (m.group(2) or ""), m.group(3)
                 level = _classify(tag)
                 self.emit(text, tag=tag, source=source, level=level)
             else:

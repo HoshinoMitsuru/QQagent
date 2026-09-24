@@ -801,7 +801,8 @@ def selftest() -> int:
     a = rq.submit("private:9400", "戊", "9400", "原文", now=t, wait_seconds=0.0)
     a.prepared, a.reply, a.texts = True, "生成好但没发出去的话", ["原文"]
     a.drafted, a.fail_count, a.last_fail = True, 2, "E-SEND-003"
-    b = rq.ensure_pending("private:9401", "己", "9401", now=t, unread_hint=2)[0]
+    # 调用本身有副作用（新建一条占位项），只是不需要它的返回值
+    rq.ensure_pending("private:9401", "己", "9401", now=t, unread_hint=2)
     state = rq.dump_state()
     case("落盘包含全部待发项", len(state["items"]) == 2, str(len(state["items"])))
 
@@ -859,7 +860,6 @@ def simulate(cfg: dict, users: int = 15, turns_per_minute: float = 0.75,
     返回统计。这是回答「这套配置能稳定带几个人」最直接的工具 ——
     比看文档里的估算值靠谱，因为阈值合并、抖动、硬上限都真实参与了。
     """
-    import heapq
 
     rq = ReplyQueue(cfg, seed=seed)
     if unit_cost is not None:
@@ -914,7 +914,9 @@ def simulate(cfg: dict, users: int = 15, turns_per_minute: float = 0.75,
                           f"（{item.count} 条，含合并 {item.merged}，等了 {w:.1f}s）")
         now += step
 
-    b = rq.budget.snapshot(now)
+    # 调用要保留：snapshot() 内部会 _prune 掉过期的时间戳，
+    # 是后续统计的维护动作，删掉会让模拟结果偏乐观。
+    rq.budget.snapshot(now)
     unserved = len(rq)
     total_replies = sum(served_users.values())
     res = {

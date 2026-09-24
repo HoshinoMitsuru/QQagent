@@ -4,10 +4,13 @@ __pycache__/
 *.pyo
 
 # 探针 / 诊断输出（非源码）
-pc-agent-demo/probe-report.json
-pc-agent-demo/probe-stdout.txt
-pc-agent-demo/probe-tree.txt
-pc-agent-demo/peek-fixed.txt
+# 2026-09-24：这些探针脚本与输出统一收进 pc-agent-demo/archive/，
+# 所以规则跟着改路径。**脚本本身要入库**（它们是「当时怎么验证的」的证据链），
+# 这里只忽略体量大的原始 dump —— 那种内容可以用脚本随时重新导出。
+pc-agent-demo/archive/probe-report.json
+pc-agent-demo/archive/probe-stdout.txt
+pc-agent-demo/archive/probe-tree.txt
+pc-agent-demo/archive/peek-fixed.txt
 
 # PC 端本地密钥（绝不入库）
 pc-agent-demo/secrets.local.json

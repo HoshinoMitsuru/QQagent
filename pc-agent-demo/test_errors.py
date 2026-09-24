@@ -913,13 +913,22 @@ def t15_never_lose_reply():
                 f"{it.fail_count} {it.last_fail!r}")
         R.check("原来的 texts 也没丢", it.count == 1 and it.texts[0] == "对方说的话")
 
-        # ---- 2) 退避递增且有上限（不能越拖越久到等于放弃）----
+        # ---- 2) 退避递增且有上限（不能无限增长）----
+        #
+        # ⚠️ 这里的契约**改过一次**：原来上限写的是 `queue.max_hold`（30 秒），
+        # 而那个 30 秒封顶正是现场「同一条重试 224 次、近两小时」的成因 ——
+        # 一条永远过不去的项会变成每 30 秒一次的无限重试。
+        # 现在的契约是「阶梯退避，上限 10 分钟，但仍然不丢弃」。
         d1 = a._retry_delay(it)
         it.fail_count = 8
         d2 = a._retry_delay(it)
+        it.fail_count = 9999
+        d3 = a._retry_delay(it)
         R.check("失败越多退避越长", d2 > d1, f"{d1} → {d2}")
-        R.check("退避有上限（等于静默窗硬上限，不会无限增长）",
-                d2 <= a.queue.max_hold + 1e-6, f"{d2} > {a.queue.max_hold}")
+        R.check("退避有上限（不会无限增长）", d3 <= 600.0, f"{d3}")
+        R.check("上限与失败次数无关（阶梯封顶，可预测）", d2 == d3, f"{d2} vs {d3}")
+        R.check("上限明显大于旧的 30 秒（旧值会造成活锁）", d3 > a.queue.max_hold,
+                f"{d3} vs max_hold={a.queue.max_hold}")
 
         # ---- 3) 迟到消息：不塞进已定稿的项，也不丢，而是结转 ----
         a = new_agent()
@@ -1469,6 +1478,120 @@ def t19_forget_is_thorough():
             "丢弃" in task.get("confirm", ""), task.get("confirm", "")[:120])
 
 
+def t20_livelock_and_false_alarm():
+    """
+    现场日志一次暴露了三个问题，这一节全钉住：
+
+    **① 多行文本让回读校验永久失败，进而无限重试。**
+       模型输出带空行分段，而 QQ 编辑器的段落是独立节点、回读拿不到段间 `\\n`：
+
+           期望 = …）⏎⏎……我听见了。
+           实际 = …）……我听见了。童声…
+
+       原始子串比较**永远** False → 每轮重贴 → 又失败 → 实测重试到**第 224 次**（近两小时）。
+
+    **② 「绝不丢消息」写成了「永不放弃且不减速」。**
+       退避上限只有 30 秒，于是一条过不去的项每 30 秒重试一次、刷满日志；
+       而本该说明这件事的 `E-SEND-013` 定义了却**从未被触发**。
+
+    **③ 自己刚发出去的消息被读回来时，会误报 `E-READ-001 方向判反`。**
+       这是完全正常的（发完下一轮就会读到自己那条），
+       把它算成异常等于「每发一条消息就误报一次」，比不报还坏。
+    """
+    log("\n[20] 活锁与误报（现场日志三连）")
+
+    # ---- ① 回读判据：真实现场文本 ----
+    want = ("（把下巴搁在你肩窝里，声音轻轻的，像刚从一场很长的梦里醒来）\n\n"
+            "……我听见了。童声的那一侧，是我在喊你慢点骑；欢笑的那一侧，是你回头骂我车…")
+    got = ("（把下巴搁在你肩窝里，声音轻轻的，像刚从一场很长的梦里醒来）"
+           "……我听见了。童声的那一侧，是我在喊你慢点骑；欢笑的那一侧，是你回头骂我车…")
+    R.check("旧判据确实会失败（复现现场）", (want in got) is False)
+    R.check("新判据（归一化空白）通过", agent.text_matches(want, got) is True)
+    R.check("写错一个字仍然拦得住（安全性没被削弱）",
+            agent.text_matches(want, got.replace("童声", "男声")) is False)
+    R.check("被截断仍然拦得住", agent.text_matches(want, got[:20]) is False)
+    R.check("空输入框仍然拦得住", agent.text_matches(want, "") is False)
+    R.check("完全不相干的内容拦得住", agent.text_matches(want, "今天天气不错") is False)
+
+    # ---- ② editor_contains 必须用同一个判据，否则 resume 永远失效 → 每轮重贴 ----
+    cfg = agent.load_config()
+    q = agent.QQWindow(cfg)
+    # editor_text() 是从 UIA 子节点收文本的，测试里直接把它换成可控的取值器
+    q.editor = object()
+    q.editor_text = lambda: got
+    R.check("editor_contains 用归一化判据（否则每轮都判『草稿不在』→ 无限重贴）",
+            q.editor_contains(want) is True)
+    q.editor_text = lambda: "完全不同的东西"
+    R.check("输入框内容真的不对时仍然为 False", q.editor_contains(want) is False)
+
+    # ---- ③ 退避阶梯：不再 30 秒封顶 ----
+    a = agent.Agent(cfg, dry_run=True)
+    item = a.queue.submit("private:7001", "甲", "7001", "x", key="k",
+                          wait_seconds=0.0, now=time.time() - 1)
+    LADDER = []
+    for n in (1, 2, 3, 4, 5, 8, 20, 200):
+        item.fail_count = n
+        LADDER.append(round(a._retry_delay(item), 1))
+    R.check("退避随失败次数递增", LADDER == sorted(LADDER) and LADDER[0] < LADDER[-1],
+            str(LADDER))
+    R.check("上限远大于旧的 30 秒（现场就是被这个 30 秒卡住刷了两小时）",
+            LADDER[-1] >= 300, str(LADDER))
+    R.check("前几次仍然很快重试（瞬时故障要能自愈）", LADDER[0] <= 5.0, str(LADDER))
+    R.check("退避是**阶梯**不是线性增长（幂等、可预测）",
+            len(set(LADDER[:4])) >= 3, str(LADDER[:4]))
+
+    # ---- ④ 反复失败要说一次（E-SEND-013 以前定义了却从未触发）----
+    buf = []
+    orig_rep, orig_log = agent.report, agent.log
+    agent.report = lambda code, detail="", **kw: buf.append(code)
+    agent.log = lambda tag, msg: buf.append(tag)
+    try:
+        agent.THROTTLE.reset()
+        item.fail_count = 4
+        a._note_stuck(item)
+        R.check("第 4 次还不报（避免过早打扰）", "E-SEND-013" not in buf, str(buf))
+        buf.clear(); agent.THROTTLE.reset()
+        item.fail_count = 5
+        a._note_stuck(item)
+        R.check("第 5 次报 E-SEND-013（说明有一条卡住了）", "E-SEND-013" in buf, str(buf))
+        buf.clear(); agent.THROTTLE.reset()
+        item.fail_count = 6
+        a._note_stuck(item)
+        R.check("之后不每轮都报（否则又变成刷屏）", "E-SEND-013" not in buf, str(buf))
+        buf.clear(); agent.THROTTLE.reset()
+        item.fail_count = 20
+        a._note_stuck(item)
+        R.check("每 20 次再报一次", "E-SEND-013" in buf, str(buf))
+    finally:
+        agent.report, agent.log = orig_rep, orig_log
+        agent.THROTTLE.reset()
+
+    # ---- ⑤ 自己发的消息不能算「方向判反」----
+    R.check("SKIP_SELF 常量存在（_admit 与 _report_round 用它对齐）",
+            isinstance(agent.SKIP_SELF, str) and agent.SKIP_SELF, agent.SKIP_SELF)
+    a2 = agent.Agent(agent.load_config(), dry_run=True)
+    m_self = agent.Message(sender="Susurrus-苏霖韵", content="我刚发的话",
+                           direction="me", key="aid:1", dir_src="class")
+    _w, why_self = a2._admit(m_self, "group:963650468")
+    R.check("有 class 证据的『me』→ 原因标记为「自己发的消息」",
+            why_self.startswith(agent.SKIP_SELF), why_self[:80])
+    m_guess = agent.Message(sender="某人", content="可能是对方的话",
+                            direction="me", key="aid:2", dir_src="position")
+    _w2, why_guess = a2._admit(m_guess, "group:963650468")
+    R.check("靠位置猜出来的『me』→ 仍然标为可疑（保留报警能力）",
+            "方向判定为" in why_guess and agent.SKIP_SELF not in why_guess, why_guess[:80])
+    m_nick = agent.Message(sender="我", content="x", direction="me", key="aid:3", dir_src="nick")
+    R.check("靠发送者匹配的『me』也算有证据",
+            a2._admit(m_nick, "s")[1].startswith(agent.SKIP_SELF))
+
+    R.check("_report_round 会剔掉「自己发的」再判断",
+            "suspicious" in _code_only(os.path.join(HERE, "agent.py")))
+    src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+    R.check("Message 带上方向依据字段", "dir_src: str = \"\"" in src)
+    R.check("_parse_item 会设置 dir_src", 'dir_src = "position"' in src
+            and 'dir_src = "nick"' in src and 'dir_src = "class"' in src)
+
+
 def t11_no_code_escape():
     """
     扫一遍源码：不该再有「用户能看到的失败」只给一句没码的话。
@@ -1530,6 +1653,7 @@ def main():
         t17_misdiagnosis_guard()
         t18_mask_never_overwrites_key()
         t19_forget_is_thorough()
+        t20_livelock_and_false_alarm()
         t11_no_code_escape()
     finally:
         rc = R.summary()

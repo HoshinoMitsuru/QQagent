@@ -161,14 +161,23 @@ def main() -> int:
                 break
         check("抓图任务成功结束", shot_ok)
 
-        print("\n[5] GET /api/host/shot.png")
-        st, ctype, blob = call(f"{base}/api/host/shot.png", token, raw=True)
+        print("\n[5] GET /api/host/shot")
+        st, ctype, blob = call(f"{base}/api/host/shot", token, raw=True)
         check("接口通", st == 200, f"HTTP {st}")
-        check("Content-Type 是 image/png", "image/png" in (ctype or ""), str(ctype))
-        check("是真 PNG（magic 头）", blob[:8] == b"\x89PNG\r\n\x1a\n",
-              str(blob[:8]))
+        # ⚠️ 不能写死 PNG：抓图优先 PNG，**没有 Pillow 时退成 BMP**。
+        # 打包版就是 BMP（spec 刻意排除 PIL）。断言比被测对象更严格，
+        # 会把「本来是对的」判成失败。
+        blob = blob or b""
+        is_png = blob[:8] == b"\x89PNG\r\n\x1a\n"
+        is_bmp = blob[:2] == b"BM"
+        check("是真图片（PNG 或 BMP）", is_png or is_bmp, str(blob[:8]))
+        check("Content-Type 与真实格式一致（不是硬写 image/png）",
+              ("image/png" in (ctype or "")) == is_png
+              and ("image/bmp" in (ctype or "")) == is_bmp,
+              f"ctype={ctype!r} png={is_png} bmp={is_bmp}")
         check("体积像张真图（> 8KB）", len(blob) > 8192, f"{len(blob)} 字节")
-        print(f"      {len(blob)} 字节")
+        print(f"      {'PNG' if is_png else 'BMP' if is_bmp else '?'}　"
+              f"{len(blob)} 字节　{ctype}")
 
         print("\n[6] 状态里回填了抓图结果")
         st, res = call(f"{base}/api/host/status", token)

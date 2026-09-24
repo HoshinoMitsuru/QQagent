@@ -16,6 +16,7 @@ test_text_port.py — 离线冒烟测试：验证「小清澈3.0.js → PC 端�
     7) `.ai reset` 端到端：清上下文 + 退连续对话 + 丢缓冲 + 排回执，且不转发给 AI
     8) 总读取路径：指令在 prepare 里被吃掉时不能撤单（否则回执会一起丢）
     10) 文本写入路径的选择：auto 在独立桌面上必须自己切到窗口消息
+    11) 发送重试上限：到上限就撤单，不再无限空转
 """
 
 from __future__ import annotations
@@ -542,6 +543,90 @@ def test_write_route(cfg: dict) -> None:
         A._current_thread_desktop_name, A._input_desktop_name = real_mine, real_input
 
 
+def test_give_up(cfg: dict, tmpdir: str) -> None:
+    """
+    [11] 发送重试上限：连续失败到达上限就**撤单**，不再无限空转。
+
+    ## 为什么要有这条
+
+    原来这里是「永不放弃」：项留在队列里，退避最长 10 分钟一次，无限重试。
+    理由是 VM 场景下「这条消息永远没人回」不可接受 —— 那个理由对**真实消息**成立，
+    但代价是：**一条永远不可能成功的回复会永久占着队列和日志**
+    （实测遇到过重试到第 224 次、刷了两小时日志的）。
+
+    现在按 `queue.max_attempts`（配置界面里本来就这么写的：连续失败这么多次后放弃）
+    收口。这个测试盯的就是「到上限真的会撤单」以及「上限读坏了不会退回永不放弃」。
+    """
+    print("\n[11] 发送重试上限：到上限就放弃这一条")
+    ag = new_agent(cfg, tmpdir, title="上限用例")
+    cap = int(cfg["queue"]["max_attempts"])
+    check(f"上限取自 queue.max_attempts（{cap}）", ag._send_retry_cap() == cap,
+          str(ag._send_retry_cap()))
+    check("上限不超过 5（用户要求）", cap <= 5, str(cap))
+
+    # ⚠️ 这两条**在构造之后**再改配置：`ReplyQueue.__init__` 遇到非数字会直接抛
+    # ValueError（既有行为，故意不动它 —— 启动期报错是可见的，比静默兜底好）。
+    # 这里要测的是 `_send_retry_cap()` 自己的防御，不是队列构造的容错。
+    bad = new_agent(cfg, tmpdir, title="上限用例-坏配置")
+    bad.cfg = A._deep_merge(cfg, {"queue": {"max_attempts": "abc"}})
+    check("配置读坏了退回 3，而不是变成永不放弃", bad._send_retry_cap() == 3,
+          str(bad._send_retry_cap()))
+    zero = new_agent(cfg, tmpdir, title="上限用例-零")
+    zero.cfg = A._deep_merge(cfg, {"queue": {"max_attempts": 0}})
+    check("上限写成 0 也至少留 1 次（不会一次都不试就丢）", zero._send_retry_cap() == 1,
+          str(zero._send_retry_cap()))
+
+    # ---- 造一条「已经生成好、但永远发不出去」的项 ----
+    ag.queue.submit("private:1001", "不存在的人", "1001", text="在吗")
+    item = ag.queue.get("private:1001")
+    item.prepared = True
+    item.reply = "这条永远发不出去"
+    item.ready_at = 0.0                       # 跳过防抖窗口，直接可处理
+
+    ag.deliver = lambda it, text: False       # 让发送必然失败
+    cleaned: list = []
+    # ⚠️ `_abort_cleanup` 是 **QQWindow** 的（不是 Agent 的）。第一版在生产里
+    # 写成 `self._abort_cleanup(...)`，AttributeError 被兜底吞成一条 WARN ——
+    # 撤单照常发生、草稿却永远没清掉。这里就从 `ag.qq` 上打桩，跟生产一致。
+    ag.qq._abort_cleanup = lambda reason: cleaned.append(reason)
+
+    for i in range(1, cap):
+        ag.serve_queue()
+        it = ag.queue.get("private:1001")
+        check(f"第 {i} 次失败后仍在队列里（还没到上限）",
+              it is not None and int(it.fail_count) == i,
+              f"在队列={it is not None} fail_count={getattr(it, 'fail_count', None)}")
+        if it is not None:
+            it.ready_at = 0.0     # 跳过退避（生产里退避本身是对的，这里只是不想 sleep）
+
+    ag.serve_queue()                          # 第 cap 次失败
+    check(f"第 {cap} 次失败后已**撤单**", ag.queue.get("private:1001") is None)
+    check("放弃时清理过草稿（走已有的收尾函数）", bool(cleaned), str(cleaned[:1]))
+    check("撤单后再调也不会复活",
+          ag.serve_queue() is False and ag.queue.get("private:1001") is None)
+    check("落盘的待发队列里也没有它了",
+          all(x.get("scope") != "private:1001"
+              for x in (ag.queue.dump_state().get("items") or [])),
+          str(ag.queue.dump_state())[:200])
+
+    # ---- 失败次数是**累计且存盘**的：恢复一条早就超限的，第一次尝试就放弃 ----
+    # （这是实测里真实发生的形态：那条测试残留恢复出来时 fail_count 已经是 9）
+    ag2 = new_agent(cfg, tmpdir, title="上限用例-恢复超限")
+    ag2.queue.submit("private:1002", "早就超限的人", "1002", text="在吗")
+    old = ag2.queue.get("private:1002")
+    old.prepared = True
+    old.reply = "早该放弃了"
+    old.ready_at = 0.0
+    old.fail_count = cap + 4                  # 存盘里带过来的历史失败次数
+    check("恢复出来的项带着历史失败次数", old.fail_count == cap + 4, str(old.fail_count))
+    check("它一眼就该放弃（不用再试满 cap 次）", ag2._should_give_up(old) is True)
+    ag2.deliver = lambda it, text: False
+    ag2.qq._abort_cleanup = lambda reason: None
+    ag2.serve_queue()
+    check("恢复的超限项：一次尝试就撤单",
+          ag2.queue.get("private:1002") is None)
+
+
 def main() -> int:
     tmpdir = tempfile.mkdtemp(prefix="pcagent-test-")
     print("=" * 72)
@@ -559,6 +644,7 @@ def main() -> int:
         test_command_reset(cfg, tmpdir)
         test_command_total_read_path(cfg, tmpdir)
         test_write_route(cfg)
+        test_give_up(cfg, tmpdir)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

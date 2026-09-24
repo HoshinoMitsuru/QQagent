@@ -69,6 +69,7 @@ import sys
 import time
 
 from . import desktop, paths, platform_win as pw, qqctl
+from .logbus import BUS
 
 #: 显式指定 profile 目录时用的环境变量（最高优先级）
 ENV_PROFILE = "QQ_AGENT_QQ_PROFILE"

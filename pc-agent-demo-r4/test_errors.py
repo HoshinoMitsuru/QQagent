@@ -1542,27 +1542,39 @@ def t20_livelock_and_false_alarm():
             len(set(LADDER[:4])) >= 3, str(LADDER[:4]))
 
     # ---- ④ 反复失败要说一次（E-SEND-013 以前定义了却从未触发）----
+    # ⚠️ 阈值随「重试上限」重设过：原来是无上限世界里的「第 5 次报、每 20 次再报」；
+    #    现在有 `queue.max_attempts`（默认 3）兜着，第 20 次根本走不到，
+    #    所以真正值得打扰人的时刻只剩「再失败一次就要放弃它」= 上限前一次。
     buf = []
     orig_rep, orig_log = agent.report, agent.log
     agent.report = lambda code, detail="", **kw: buf.append(code)
     agent.log = lambda tag, msg: buf.append(tag)
     try:
+        cap = a._send_retry_cap()
+        R.check("重试上限是个具体数字（不会退化成永不放弃）",
+                isinstance(cap, int) and 1 <= cap <= 10, str(cap))
         agent.THROTTLE.reset()
-        item.fail_count = 4
+        item.fail_count = max(1, cap - 2)
         a._note_stuck(item)
-        R.check("第 4 次还不报（避免过早打扰）", "E-SEND-013" not in buf, str(buf))
+        R.check("还没到上限前一次：不报（避免过早打扰）",
+                "E-SEND-013" not in buf, f"cap={cap} n={item.fail_count} {buf}")
         buf.clear(); agent.THROTTLE.reset()
-        item.fail_count = 5
+        item.fail_count = cap - 1
         a._note_stuck(item)
-        R.check("第 5 次报 E-SEND-013（说明有一条卡住了）", "E-SEND-013" in buf, str(buf))
+        R.check(f"上限前一次（第 {cap - 1} 次）报 E-SEND-013：再失败一次就放弃",
+                "E-SEND-013" in buf, f"cap={cap} {buf}")
         buf.clear(); agent.THROTTLE.reset()
-        item.fail_count = 6
+        item.fail_count = cap
         a._note_stuck(item)
-        R.check("之后不每轮都报（否则又变成刷屏）", "E-SEND-013" not in buf, str(buf))
-        buf.clear(); agent.THROTTLE.reset()
-        item.fail_count = 20
+        R.check("到上限那一次不再报 E-SEND-013（那一步由 E-SEND-017 说明）",
+                "E-SEND-013" not in buf, str(buf))
+        # 阈值要跟着配置走，不是写死的数字
+        a.cfg = agent._deep_merge(a.cfg, {"queue": {"max_attempts": 5}})
+        agent.THROTTLE.reset()
+        item.fail_count = 2
         a._note_stuck(item)
-        R.check("每 20 次再报一次", "E-SEND-013" in buf, str(buf))
+        R.check("上限改成 5 之后，第 2 次不该报（阈值跟着配置走）",
+                "E-SEND-013" not in buf, str(buf))
     finally:
         agent.report, agent.log = orig_rep, orig_log
         agent.THROTTLE.reset()

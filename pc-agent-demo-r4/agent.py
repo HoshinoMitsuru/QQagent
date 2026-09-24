@@ -4035,6 +4035,9 @@ class Agent:
             # 重试路径很短（校验 + Invoke），因为 `deliver` 已经把「草稿还在不在输入框里」
             # 记到了 `item.drafted` 上，下一轮直接走 `send_text(resume=True)`。
             self.queue.note_send_failure(item, reason=_LAST_CODE.get("code") or "E-SEND-008")
+            if self._should_give_up(item):
+                self._give_up(item)
+                return False
             self._note_stuck(item)          # 反复失败要说一次，但不能刷屏
             self.queue.requeue(item, delay=self._retry_delay(item))
             log("QUE", f"{item.display_name!r} 未发出，保持原回复原地重试"
@@ -4043,6 +4046,83 @@ class Agent:
             self._save_pending()
         self.store.save()
         return ok
+
+    # ---------------------------------------------------- 重试上限（放弃这一条）
+    def _send_retry_cap(self) -> int:
+        """
+        发送阶段最多重试几次就放弃。
+
+        取值来自 `queue.max_attempts` —— 配置界面里对它的说明本来就是
+        「发送前复核对不上就重排，**连续失败这么多次后放弃并撤单**」。
+        只是后来这段代码被改成了「永不放弃」（见 `serve_queue` 里那段说明），
+        于是配置承诺了、代码却没做。
+
+        ⚠️ 取不到/写错都退回 3，不让「配置读坏了」变成「永不放弃」。
+
+        ⚠️ 别写成 `(... .get("max_attempts") or 3)` —— `0 or 3` 是 3，
+        于是「上限 0」会被悄悄当成 3。虽然界面里最小值是 1、正常不会出现 0，
+        但配置是**人可以手改的文件**，这种写法一旦被踩到就是「我明明写了却没用」。
+        """
+        raw = (self.cfg.get("queue") or {}).get("max_attempts")
+        try:
+            n = 3 if raw is None else int(raw)
+        except Exception:
+            n = 3
+        return max(1, n)
+
+    def _should_give_up(self, item) -> bool:
+        """这一条是不是已经达到重试上限（纯判断，方便单测）。"""
+        try:
+            return int(getattr(item, "fail_count", 0)) >= self._send_retry_cap()
+        except Exception:
+            return False
+
+    def _give_up(self, item) -> None:
+        """
+        达到重试上限：**放弃这一条**，不再重试。
+
+        ## 与「永不放弃」的取舍（这不是随手改的）
+
+        原来的语义是「项留在队列里，退避到 10 分钟一次，永不丢弃」，
+        理由是 VM 场景下「这条消息永远没人回」不可接受。那个理由对**真实消息**成立，
+        但它有一个代价：一条**永远不可能成功**的回复会永久占着队列与日志 ——
+        实测遇到过重试到第 224 次、刷了两小时日志的情况。
+
+        所以现在按配置里的上限收口，并且**把话说全**：撤单时把整段回复原文写进日志。
+        这样即使放弃了一条**本可以成功**的回复，人也能从日志里把它捞回来手动发
+        —— 「不静默丢」这条底线没变，变的是「不再无限空转」。
+        """
+        cap = self._send_retry_cap()
+        text = item.reply or ""
+        name = item.display_name or item.scope
+        # 清草稿：这一条不打算再发了，留着它没有意义（还会干扰下一条的写入）。
+        # 走已有的收尾函数而不是自己删，是为了沿用 `chat.keep_draft_on_abort` 的语义。
+        #
+        # ⚠️ `_abort_cleanup` 是 **QQWindow** 的方法，不在 Agent 上。
+        # 第一版写成 `self._abort_cleanup(...)`，运行时 AttributeError 被下面的
+        # except 吞成一条 WARN —— 撤单照常发生，**但草稿永远没被清掉**。
+        # 这种「兜底把真 bug 变成一条不起眼的告警」正是本项目最想避免的形态，
+        # 所以这里宁可写全 `self.qq.` 也不要再靠兜底。
+        try:
+            self.qq._abort_cleanup(f"达到重试上限（{cap} 次），放弃 {name!r} 的这条回复")
+        except Exception as exc:
+            # 措辞刻意避开「失败/无法」：那一类话必须带错误码，而这条是**撤单的附带动作**，
+            # 真正要人看的结果是紧接着报出的 E-SEND-017（`test_errors.py` 有源码扫描盯着）。
+            log("WARN", f"放弃 {name!r} 时草稿没清掉（{type(exc).__name__}: {exc}）"
+                        f"—— 不影响撤单，继续")
+        self.queue.drop(item.scope, aborted=True)
+        self._save_pending()
+        report("E-SEND-017",
+               f"'{name}' 的这条回复累计失败 {int(item.fail_count)} 次，"
+               f"已达上限（{cap} 次），**已放弃、不再重试**",
+               ctx={"会话": name, "累计失败次数": int(item.fail_count), "上限": cap,
+                    "最后一次原因": item.last_fail,
+                    "回复长度": len(text),
+                    "回复全文（已写入日志，可从这里捞回手动发）": text or "(空)"})
+        # 单独再打一条纯日志：`report` 的信封里 ctx 是转义成一行 JSON 的，
+        # 长回复在那里不好读；这一段要能直接复制出来用。
+        if text:
+            log("QUE", f"被放弃的回复原文（{len(text)} 字）：{text}")
 
     # ---------------------------------------------------- 待发回复的保全
     def _retry_delay(self, item) -> float:
@@ -4069,18 +4149,31 @@ class Agent:
 
     def _note_stuck(self, item) -> None:
         """
-        一条回复反复发不出去时，报一次 `E-SEND-013`（不撤单）。
+        一条回复反复发不出去时，报一次 `E-SEND-013`（**还会继续重试**）。
 
-        这个码定义了却一直**没有被触发过** —— 而上一次现场里它本该是唯一
+        这个码原先定义了却一直没被触发过 —— 而上一次现场里它本该是唯一
         能说明「有一条卡住了两小时」的那条日志。现在接上：
-        第 5 次失败报一次，之后每 20 次再报一次（有抑制器兜着，不会刷屏）。
+        **第二次失败**时报一次（此时还能看出是不是瞬时故障），
+        再往后的每次失败只在 QUE 行里体现，不再重复报码。
+
+        ⚠️ 它不再声称「不会丢弃」：达到 `queue.max_attempts` 之后会撤单，
+        那件事由 `E-SEND-017` 负责说明。
+
+        ## 只在「快到上限」时报一次
+
+        原来的阈值是「第 5 次报、之后每 20 次再报一次」—— 那是在**没有上限**的前提下设的
+        （反正会一直重试下去，隔一段时间提醒一次）。加了硬上限之后，
+        「每 20 次」这种说法不再存在（第 20 次之前早就撤单了），
+        真正值得打扰人的时刻只剩一个：**再失败一次就要放弃它了**。
         """
         n = int(item.fail_count)
-        if n == 5 or (n > 5 and n % 20 == 0):
+        if n == max(0, self._send_retry_cap() - 1):
             report("E-SEND-013",
                    f"'{item.display_name}' 的这条回复已经连续 {n} 次发不出去"
-                   f"（退避已拉长到 {self._retry_delay(item):.0f} 秒一次，**不会丢弃**）",
+                   f"（退避已拉长到 {self._retry_delay(item):.0f} 秒一次；"
+                   f"再失败 {max(0, self._send_retry_cap() - n)} 次就会放弃这一条）",
                    ctx={"会话": item.display_name, "失败次数": n,
+                        "重试上限": self._send_retry_cap(),
                         "最后一次原因": item.last_fail,
                         "回复长度": len(item.reply or ""),
                         "回复开头": clip(item.reply or "", 50),

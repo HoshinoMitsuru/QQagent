@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 
 from . import desktop, paths, platform_win as pw, qqctl
@@ -357,6 +358,92 @@ def describe() -> dict:
     }
 
 
+# ============================================================ 抓图（派宿主进程进那张桌面）
+#: 宿主进程的产出文件。壳读它，才知道隐藏桌面上到底发生了什么。
+GRAB_JSON = os.path.join(paths.STATE_DIR, "host-grab.json")
+
+
+def grab(png_path: str = "", desktop_name: str = "", *, wait: float = 0.0,
+         uia: bool = True, tree_path: str = "", login: bool = False,
+         dry_run: bool = False, timeout: float = 45.0) -> dict:
+    """
+    派一个宿主进程进隐藏桌面，把那边的窗口画面抓回来。
+
+    ## 为什么必须绕这一圈
+
+    壳在用户桌面上，`EnumWindows` 只枚举本桌面 —— 它对隐藏桌面的窗口是瞎的。
+    所以「找窗口 + 抓图」这两步只能交给**同样在那张桌面上**的进程去做，
+    也就是 `app/hostagent.py`。这是 R4 里「宿主进程」这个概念的最小可用形态。
+
+    ## 链路
+
+        spawn(python -m app.hostagent, desktop=NAME)
+            → 子进程自报桌面名 / 找 QQ 窗口 / PrintWindow 抓图 / 写 JSON
+            → 本函数等它结束，读回 JSON
+
+    走文件不走 stdout：`CreateProcessW` 没接管管道（见 desktop.spawn 的说明）。
+
+    ⚠️ 冻结成 exe 后 `sys.executable` 是 exe 自己，接不了 `-m app.hostagent`。
+    那里显式报错而不是静默失败 —— 打包时要把宿主做成 exe 的子命令，
+    在那之前这条只在源码运行下可用。
+    """
+    out = {"ok": False, "desktop": desktop_name or desktop.DEFAULT_NAME,
+           "json": GRAB_JSON, "png": "", "error": ""}
+    name = desktop_name or desktop.DEFAULT_NAME
+    if not desktop.exists(name):
+        out["error"] = (f"E-DESK-001 桌面 {name} 不存在（QQ 没起在上面，或上次已退出）")
+        return out
+    if getattr(sys, "frozen", False):
+        out["error"] = ("打包版还没接宿主：sys.executable 是 exe 自身，"
+                        "不能用 -m 启动 app.hostagent。请先用源码运行验证这条链路。")
+        return out
+
+    png = png_path or os.path.join(paths.STATE_DIR, "desktop-shot.png")
+    out["png"] = png
+    args = ["-m", "app.hostagent", "--out", GRAB_JSON, "--png", png]
+    if uia:
+        args.append("--uia")
+    if tree_path:
+        args += ["--tree", tree_path]
+    if login:
+        args.append("--login")
+        if dry_run:
+            args.append("--dry-run")
+    if wait > 0:
+        args += ["--wait", f"{wait:g}"]
+
+    # 先删掉上一次的结果：否则子进程还没写完，我们就读到了旧内容，
+    # 表现成「抓图成功」但图是上一次的 —— 这种假成功最难查。
+    try:
+        if os.path.isfile(GRAB_JSON):
+            os.remove(GRAB_JSON)
+    except Exception:
+        pass
+
+    r = desktop.spawn(sys.executable, args, desktop=name, cwd=paths.exe_dir())
+    if not r["ok"]:
+        out["error"] = f"E-DESK-002 宿主进程启动失败：{r['error']}"
+        return out
+    out["host_pid"] = r["pid"]
+
+    waited = desktop.wait(r["hproc"], timeout)
+    desktop.close_handle(r["hproc"])
+    out["waited"] = waited
+    if waited != 0:
+        out["error"] = "宿主进程超时未结束（QQ 可能还在慢慢起来，加大 --wait 再试）"
+        return out
+
+    try:
+        with open(GRAB_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        out["error"] = (f"读不到宿主结果（{GRAB_JSON}）：{type(exc).__name__}: {exc}"
+                        f" —— 子进程可能启动即崩")
+        return out
+    out.update(data)
+    return out
+
+
 # ============================================================ 命令行
 def _cmd_status(_a) -> int:
     s = status(_a.profile)
@@ -379,7 +466,15 @@ def _cmd_status(_a) -> int:
 
 
 def _cmd_start(a) -> int:
-    name = "" if a.visible else (a.desktop or desktop.DEFAULT_NAME)
+    # 三条互斥的意图，按优先级排：--visible（当前桌面）> --hidden（默认隐藏桌面）
+    # > --desktop NAME（指定名字，显式）。都没给时按 hidden 处理 ——
+    # 因为这是常驻形态的默认值，而「起在用户眼前」是需要特意说明的例外。
+    if a.visible:
+        name = ""
+    elif a.hidden or not a.desktop:
+        name = a.desktop or desktop.DEFAULT_NAME
+    else:
+        name = a.desktop
     r = start(desktop_name=name, profile=a.profile, qq_exe=a.qq_exe,
               extra_args=a.extra_args or "", create=True)
     if not r["ok"]:
@@ -415,17 +510,80 @@ def _cmd_stop(a) -> int:
     return 0 if r["ok"] else 2
 
 
+def _cmd_grab(a) -> int:
+    r = grab(a.png, a.desktop, wait=a.wait, uia=not a.no_uia, tree_path=a.tree,
+             login=a.login, dry_run=a.dry_run)
+    print(f"宿主进程自报桌面 : {r.get('desktop') or r.get('error')}")
+    if r.get("host_pid"):
+        print(f"宿主 pid         : {r['host_pid']}（waited={r.get('waited')}）")
+    wins = r.get("windows") or {}
+    print(f"那张桌面上的 QQ 窗口 : {wins.get('count', 0)} 个")
+    for c in (wins.get("candidates") or [])[:5]:
+        print(f"    hwnd={c['hwnd']:<10} pid={c['pid']:<8} vis={int(c['visible'])} "
+              f"rect={c['rect']} title={c['title']!r}")
+    cap = r.get("capture") or {}
+    if cap:
+        print(f"抓图统计         : {cap.get('w')}x{cap.get('h')} "
+              f"颜色种类={cap.get('distinct_colors')} "
+              f"平均亮度={cap.get('mean_luma')} 非黑占比={cap.get('nonblack_ratio')}")
+    saved = r.get("saved") or {}
+    if saved.get("ok"):
+        print(f"[OK] 画面已存    : {saved.get('path')}（{saved.get('bytes')} 字节）")
+    else:
+        print(f"[X] 落盘失败     : {saved.get('error') or r.get('error')}")
+    lg = r.get("login") or {}
+    if lg:
+        print(f"登录按钮         : {lg.get('button') or lg.get('error')}")
+        if lg.get("patterns"):
+            print(f"  Pattern 可用性 : {lg['patterns']}")
+        if lg.get("auto_login_checkbox"):
+            print(f"  自动登录勾选框 : {lg['auto_login_checkbox']}")
+            print(f"    可用性       : {lg.get('auto_login_patterns')}")
+        if lg.get("note"):
+            print(f"  {lg['note']}")
+        if lg.get("clicked_via"):
+            print(f"  已点击         : 走 {lg['clicked_via']}"
+                  f"（自动登录勾选={lg.get('auto_login_toggled')}）")
+        if lg.get("error"):
+            print(f"  [X] {lg['error']}")
+    uia = r.get("uia") or {}
+    if uia:
+        if uia.get("ok"):
+            nick = uia.get("nickname") or "(无)"
+            print(f"界面             : 昵称={nick!r} "
+                  f"会话列表={uia.get('has_recent_list')} "
+                  f"消息区={uia.get('has_ml_list')} 节点={uia.get('nodes_scanned')}")
+            for s in (uia.get("text_samples") or [])[:8]:
+                print(f"    文本: {s!r}")
+        else:
+            print(f"界面读取失败     : {uia.get('error')}")
+    if r.get("traceback"):
+        print(f"宿主 traceback:\n{r['traceback']}")
+    return 0 if r.get("ok") else 2
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="python -m app.host",
                                  description="独立 profile 的 QQ 启动 / 认领 / 停止")
-    ap.add_argument("cmd", choices=("status", "start", "stop", "describe"))
+    ap.add_argument("cmd", choices=("status", "start", "stop", "grab", "describe"))
     ap.add_argument("--profile", default="", help="覆盖 profile 目录")
     ap.add_argument("--qq-exe", dest="qq_exe", default="", help="覆盖 QQ.exe 路径")
     ap.add_argument("--extra-args", dest="extra_args", default="", help="追加给 QQ 的参数")
     ap.add_argument("--visible", action="store_true",
                     help="start：落在当前可见桌面（首次登录用）")
-    ap.add_argument("--desktop", default="", help="start：指定桌面名（默认 QQAgentHidden）")
+    ap.add_argument("--hidden", action="store_true",
+                    help="start：落在隐藏桌面（默认名 QQAgentHidden，可用 --desktop 改名）")
+    ap.add_argument("--desktop", default="", help="start：指定桌面名")
     ap.add_argument("--yes", action="store_true", help="stop：确认执行")
+    ap.add_argument("--png", default="", help="grab：画面落盘路径")
+    ap.add_argument("--wait", type=float, default=0.0,
+                    help="grab：派出去后先等几秒，给 QQ 把窗口画出来")
+    ap.add_argument("--no-uia", action="store_true", help="grab：不读界面，只抓图")
+    ap.add_argument("--tree", default="", help="grab：把整棵 UIA 树 dump 到这个文件")
+    ap.add_argument("--login", action="store_true",
+                    help="grab：在隐藏桌面的登录页上按「登录」（免扫码）")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="grab --login：只报可行性，不点击")
     a = ap.parse_args()
 
     if a.cmd == "status":
@@ -434,6 +592,8 @@ def main() -> int:
         return _cmd_start(a)
     if a.cmd == "stop":
         return _cmd_stop(a)
+    if a.cmd == "grab":
+        return _cmd_grab(a)
     import pprint
     pprint.pp(describe())
     return 0

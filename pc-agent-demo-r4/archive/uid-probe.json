@@ -1,0 +1,1446 @@
+{
+  "generated_at": "2026-09-11 22:18:07",
+  "window": {
+    "type": "WindowControl",
+    "class": "Chrome_WidgetWin_1",
+    "aid": "",
+    "name": "QQ",
+    "rect": [
+      209,
+      208,
+      1651,
+      1172
+    ]
+  },
+  "L1_sessions": {
+    "list_rect": [
+      293,
+      347,
+      668,
+      1168
+    ],
+    "item_count": 7,
+    "items": [
+      {
+        "index": 0,
+        "selected": false,
+        "top": true,
+        "self": {
+          "type": "GroupControl",
+          "class": "recent-contact-item recent-contact-item--top",
+          "aid": "",
+          "name": "",
+          "rect": [
+            293,
+            347,
+            668,
+            443
+          ]
+        },
+        "self_props": {
+          "ClassName": "recent-contact-item recent-contact-item--top",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        },
+        "descendants": [
+          {
+            "type": "GroupControl",
+            "class": "item__content item-dragging-over",
+            "aid": "",
+            "name": "",
+            "rect": [
+              293,
+              347,
+              668,
+              443
+            ],
+            "depth": 1,
+            "props": {
+              "ClassName": "item__content item-dragging-over",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "item__avatar",
+            "aid": "",
+            "name": "",
+            "rect": [
+              311,
+              365,
+              371,
+              425
+            ],
+            "depth": 2,
+            "props": {
+              "ClassName": "item__avatar",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "item__info",
+            "aid": "",
+            "name": "",
+            "rect": [
+              389,
+              365,
+              650,
+              425
+            ],
+            "depth": 2,
+            "props": {
+              "ClassName": "item__info",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "avatar",
+            "aid": "",
+            "name": "",
+            "rect": [
+              311,
+              365,
+              371,
+              425
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "avatar",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "光みつる",
+            "rect": [
+              389,
+              367,
+              473,
+              393
+            ],
+            "depth": 3,
+            "props": {
+              "Name": "光みつる",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "光みつる"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "secondary-info text-ellipsis",
+            "aid": "",
+            "name": "",
+            "rect": [
+              611,
+              365,
+              650,
+              395
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "secondary-info text-ellipsis",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "summary-main text-ellipsis",
+            "aid": "",
+            "name": "",
+            "rect": [
+              389,
+              401,
+              650,
+              425
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "summary-main text-ellipsis",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "13:40",
+            "rect": [
+              611,
+              370,
+              650,
+              389
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "13:40",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "13:40"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "测试",
+            "rect": [
+              389,
+              401,
+              425,
+              424
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "测试",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "测试"
+            }
+          }
+        ],
+        "nickname": "",
+        "uin_candidates": []
+      },
+      {
+        "index": 1,
+        "selected": false,
+        "top": true,
+        "self": {
+          "type": "GroupControl",
+          "class": "recent-contact-item recent-contact-item--top",
+          "aid": "",
+          "name": "",
+          "rect": [
+            293,
+            443,
+            668,
+            539
+          ]
+        },
+        "self_props": {
+          "ClassName": "recent-contact-item recent-contact-item--top",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        },
+        "descendants": [
+          {
+            "type": "GroupControl",
+            "class": "item__content item-dragging-over",
+            "aid": "",
+            "name": "",
+            "rect": [
+              293,
+              443,
+              668,
+              539
+            ],
+            "depth": 1,
+            "props": {
+              "ClassName": "item__content item-dragging-over",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "item__avatar",
+            "aid": "",
+            "name": "",
+            "rect": [
+              311,
+              461,
+              371,
+              521
+            ],
+            "depth": 2,
+            "props": {
+              "ClassName": "item__avatar",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "item__info",
+            "aid": "",
+            "name": "",
+            "rect": [
+              389,
+              461,
+              650,
+              521
+            ],
+            "depth": 2,
+            "props": {
+              "ClassName": "item__info",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "avatar",
+            "aid": "",
+            "name": "",
+            "rect": [
+              311,
+              461,
+              371,
+              521
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "avatar",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "紫蝶研讨班",
+            "rect": [
+              389,
+              463,
+              494,
+              489
+            ],
+            "depth": 3,
+            "props": {
+              "Name": "紫蝶研讨班",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "紫蝶研讨班"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "secondary-info text-ellipsis",
+            "aid": "",
+            "name": "",
+            "rect": [
+              581,
+              461,
+              650,
+              491
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "secondary-info text-ellipsis",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "summary-main text-ellipsis",
+            "aid": "",
+            "name": "",
+            "rect": [
+              389,
+              497,
+              650,
+              521
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "summary-main text-ellipsis",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "昨天20:04",
+            "rect": [
+              581,
+              466,
+              650,
+              485
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "昨天20:04",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "昨天20:04"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "光みつる：",
+            "rect": [
+              389,
+              497,
+              479,
+              520
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "光みつる：",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "光みつる："
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "原来还真的有人不认为现代世界与基督教的联系逐渐淡化",
+            "rect": [
+              479,
+              497,
+              638,
+              520
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "原来还真的有人不认为现代世界与基督教的联系逐渐淡化",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "原来还真的有人不认为现代世界与基督教的联系逐渐淡化"
+            }
+          }
+        ],
+        "nickname": "",
+        "uin_candidates": []
+      },
+      {
+        "index": 2,
+        "selected": false,
+        "top": false,
+        "self": {
+          "type": "GroupControl",
+          "class": "recent-contact-item",
+          "aid": "",
+          "name": "",
+          "rect": [
+            293,
+            539,
+            668,
+            635
+          ]
+        },
+        "self_props": {
+          "ClassName": "recent-contact-item",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        },
+        "descendants": [
+          {
+            "type": "GroupControl",
+            "class": "item__content item-dragging-over",
+            "aid": "",
+            "name": "",
+            "rect": [
+              293,
+              539,
+              668,
+              635
+            ],
+            "depth": 1,
+            "props": {
+              "ClassName": "item__content item-dragging-over",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "item__avatar",
+            "aid": "",
+            "name": "",
+            "rect": [
+              311,
+              557,
+              371,
+              617
+            ],
+            "depth": 2,
+            "props": {
+              "ClassName": "item__avatar",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "item__info",
+            "aid": "",
+            "name": "",
+            "rect": [
+              389,
+              557,
+              650,
+              617
+            ],
+            "depth": 2,
+            "props": {
+              "ClassName": "item__info",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "avatar",
+            "aid": "",
+            "name": "",
+            "rect": [
+              311,
+              557,
+              371,
+              617
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "avatar",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "凡杜林办事处",
+            "rect": [
+              389,
+              559,
+              515,
+              585
+            ],
+            "depth": 3,
+            "props": {
+              "Name": "凡杜林办事处",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "凡杜林办事处"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "secondary-info text-ellipsis",
+            "aid": "",
+            "name": "",
+            "rect": [
+              611,
+              557,
+              650,
+              587
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "secondary-info text-ellipsis",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "summary-main text-ellipsis",
+            "aid": "",
+            "name": "",
+            "rect": [
+              389,
+              593,
+              609,
+              617
+            ],
+            "depth": 3,
+            "props": {
+              "ClassName": "summary-main text-ellipsis",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "",
+            "aid": "",
+            "name": "876条未读",
+            "rect": [
+              608,
+              593,
+              650,
+              617
+            ],
+            "depth": 3,
+            "props": {
+              "Name": "876条未读",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "876条未读"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "22:09",
+            "rect": [
+              611,
+              562,
+              650,
+              581
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "22:09",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "22:09"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "",
+            "aid": "",
+            "name": "半精灵法师泽菲尔.伊格温：",
+            "rect": [
+              389,
+              593,
+              606,
+              616
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "半精灵法师泽菲尔.伊格温：",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "description",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "文本",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "半精灵法师泽菲尔.伊格温："
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "face-element",
+            "aid": "",
+            "name": "表情",
+            "rect": [
+              609,
+              593,
+              632,
+              616
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "表情",
+              "ClassName": "face-element",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": true,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "表情"
+            }
+          },
+          {
+            "type": "GroupControl",
+            "class": "face-element",
+            "aid": "",
+            "name": "表情",
+            "rect": [
+              631,
+              593,
+              654,
+              616
+            ],
+            "depth": 4,
+            "props": {
+              "Name": "表情",
+              "ClassName": "face-element",
+              "ControlType": 50026,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "组",
+              "IsEnabled": true,
+              "IsOffscreen": true,
+              "FrameworkId": "Chrome",
+              "LegacyIAccessibleName": "表情"
+            }
+          },
+          {
+            "type": "TextControl",
+            "class": "q-badge-sub q-badge-num q-badge__red",
+            "aid": "",
+            "name": "",
+            "rect": [
+              608,
+              593,
+              650,
+              617
+            ],
+            "depth": 4,
+            "props": {
+              "ClassName": "q-badge-sub q-badge-num q-badge__red",
+              "ControlType": 50020,
+              "PositionInSet": 0,
+              "SizeOfSet": 0,
+              "Level": 0,
+              "AriaRole": "group",
+              "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+              "LocalizedControlType": "下标",
+              "IsEnabled": true,
+              "IsOffscreen": false,
+              "FrameworkId": "Chrome"
+            }
+          }
+        ],
+        "nickname": "",
+        "uin_candidates": []
+      }
+    ]
+  },
+  "L2_header": {
+    "titles": [
+      {
+        "type": "GroupControl",
+        "class": "profile-nickname text-ellipsis user-profile-card__nickname",
+        "aid": "",
+        "name": "",
+        "rect": [
+          356,
+          222,
+          503,
+          256
+        ]
+      }
+    ],
+    "avatars": [
+      {
+        "type": "GroupControl",
+        "class": "user-avatar-container wide user-profile-card__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          209,
+          347,
+          269
+        ],
+        "props": {
+          "ClassName": "user-avatar-container wide user-profile-card__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "ButtonControl",
+        "class": "avatar user-avatar user-avatar--clip",
+        "aid": "",
+        "name": "Claritas-小清澈的头像",
+        "rect": [
+          311,
+          221,
+          347,
+          257
+        ],
+        "props": {
+          "Name": "Claritas-小清澈的头像",
+          "ClassName": "avatar user-avatar user-avatar--clip",
+          "ControlType": 50000,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "button",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "按钮",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome",
+          "LegacyIAccessibleName": "Claritas-小清澈的头像"
+        }
+      },
+      {
+        "type": "ButtonControl",
+        "class": "icon icon-online avatar__status",
+        "aid": "",
+        "name": "在线状态",
+        "rect": [
+          333,
+          243,
+          349,
+          259
+        ],
+        "props": {
+          "Name": "在线状态",
+          "ClassName": "icon icon-online avatar__status",
+          "ControlType": 50000,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "button",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "按钮",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome",
+          "LegacyIAccessibleName": "在线状态"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          365,
+          371,
+          425
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          461,
+          371,
+          521
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          557,
+          371,
+          617
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          653,
+          371,
+          713
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          749,
+          371,
+          809
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          845,
+          371,
+          905
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "item__avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          941,
+          371,
+          1001
+        ],
+        "props": {
+          "ClassName": "item__avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          365,
+          371,
+          425
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          461,
+          371,
+          521
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          557,
+          371,
+          617
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          653,
+          371,
+          713
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          749,
+          371,
+          809
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          845,
+          371,
+          905
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      },
+      {
+        "type": "GroupControl",
+        "class": "avatar",
+        "aid": "",
+        "name": "",
+        "rect": [
+          311,
+          941,
+          371,
+          1001
+        ],
+        "props": {
+          "ClassName": "avatar",
+          "ControlType": 50026,
+          "PositionInSet": 0,
+          "SizeOfSet": 0,
+          "Level": 0,
+          "AriaRole": "group",
+          "AriaProperties": "readonly=true;expanded=false;multiline=false;multiselectable=false;required=false;hasactions=false",
+          "LocalizedControlType": "组",
+          "IsEnabled": true,
+          "IsOffscreen": false,
+          "FrameworkId": "Chrome"
+        }
+      }
+    ]
+  },
+  "tree_nodes": 193,
+  "L3_wide": {
+    "nodes_scanned": 192,
+    "automation_ids": {
+      "30521296": [
+        "Chrome_RenderWidgetHostHWND"
+      ],
+      "RootWebArea": [
+        "DocumentControl"
+      ],
+      "drag-area": [
+        "GroupControl"
+      ],
+      "app": [
+        "GroupControl"
+      ],
+      "loading": [
+        "GroupControl"
+      ]
+    },
+    "aid_count": 5,
+    "uin_like_texts": {},
+    "uin_like_count": 0
+  }
+}

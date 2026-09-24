@@ -251,6 +251,46 @@ def list_processes(names: tuple[str, ...] | None = None) -> list[dict]:
     return out
 
 
+def pid_alive(pid: int) -> bool:
+    """
+    这个 pid 现在还有没有对应进程。便宜（一次 OpenProcess），可以放心轮询。
+
+    ## 为什么不用 list_processes 去比对
+
+    那是整机快照 + 遍历，比这里贵两个数量级；而这里只是「宿主还在吗」这种
+    每秒都要问一次的问题。
+
+    ## 为什么不拿它当唯一判据
+
+    pid 会**复用**：进程死了之后，同一个数字可能被一个完全无关的进程拿到。
+    所以它的正确用法是「配合心跳时间戳一起看」（见 `host.daemon_status`），
+    单独用它判断「我们那个进程还在」是会出错的。
+
+    另外：僵尸进程（已退出但句柄没关）用 `PROCESS_QUERY_LIMITED_INFORMATION`
+    仍能打开，所以这里再补一道 `GetExitCodeProcess`，还在跑才算活着。
+    """
+    if not pid:
+        return False
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                             ctypes.POINTER(wintypes.DWORD)]
+    _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    h = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not _kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+            return False
+        return int(code.value) == 259      # STILL_ACTIVE
+    except Exception:
+        return False
+    finally:
+        _kernel32.CloseHandle(h)
+
+
 def process_path(pid: int) -> str:
     """取进程的完整路径。QQ 的主窗口进程常常取不到（权限/位数），失败返回空串。"""
     if not pid:

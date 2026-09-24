@@ -28,7 +28,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import errors as E
+from . import desktop, errors as E, host
 from . import paths, platform_win as pw, qqctl, settings
 from .logbus import BUS
 from .supervisor import SUP, TASKS
@@ -141,6 +141,9 @@ def build_state(with_probe: bool = False, with_cmdlines: bool = False) -> dict:
     key = settings.resolve_api_key_display()
     st = SUP.state()
     qq = _qq_summary(app, with_probe=with_probe)
+    # 只算一次：这个函数虽然便宜（读一个 JSON + 一次 OpenProcess），
+    # 但状态流每 2 秒推一次全量，没必要在一份状态里算三遍。
+    hd = host.daemon_status()
 
     warnings: list[str] = []
     if not pw.is_admin():
@@ -160,6 +163,12 @@ def build_state(with_probe: bool = False, with_cmdlines: bool = False) -> dict:
     if app.get("web_host") == "0.0.0.0":
         warnings.append("WebUI 正在监听所有网卡。跨机访问请只在可信内网使用。")
 
+    if hd["stale"]:
+        warnings.append("隐藏桌面的常驻宿主**心跳已过期**：它的进程还在，但已经 "
+                        f"{hd['age']}s 没更新状态了。多半是卡在一次很慢的 UIA 调用或模型调用上。")
+    if hd["heartbeat_present"] and not hd["running"] and hd["error"]:
+        warnings.append(f"常驻宿主已停止：{hd['error']}")
+
     return {
         "version": _version(),
         "token_hint": TOKEN[:6],
@@ -177,6 +186,10 @@ def build_state(with_probe: bool = False, with_cmdlines: bool = False) -> dict:
         },
         "qq": qq,
         "supervisor": st,
+        "host": hd,
+        # 上一次的抓图结果。读一个小 JSON，很便宜 —— 放进状态流是为了让面板
+        # 在「抓图任务结束后」自己就能刷出图，不用额外拉一次接口。
+        "grab_last": host.last_grab(),
         "job": JOBS.state(),
         "warnings": warnings,
         "log_stats": BUS.counts(),
@@ -191,10 +204,24 @@ def _version() -> str:
     return __version__
 
 
+def _hidden_desktop(app: dict) -> str:
+    """隐藏桌面名：设置里可改，留空一律回到默认名（不能空着 —— 空名等于不指定桌面）。"""
+    return str((app or {}).get("hidden_desktop") or "").strip() or desktop.DEFAULT_NAME
+
+
+#: 抓图落盘位置。定义在 `host` 里 —— 宿主做免扫码登录时的探测也落同一个文件，
+#: 两处各写一份文件名迟早会漂移（那时界面会显示一张永远不更新的旧图）。
+SHOT_PNG = host.SHOT_PNG
+
+
 # ============================================================ 请求处理
 class Handler(BaseHTTPRequestHandler):
     server_version = "QQAgent"
     protocol_version = "HTTP/1.1"
+
+    #: 「响应头是否已经发出去了」。异常信封必须知道这件事：
+    #: 已经开写（SSE、静态文件）之后再补一条 JSON 错误，只会把响应弄成垃圾。
+    _responded = False
 
     # ---------------------------------------------------- 基础工具
     def log_message(self, fmt, *args):        # 默认会往 stderr 狂刷，这里降级
@@ -218,6 +245,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, data, status: int = 200):
         body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+        self._responded = True
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -242,6 +270,36 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _shot(self):
+        """
+        把上一次抓到的隐藏桌面画面发出去（固定文件，不接受路径参数）。
+
+        为什么要一个专门的路由而不是复用 `_file()`：`_file()` 的根目录是
+        `app/web/`，而截图落在数据目录的 `state/` 里 —— 两者不在同一棵树。
+        与其把 web 目录的边界放宽（那正是目录穿越开始的地方），
+        不如让这条路由只认死一个文件名。
+        """
+        if not os.path.isfile(SHOT_PNG):
+            return self._json(E.envelope(
+                "E-PATH-002", "还没有抓过隐藏桌面的画面",
+                {"动作": "点面板上的「抓一张现在的画面」"}), 404)
+        try:
+            with open(SHOT_PNG, "rb") as f:
+                data = f.read()
+        except Exception as exc:
+            return self._json(E.from_exception(exc, "E-PATH-001",
+                                               {"文件": SHOT_PNG}), 500)
+        self._responded = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
+
     def _file(self, rel: str):
         full = os.path.join(paths.WEB_DIR, rel)
         # 目录穿越防护：拼出来的路径必须仍在 web 目录里
@@ -257,6 +315,7 @@ class Handler(BaseHTTPRequestHandler):
             # 令牌直接注入页面：UI 后续的 fetch 都带着它，用户不需要手抄
             text = data.decode("utf-8").replace("__TOKEN__", TOKEN)
             data = text.encode("utf-8")
+        self._responded = True
         try:
             self.send_response(200)
             self.send_header("Content-Type", MIME.get(ext, "application/octet-stream"))
@@ -271,10 +330,35 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------- GET
     def do_GET(self):
+        """
+        所有 GET 都套一层统一信封。
+
+        ## 为什么这一层不能省
+
+        POST 那边一开始就有（见 `do_POST`），GET 这边一直没有 —— 于是在 GET 分支里
+        写错一个名字，表现是：**连接被直接掐断**，浏览器只报一句
+        `RemoteDisconnected` / `连不上控制台服务`。用户看到的是「后端挂了」，
+        而真相只是某个路由里少了一行 `app = settings.load_app_settings()`。
+
+        这正是本项目反复在防的那类假诊断：一句「连不上」会把排查方向整个带偏。
+        """
         parsed = urllib.parse.urlparse(self.path)
         route = parsed.path.rstrip("/") or "/"
         query = urllib.parse.parse_qs(parsed.query)
+        try:
+            return self._dispatch_get(route, query)
+        except Exception as exc:
+            BUS.emit(f"接口 {route} 抛异常：{type(exc).__name__}: {exc}",
+                     tag="ERR", source="ui")
+            env = E.from_exception(exc, "E-WEB-003", {"接口": route,
+                                                      "方法": "GET"})
+            if self._responded:
+                # 已经发过响应头（SSE / 静态文件）—— 这时候再写 JSON 只会把响应弄坏，
+                # 唯一的动作是留痕。日志里那条 ERR 就是留给这种情况的。
+                return
+            return self._json(env, 500)
 
+    def _dispatch_get(self, route: str, query: dict):
         if route in ("/", "/index.html"):
             if not self._token_ok(query):
                 return self._deny()
@@ -319,6 +403,15 @@ class Handler(BaseHTTPRequestHandler):
             with_llm = query.get("llm", ["1"])[0] not in ("0", "false")
             with_uia = query.get("uia", ["1"])[0] not in ("0", "false")
             return self._json(diagnose.run(with_llm=with_llm, with_uia=with_uia))
+        if route == "/api/host/status":
+            app = settings.load_app_settings()
+            return self._json({"ok": True, "daemon": host.daemon_status(),
+                               "last_grab": host.last_grab(),
+                               "desktop_default": desktop.DEFAULT_NAME,
+                               "desktop_exists": desktop.exists(_hidden_desktop(app)),
+                               "desktop_target": _hidden_desktop(app)})
+        if route == "/api/host/shot.png":
+            return self._shot()
         if route == "/api/errors":
             # 错误码目录（界面上的「错误码速查」用它）
             return self._json({"ok": True, "catalog": E.EC.CATALOG,
@@ -374,6 +467,73 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/agent/restart":
             dry = data.get("dry_run")
             return self._json(SUP.restart_resident(dry_run=None if dry is None else bool(dry)))
+
+        # -------------------------------------------------- 隐藏桌面（R4）
+        #
+        # 这一组和上面 `/api/agent/*` **不是同一套东西**，别混：
+        #   /api/agent/*   V1：壳在自己桌面上起一个 agent 子进程，抢前台发消息
+        #   /api/host/*    V2：把常驻宿主丢进另一张桌面，全程不碰用户前台
+        # 两者都会占用 QQ 的输入框，所以**不能同时开**（见下面 start 的互斥检查）。
+        if route == "/api/host/start":
+            if SUP.state()["resident"]["running"]:
+                return self._json(E.envelope(
+                    "E-PROC-002", "V1 常驻（壳内子进程）正在运行，不能同时开隐藏桌面常驻",
+                    {"原因": "两者都会同时操作同一个 QQ 输入框，会互相踩",
+                     "动作": "先在上面的「常驻运行」里停止 V1 常驻"}))
+            name = _hidden_desktop(app)
+            hd = host.daemon_status()
+            if hd["running"]:
+                return self._json(E.envelope(
+                    "E-PROC-001", "隐藏桌面常驻已经在运行了",
+                    {"pid": hd["pid"], "已运行": f"{hd['uptime']}s", "阶段": hd["phase"]}))
+            res = host.start_daemon(
+                desktop_name=name,
+                qq_exe=str(app.get("qq_exe_path") or ""),
+                dry_run=bool(data.get("dry_run")),
+                no_send=bool(data.get("no_send")),
+                with_agent=not bool(data.get("no_agent")),
+                stop_qq_on_exit=bool(data.get("stop_qq")),
+                chat=str(app.get("hidden_desktop_chat") or ""),
+                wait_ready=float(data.get("wait") or 0.0))
+            if res.get("ok"):
+                mode = ("只读模式，不会发送任何消息"
+                        if (data.get("dry_run") or data.get("no_send"))
+                        else "会真的回复并发送消息")
+                BUS.emit(f"已把常驻宿主丢进隐藏桌面 {name}（pid {res.get('pid')}）—— {mode}。"
+                         f"它在那张桌面上有自己的 QQ，与你自己正在用的那个互不影响。",
+                         tag="RUN", source="ui")
+            else:
+                BUS.emit(f"启动隐藏桌面常驻失败：{res.get('error')}", tag="ERR", source="ui")
+            return self._json(res)
+
+        if route == "/api/host/stop":
+            BUS.emit("正在停止隐藏桌面常驻：先给回复循环留时间把队列发完，再退宿主",
+                     tag="RUN", source="ui")
+            res = host.stop_daemon()
+            if res.get("killed"):
+                BUS.emit("优雅退出超时，已强制结束宿主进程。"
+                         "队列里没发出去的回复已落盘，下次启动会继续发。",
+                         tag="WARN", source="ui")
+            BUS.emit("隐藏桌面常驻已停止" if res.get("ok") else
+                     f"停止失败：{res.get('error')}", tag="RUN", source="ui")
+            return self._json(res)
+
+        if route == "/api/host/grab":
+            # 抓图要派一个进程进那张桌面（PrintWindow 是唯一可靠路径），
+            # 单次可能几秒到几十秒 —— 所以走后台任务，别让 HTTP 请求一直挂着。
+            name = _hidden_desktop(app)
+            wait = float(data.get("wait") or 1.5)
+
+            def job(progress):
+                t0 = time.time()
+                # 这一步是同步的（要派一个进程进那张桌面走 PrintWindow），
+                # 没法边做边报进度。但**结束时要报一次真实耗时** ——
+                # 不报的话 Jobs 里的 elapsed 会一直停在 0.0，界面上显示成
+                # 「已进行 0s」，看着像卡住了，实际它正在干活。
+                r = host.grab(SHOT_PNG, desktop_name=name, wait=wait, uia=True)
+                progress(time.time() - t0, {"error": ""})
+                return r
+            return self._json(JOBS.start("host_grab", "抓取隐藏桌面画面", job))
 
         if route == "/api/qq/launch":
             found = qqctl.find_qq_exe(app.get("qq_exe_path", ""))
@@ -497,6 +657,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------- SSE
     def _sse(self):
         q = BUS.subscribe()
+        self._responded = True
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")

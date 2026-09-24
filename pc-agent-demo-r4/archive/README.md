@@ -22,6 +22,11 @@
 | `probe_hidden_desktop.py` | **能把 QQ 启动到一个用户看不见的桌面上、且照常渲染/读/写吗？** | ✅ **全部可以**。R4 的四项判据全通过（§6.4）：不节流（`raf` 持续涨、`fps=180`）、a11y 树完整（199 节点）、免前台写入成功（含中文）、**用户前台全程不变**。消融还发现**连激活调用都不需要**（`--focus-plan none` 就成功） |
 | `probe_no_foreground_write.py` | **对用户桌面上处于后台的真实 QQ，能不能不抢前台就写进去？** | ✅ **能**，条件是 `AttachThreadInput` + `SetFocus(Chrome_RenderWidgetHostHWND)`。⚠️ 这**推翻了**项目里「写文本必须抢前台」的前提（§0.1-① / §6.5） |
 | `r4_bed.html` | （被测目标，非探针）隐藏桌面上到底发生了什么？ | 自报状态页：`rAF 帧数 / fps / visibilityState / activeElement / input 事件数 / 两个编辑框内容` 全写进 `document.title`，于是"那张桌面上发生了什么"可以跨桌面直读 |
+| `probe_two_accounts.py` | 本机同时登录的两个 QQ，**能不能只读地区分哪个是哪个**？ | 能按 pid/昵称/几何区分；但**只读路径拿不到自己的 QQ 号**（894 节点 × 8 类属性命中 0），命令行也逐字相同 → 身份只能由启动参数保证 |
+| `u1_e2e.py` | 隐藏桌面上「写文本 → 发送」这条路通不通？ | ✅ 通。三档写入阶梯 + 硬保护（写入前输入框必须为空、`--type` 只写不发送完擦掉） |
+| `u1_prod.py` | **agent.py 自己的命令行入口**搬到隐藏桌面上能不能跑完整一轮？ | ✅ 通。做法是把 `sys.argv` 改写成 agent 看到的样子再调 `A.main()`（复刻会漂移）；stdout 用 `redirect_stdout` 收进 JSON |
+| `probe_hostd_bisect.py` | 宿主进程里 UIA 读不到树，**是哪一步造成的**？ | **最简档位就复现** —— 与「Tee / 接管桌面句柄 / 认领进程 / 派子进程」全无关。同一个进程里手工遍历能读到 143 节点、`ControlFromHandle(hwnd).Name == 'QQ'`，而 `_scan_anchors()` 命中 **0 个锚点** → 真因是「**没打开任何会话**」，不是 COM/权限。每个档位必须**独立进程**（UIA 状态在同进程里会粘） |
+| `probe_host_panel.py` | 控制台「隐藏桌面」面板的接口真的通吗？ | ✅ 23 项全通过。**其中一条专门盯「不许用断连当报错」** —— GET 分支原先没有统一信封，某个路由里写错一个名字就表现成 `RemoteDisconnected` |
 
 ### 为什么要用测试页而不是直接测 QQ
 
@@ -66,6 +71,11 @@ done
 | `card-tree.txt` / `peek-fixed.txt` | 局部结构摘录，调试时用的中间产物 |
 | `host-result.json` | R4 实验里 host 进程的完整结构化结果（本桌面枚举到的窗口、a11y 统计、消融每步的 前台/活动/焦点、投递返回值、两路读回、截图统计） |
 | `r4_shot_hidden.png` | **隐藏桌面上抓到的窗口截图**。肉眼可见刚用 `WM_CHAR` 写进去的「R4中文测试」—— 三方信源（标题 / a11y / 截图）同时对上 |
+| `r4_hidden_replied.png` | 隐藏桌面上，小号**回复主号**之后的画面（U1 一条龙的收口证据） |
+| `r4_hostd_running.png` | **常驻宿主**跑起来之后那张桌面的画面（账号已登录、聊天页已打开、回复已发出） |
+| `r4-hostd-tree.txt` | 宿主启动失败时那棵树的剪影：`ml-list` / `ExEditor-qq-msg-editor` / `send-msg` **各 0 个**，而 `recent-contact-list` 在 —— 「没打开会话」这个根因的全部依据 |
+| `r4_hostd_tree_chat.txt` | 点开一个真实会话之后的树：上面那三个锚点**各 1 个**，`chat-header__contact-name` = `'Psyche-嗅尘紫蝶'` |
+| `two-accounts.json` | 双账号侦察的结构化结果（两实例命令行逐字相同、只读拿不到 QQ 号） |
 | `@AutomationLog.txt` | **uiautomation 库自己写的错误日志**。内容是 `尚未调用 CoInitialize` + `Can not load UIAutomationCore.dll` —— 正是「全进程只能有一条线程碰 UIA，且启动时必须 `UIAutomationInitializerInThread()`」这条硬性约定的来源 |
 
 ## 想重新导出控件树

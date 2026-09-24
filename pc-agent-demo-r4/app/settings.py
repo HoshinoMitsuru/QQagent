@@ -205,6 +205,16 @@ APP_FIELDS: list[dict] = [
                 {"value": "0.0.0.0", "label": "0.0.0.0 — 允许局域网访问"}]),
     _f("web_port", "WebUI 端口", "number", "app", 8765,
        "被占用时会自动往后找可用端口。", step=1, minimum=1024, maximum=65535),
+    _f("hidden_desktop", "隐藏桌面名", "text", "app", "QQAgentHidden",
+       "独立桌面（R4）的名字。QQ 与常驻宿主会驻守在这张桌面上，用户看不见它。"
+       "换名等于换一张新桌面，原来那张上的 QQ 不会被带走。"),
+    _f("hidden_desktop_autostart", "UI 起来后自动启动隐藏桌面常驻", "bool", "app", False,
+       "无人值守时用：控制台一启动就把宿主丢进隐藏桌面。要求那台机器上这个号已经登录过"
+       "（否则没人能扫码）。"),
+    _f("hidden_desktop_chat", "优先打开哪个会话", "text", "app", "",
+       "留空 = 按会话列表顺序逐个试。为什么要填：那边必须有一个**打开着的会话**，"
+       "回复循环才找得到输入框和消息区；而列表第一条可能是公众号（点开是个网页，"
+       "没有聊天区）。填联系人昵称的一部分即可，例如「嗅尘」。"),
 ]
 
 ALL_FIELDS = FIELDS + APP_FIELDS

@@ -266,6 +266,196 @@ def _describe(ctrl) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+#: 聊天页的两个锚点。它们**只存在于聊天页**，会话列表页上一个都没有 ——
+#: 这就是「没打开会话」与「无障碍参数没生效」症状相同的原因（见 E-QQ-008）。
+ML_LIST_TOKEN = "ml-list"
+EDITOR_TOKEN = "ExEditor-qq-msg-editor"
+#: 会话列表里的单个条目
+SESSION_ITEM_TOKEN = "recent-contact-item"
+
+
+def _find_all_by(hwnd: int, *, cls_has: str, limit: int = 200) -> list:
+    """找出**所有**类名含 `cls_has` 的节点（`_find_by` 只给第一个，不够用）。"""
+    auto = _auto()
+    win = auto.ControlFromHandle(hwnd)
+    out: list = []
+    stack = [(win, 0)]
+    n = 0
+    while stack and n < 8000 and len(out) < limit:
+        ctrl, d = stack.pop()
+        if d > 26:
+            continue
+        n += 1
+        try:
+            if cls_has in (ctrl.ClassName or ""):
+                out.append(ctrl)
+                continue
+        except Exception:
+            pass
+        try:
+            for ch in ctrl.GetChildren():
+                stack.append((ch, d + 1))
+        except Exception:
+            pass
+    return out
+
+
+def _ctrl_text(ctrl, depth: int = 3) -> str:
+    """把控件下面几层的文本拼起来（会话条目的昵称/预览不在自己身上，在子节点里）。"""
+    parts: list[str] = []
+    stack = [(ctrl, 0)]
+    n = 0
+    while stack and n < 60:
+        c, d = stack.pop()
+        n += 1
+        try:
+            t = (c.Name or "").strip()
+            if t:
+                parts.append(t)
+        except Exception:
+            pass
+        if d >= depth:
+            continue
+        try:
+            for ch in c.GetChildren():
+                stack.append((ch, d + 1))
+        except Exception:
+            pass
+    return " ".join(parts)
+
+
+def open_chat(hwnd: int, *, want: str = "", index: int = 0,
+              dry_run: bool = False) -> dict:
+    """
+    在会话列表里点开一个会话 —— 这是「能不能跑起来」的最后一道门。
+
+    ## 为什么必须有这一步（2026-09-25 实测）
+
+    QQ 登录完停在**起始页/会话列表页**，而 `ml-list`、`ExEditor-qq-msg-editor`、
+    `send-msg`、`chat-header__contact-name` 这些锚点**只存在于聊天页**。
+    实测树里：`recent-contact-list` 有 1 个、`recent-contact-item` 有若干个，
+    而 `ml-list` / `ExEditor-qq-msg-editor` **各 0 个**。
+
+    于是 `QQWindow.dom_exposed()` 为 False，常驻直接以 `E-QQ-004` 退出 ——
+    但那个码说的是「无障碍参数没生效」，按它去重启 QQ 是**白折腾一轮**。
+    真实原因只是「没人点开过任何会话」。
+
+    在用户桌面上这件事一直是用户顺手做的（打开 QQ 自然会点进某个聊天），
+    所以这个坑藏了很久。隐藏桌面上没人能点，于是它变成了硬性前提。
+
+    ## 为什么 Invoke 就够，不需要前台
+
+    会话条目是 Chromium 里的可 Invoke 元素，`InvokePattern` 是控件级调用，
+    **不经过输入队列**，所以它在非活动桌面上照样生效（这是 R4 的地基之一）。
+
+    ## 为什么「点第一条」不算完，还要能换下一条
+
+    实测（2026-09-25）：某台的会话列表第一条是 `QQ游戏中心` —— 点开之后
+    `chat-header__contact-name` 出现了，看起来「进了聊天页」，但消息列表和输入框
+    一个都没有：那其实是个**公众号 webview 页面**（`game-center-webview-wrapper`）。
+    也就是说「点开了某个会话」与「进了可用的聊天页」不是同一件事。
+
+    所以 `index` 是必需的：调用方点一条、看判据（`ml-list` 在不在），
+    不在就换下一条。**判据永远是界面上客观存在的东西**，不是「点成功了没有」。
+
+    返回 `{ok, already_open, clicked, target, candidates, patterns, error}`。
+    """
+    out: dict = {"ok": False, "already_open": False, "clicked": False,
+                 "target": "", "index": int(index), "patterns": {}, "error": ""}
+    try:
+        if _find_by(hwnd, cls_has=ML_LIST_TOKEN) is not None:
+            out["ok"] = True
+            out["already_open"] = True
+            return out
+
+        items = _find_all_by(hwnd, cls_has=SESSION_ITEM_TOKEN)
+        if not items:
+            out["error"] = ("E-QQ-008 会话列表里一个会话条目都找不到"
+                            "（recent-contact-item 0 个）—— 连列表都没渲染出来，"
+                            "或者这个号还没有任何会话")
+            return out
+        out["candidates"] = len(items)
+
+        chosen = items[0]
+        if want:
+            for it in items:
+                if want in _ctrl_text(it):
+                    chosen = it
+                    break
+        elif index > 0:
+            if index >= len(items):
+                out["error"] = (f"E-QQ-008 会话列表只有 {len(items)} 条，"
+                                f"取不到第 {index + 1} 条 —— 每一条都试过了")
+                return out
+            chosen = items[index]
+        out["target"] = _ctrl_text(chosen)[:120]
+        out["patterns"] = _patterns_available(chosen)
+        if dry_run:
+            out["ok"] = True
+            out["error"] = ""
+            out["note"] = "dry-run：只报了会点哪一个，没有点击"
+            return out
+
+        pats = out["patterns"]
+        if pats.get("invoke"):
+            chosen.GetPattern(_auto().PatternId.InvokePattern).Invoke()
+            out["clicked"] = "InvokePattern"
+        elif pats.get("legacy"):
+            chosen.GetLegacyIAccessiblePattern().DoDefaultAction()
+            out["clicked"] = "LegacyIAccessible.DoDefaultAction"
+        else:
+            out["error"] = ("E-UIA-003 会话条目既不支持 Invoke 也不支持 "
+                            "LegacyIAccessible，两条点击路径都断了")
+            return out
+        out["ok"] = True
+        return out
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        out["traceback"] = traceback.format_exc()[-600:]
+        return out
+
+
+def login_state(hwnd: int) -> dict:
+    """
+    回答一个常驻进程必须回答的问题：**这个 QQ 现在是登录页，还是已经登录了**。
+
+    ## 判据为什么是两条并用
+
+    单独用任何一条都会误判：
+
+      · 只看「有没有登录按钮」—— 登录后那个按钮就没了，看起来是对的；
+        但登录页在**加载中**的那几秒里按钮也还没渲染出来，会被判成「已登录」。
+      · 只看「有没有会话列表」—— 登录页上没有 `recent-contact-list`，
+        这条单独用其实更准；可一旦 QQ 停在「正在进入」的中间态，两边都没有，
+        只看它就分不出「还没画完」和「真的在等登录」。
+
+    所以两条一起看，并且把两句原始证据都留在返回里 —— 常驻宿主是无人值守的，
+    它给出的结论必须能被事后复核，而不是一句「没登录」。
+
+    返回：`{ok, is_login_page, logged_in, nickname, button, uia, error}`
+    """
+    out: dict = {"ok": False, "is_login_page": False, "logged_in": False,
+                 "nickname": "", "button": None, "uia": {}, "error": ""}
+    try:
+        btn = _find_by(hwnd, cls_has=LOGIN_BTN_CLASS)
+        if btn is None:
+            btn = _find_by(hwnd, name_eq="登录")
+        out["is_login_page"] = btn is not None
+        out["button"] = _describe(btn) if btn is not None else None
+
+        uia = probe_uia(hwnd)
+        out["uia"] = uia
+        if uia.get("ok"):
+            out["nickname"] = uia.get("nickname") or ""
+            has_main = bool(uia.get("has_recent_list") or uia.get("has_ml_list"))
+            out["logged_in"] = has_main and not out["is_login_page"]
+        out["ok"] = True
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        out["traceback"] = traceback.format_exc()[-600:]
+    return out
+
+
 def do_login(hwnd: int, *, dry_run: bool = False,
              check_auto: bool = True) -> dict:
     """
@@ -350,6 +540,15 @@ def main() -> int:
     ap.add_argument("--png", default="", help="画面落盘路径")
     ap.add_argument("--uia", action="store_true", help="顺便读一下界面")
     ap.add_argument("--tree", default="", help="把整棵 UIA 树 dump 到这个文件")
+    ap.add_argument("--state", action="store_true",
+                    help="报一次登录态（登录页 / 已登录 + 昵称），只读")
+    ap.add_argument("--open-chat", action="store_true",
+                    help="点开会话列表里的一个会话（没有打开会话时 agent 跑不起来）")
+    ap.add_argument("--chat", default="",
+                    help="配合 --open-chat：优先点开名字含这个串的会话（留空=按 index 取）")
+    ap.add_argument("--chat-index", dest="chat_index", type=int, default=0,
+                    help="配合 --open-chat：取会话列表的第几条（0 起）。"
+                         "第一条可能是公众号这类没有聊天区的条目，所以要能换下一条")
     ap.add_argument("--login", action="store_true",
                     help="在登录页上按「登录」（免扫码自动登录）")
     ap.add_argument("--dry-run", action="store_true",
@@ -358,7 +557,10 @@ def main() -> int:
                     help="启动后先等几秒，给 QQ 把窗口画出来")
     a = ap.parse_args()
 
-    res: dict = {"ok": False, "error": "", "traceback": ""}
+    # `at` 必须由子进程自己打：父进程读到的可能是**上一次**留下的结果文件，
+    # 而「这张图是什么时候抓的」决定了它能不能当现状用。
+    res: dict = {"ok": False, "error": "", "traceback": "",
+                 "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     try:
         # 1. 自报桌面 —— 这是「lpDesktop 真的生效」的唯一可信证据
         res["desktop"] = desktop.current_name()
@@ -394,8 +596,16 @@ def main() -> int:
             res["uia"] = probe_uia(main["hwnd"])
         if a.tree:
             res["tree"] = dump_tree(main["hwnd"], a.tree)
+        # 登录态要在**点击之前**读，否则拿到的是点完之后的状态，
+        # 「它当时到底是不是登录页」这个判断就没了依据。
+        if a.state:
+            res["login_state"] = login_state(main["hwnd"])
         if a.login:
             res["login"] = do_login(main["hwnd"], dry_run=a.dry_run)
+        # 打开会话排在登录之后：登录前会话列表根本还没渲染出来
+        if a.open_chat:
+            res["open_chat"] = open_chat(main["hwnd"], want=a.chat,
+                                         index=a.chat_index, dry_run=a.dry_run)
 
         res["ok"] = True
         return _write(a.out, res)

@@ -1705,6 +1705,55 @@ class _WRECT(ctypes.Structure):
 
 _u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_WRECT)]
 
+# 读标题改用带超时的 SendMessageTimeoutW —— 显式声明签名，
+# 否则 lParam 里的缓冲区地址会被按 C int 传，64 位下截断成无效指针。
+_u32.SendMessageTimeoutW.argtypes = [
+    wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p,
+    ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t)]
+_u32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+# ⚠️ EnumWindows 不声明 argtypes：`ctypes.WINFUNCTYPE(...)` 每调一次都是一个**新类型**，
+# 声明时用的类型和回调自己的类型不是同一个，ctypes 会按 isinstance 拒绝它。
+# 不声明的话 ctypes 直接传回调地址，这正是它一直在用的方式。
+
+
+WM_GETTEXT = 0x000D
+SMTO_ABORTIFHUNG = 0x0002
+SMTO_BLOCK = 0x0001
+
+#: 读窗口标题的超时上限（毫秒）。只对**没响应的**窗口付这个代价。
+_TITLE_TIMEOUT_MS = 150
+
+
+def _window_title(hwnd, timeout_ms: int = _TITLE_TIMEOUT_MS, size: int = 512) -> str:
+    """
+    带**硬超时**地读窗口标题。
+
+    ## 为什么不能用 GetWindowTextLengthW + GetWindowTextW
+
+    这两个会**给窗口所属的线程发消息**（WM_GETTEXTLENGTH / WM_GETTEXT）。
+    对方线程不处理消息时，调用方就**无限期挂住** —— 没有返回、没有异常、
+    没有日志。而 `_enum_top_windows()` 是在主循环里每一轮都要跑的，
+    一次挂住 = 整个常驻静默停摆，而且现象和「对方一直没发消息」长得一模一样。
+
+    2026-09-25 实测：控制台侧同款写法（`qqctl.top_windows`）把 `/api/state`
+    永久挂住过，表现成「心跳停更 / 连不上」。这里用同一个修法。
+
+    `SendMessageTimeoutW` 是标准做法；`SMTO_ABORTIFHUNG` 让「对方已无响应」
+    立刻返回，不必白等满超时。
+
+    不等长度、直接给固定缓冲：`GetWindowTextLengthW` 本身就是危险调用之一，
+    而窗口标题的上限本来就是 255 字符。
+    """
+    buf = ctypes.create_unicode_buffer(size)
+    res = ctypes.c_size_t()
+    try:
+        _u32.SendMessageTimeoutW(
+            hwnd, WM_GETTEXT, size, ctypes.addressof(buf),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, int(timeout_ms), ctypes.byref(res))
+    except Exception:
+        return ""
+    return buf.value
+
 
 def _enum_top_windows() -> list[dict]:
     """
@@ -1712,16 +1761,24 @@ def _enum_top_windows() -> list[dict]:
 
     必须用 EnumWindows：QQ 点关闭只是缩到托盘，uiautomation 的可见窗口枚举
     会直接漏掉它，导致误报「找不到 QQ 窗口」。
+
+    ## 两阶段：先枚举、再读标题
+
+    回调里**不能发消息** —— 枚举期间系统处于一种内部锁状态，在回调里
+    SendMessage 会超时返回空（实测：45 个窗口全部拿到空标题）。
+    所以先收集不涉及消息的字段，等枚举结束后再回头读标题，
+    并且读标题一律走 `_window_title()` 的超时保护。
+
+    正常窗口立即返回，所以这不影响日常速度；它防的是
+    「桌面上有个卡住的窗口把主循环拖死」——那会表现成常驻静默停摆。
     """
     rows: list[dict] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def _cb(hwnd, _lparam):
+        # 只做不发消息的调用：类名 / pid / 几何 / 可见性都不会挂
         pid = wintypes.DWORD()
         _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        n = _u32.GetWindowTextLengthW(hwnd)
-        tbuf = ctypes.create_unicode_buffer(n + 1)
-        _u32.GetWindowTextW(hwnd, tbuf, n + 1)
         cbuf = ctypes.create_unicode_buffer(256)
         _u32.GetClassNameW(hwnd, cbuf, 256)
         r = _WRECT()
@@ -1732,13 +1789,15 @@ def _enum_top_windows() -> list[dict]:
                 "pid": pid.value,
                 "visible": bool(_u32.IsWindowVisible(hwnd)),
                 "class": cbuf.value,
-                "title": tbuf.value,
+                "title": "",
                 "rect": [r.left, r.top, r.right, r.bottom],
             }
         )
         return True
 
     _u32.EnumWindows(_cb, 0)
+    for row in rows:
+        row["title"] = _window_title(row["hwnd"])
     return rows
 
 
@@ -1791,6 +1850,35 @@ def _foreground_title() -> str:
         return "(读取失败)"
 
 
+def _input_desktop_locked() -> bool:
+    """
+    锁屏的**直接**判据：输入桌面是不是已经被切走（切到 Winlogon）。
+
+    `OpenInputDesktop` 只有在「调用者所在窗口站的输入桌面可以打开」时才成功。
+    锁屏后输入桌面变成 Winlogon 那张，普通权限打不开 —— 所以它失败就是锁屏。
+
+    为什么不用前台窗口判：**非活动桌面上本来就没有前台窗口**
+    （`GetForegroundWindow()` 恒为 NULL，见 E-DESK 那一组的设计前提）。
+    拿「没有前台窗口」当锁屏，会在独立桌面（R4）上**每次启动都误报锁屏**，
+    而且那条报错还写着「切会话、写输入框、发送会全部失败」——
+    会把排查方向整个带偏，去查一个根本不存在的锁屏。
+    """
+    try:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        u32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD]
+        u32.OpenInputDesktop.restype = wintypes.HANDLE
+        u32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        DESKTOP_SWITCHDESKTOP = 0x0100
+        h = u32.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+        if h:
+            u32.CloseDesktop(h)
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _desktop_locked() -> bool:
     """
     桌面是不是锁着（或屏保挡着）。
@@ -1800,11 +1888,24 @@ def _desktop_locked() -> bool:
     症状是「发送前复核一连失败好几次」，很容易被误判成「三道闸太严」。
     实际上闸是对的 —— 是环境点不动。实测就踩过这个：
     锁屏下 test_send_guard 会 6 项全挂，但 `--sessions` 只读诊断完全正常。
+
+    ⚠️ 判据顺序有讲究（2026-09-25 改）：
+
+        先问「输入桌面能不能打开」（锁屏的**直接**证据）
+        再问「前台窗口是不是锁屏界面」（屏保/锁屏 UI 还没切走时的补充证据）
+
+    原来只有第二条，而且把「没有前台窗口」直接当成锁屏 ——
+    在独立桌面（R4）上那个前提不成立（非活动桌面上**没有前台窗口**是正常的），
+    于是常驻每次启动都会报一条假的 E-ENV-006。
     """
+    if _input_desktop_locked():
+        return True
     try:
         hwnd = _fg_hwnd()
         if not hwnd:
-            return True
+            # 没有前台窗口，但输入桌面打得开 —— 这是「另一张桌面上没有前台窗口」，
+            # 不是锁屏。R4 就是靠这个区别才不会误报。
+            return False
         u32 = ctypes.WinDLL("user32", use_last_error=True)
         buf = ctypes.create_unicode_buffer(256)
         u32.GetClassNameW(hwnd, buf, 256)
@@ -2024,11 +2125,52 @@ class QQWindow:
         这是与「找不到窗口」完全不同的一件事，必须分开报：窗口找到得很顺利、
         但里面什么都没有，特征就是 `--force-renderer-accessibility` 没生效。
         以前这两种情况混在一起，导致「明明是参数问题，却让人去检查 QQ 有没有启动」。
+
+        ⚠️ 但「读不到锚点」还有**第二种**原因，而且症状一模一样：QQ 停在了
+        会话列表页、没打开任何会话。`diagnose_dom()` 负责把这两者分开。
         """
         if self.win is None:
             return False
         self.refresh_layout(force=True)
         return self.ml_list is not None or self.editor is not None
+
+    def diagnose_dom(self) -> tuple[str, dict]:
+        """
+        `dom_exposed()` 为 False 之后调用：分辨**症状相同、处置完全不同**的两种根因。
+
+        ## 为什么必须分
+
+        2026-09-25 实测（隐藏桌面上）：同一个 QQ、同一个进程里，手工遍历能读到
+        143 个节点（无障碍树是好的），但 `ml-list` / `ExEditor-qq-msg-editor` /
+        `send-msg` **各 0 个** —— 因为 QQ 停在会话列表页，没打开任何会话。
+        而 `E-QQ-004` 的措辞是「无障碍参数没生效」，按它去「重启 QQ 到可读状态」
+        会白折腾一轮（重启完还是停在这一页）。
+
+        判据用界面上**客观存在的东西**：
+
+            有 recent-contact-list（会话列表）  → E-QQ-008 缺的是「打开会话」
+            连会话列表都没有                     → E-QQ-004 那才是树是空壳
+
+        对用户桌面上的使用来说这是个老坑（打开 QQ 自然会点进某个聊天，所以碰不到），
+        但隐藏桌面形态下没人能点，它就成了硬性前提。
+        """
+        ctx = {"窗口": self.dialog_title or "(无标题)", "类名": _cls(self.win),
+               "消息列表": self.ml_list is not None,
+               "输入框": self.editor is not None,
+               "窗口可见": _visible(self.win)}
+        if self.ml_list is not None or self.editor is not None:
+            # 只缺一半属于别的毛病，不是这两种
+            return "E-QQ-004", ctx
+        has_list, items = False, 0
+        for ctrl, _d in iter_bfs(self.win, SCAN_MAX_DEPTH):
+            cls = _cls(ctrl)
+            if "recent-contact-list" in cls:
+                has_list = True
+            elif "recent-contact-item" in cls:
+                items += 1
+        ctx["会话列表"] = has_list
+        ctx["会话条目数"] = items
+        return ("E-QQ-008" if has_list else "E-QQ-004"), ctx
 
     @property
     def rect(self) -> tuple:
@@ -4108,13 +4250,16 @@ class Agent:
             report(code, "无法附着到 QQ 窗口", ctx=ctx)
             return 2
         if not self.qq.dom_exposed():
-            report("E-QQ-004",
-                   "窗口找到了，但里面读不到输入框和消息列表 —— 无障碍树是空壳",
-                   ctx={"窗口": self.qq.dialog_title or "(无标题)",
-                        "类名": _cls(self.qq.win),
-                        "消息列表": self.qq.ml_list is not None,
-                        "输入框": self.qq.editor is not None,
-                        "窗口可见": _visible(self.qq.win)})
+            # 这里有两种**症状完全相同**的根因，必须分开报：
+            #   树是空壳（无障碍参数没生效）      → 完全退出后带参重启 QQ
+            #   停在会话列表页、没打开任何会话     → 点开一个会话就行
+            # 混在一起报的后果是：明明只要点一下，却让人去重启一次 QQ。
+            code, ctx = self.qq.diagnose_dom()
+            report(code,
+                   "窗口找到了，但里面读不到输入框和消息列表 —— "
+                   + ("这个 QQ 停在会话列表页，没打开任何会话" if code == "E-QQ-008"
+                      else "无障碍树是空壳"),
+                   ctx=ctx)
             return 2
 
         log("INFO", f"已附着 QQ 窗口，标题={self.qq.dialog_title!r}，群聊={self.qq.is_group}")

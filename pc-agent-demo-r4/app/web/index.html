@@ -221,6 +221,7 @@ textarea{font-family:var(--mono);font-size:12.5px;line-height:1.55;resize:vertic
 .badge.run{background:var(--accent-soft);color:var(--accent-text);border-color:transparent}
 .badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
 .badge.bad{background:var(--err-soft);color:var(--err);border-color:transparent}
+.badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
 
 /* ---------- 日志 ---------- */
 .log-card{display:flex;flex-direction:column;max-height:calc(100vh - 96px)}
@@ -388,6 +389,15 @@ textarea{font-family:var(--mono);font-size:12.5px;line-height:1.55;resize:vertic
 
     <section class="card">
       <div class="card-head">
+        <span id="i-host"></span>
+        <h2>隐藏桌面（独立 profile）</h2>
+        <div class="sub" id="hostSub">QQ 跑在另一张桌面上，不占你的屏幕</div>
+      </div>
+      <div class="card-body" id="hostBody"><div class="empty">正在读取…</div></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
         <span id="i-play"></span>
         <h2>验证与试运行</h2>
         <div class="sub">从只读到真发，逐步来</div>
@@ -511,7 +521,11 @@ const ICONS = {
   sun: P('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>'),
   rocket: P('<path d="M12 3c3.5 1.5 5.5 4.5 5.5 8.5 0 2-.7 3.6-2 5H8.5c-1.3-1.4-2-3-2-5C6.5 7.5 8.5 4.5 12 3z"/><circle cx="12" cy="10" r="1.6"/><path d="M9 17l-2 4M15 17l2 4"/>'),
   clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>'),
-  cap: P('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10h6M7 14h10"/>')
+  cap: P('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10h6M7 14h10"/>'),
+  monitor: P('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
+  monitorOff: P('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4M4 3l16 16"/>'),
+  camera: P('<path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.2"/>'),
+  ghost: P('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.3-1.6-2.3 1.6L12 18.4 9.6 20 7.3 18.4z"/><path d="M9.5 10h.01M14.5 10h.01"/>')
 };
 const icon = (n, cls) => `<span class="${cls||""}" style="display:inline-flex">${ICONS[n]||ICONS.info}</span>`;
 
@@ -669,6 +683,11 @@ function renderPills(s) {
   p.push({ c: s.desktop === "locked" ? "err" : "ok",
            i: s.desktop === "locked" ? "lock" : "lockOpen",
            t: s.desktop === "locked" ? "桌面已锁屏" : "桌面已解锁" });
+  // 隐藏桌面（R4）单独一枚：它跑在**另一张**桌面上，所以上面那枚「桌面已锁屏」
+  // 对它不成立 —— 那正是这条路线存在的理由，值得在顶栏被看见。
+  const hd = s.host || {};
+  if (hd.running) p.push({ c: hd.stale ? "warn" : "ok", i: "ghost",
+                           t: `隐藏桌面${hd.stale ? "·心跳停更" : "运行中"}` });
   if (qq.cdp && qq.cdp.enabled) p.push({ c: qq.cdp.ok ? "ok" : "warn", i:"layers", t: qq.cdp.ok ? "CDP 可用" : "CDP 未就绪" });
   const el0 = $("#pills");
   el0.innerHTML = p.map(x => `<span class="pill ${x.c}">${icon(x.i)}${esc(x.t)}</span>`).join("");
@@ -711,11 +730,26 @@ function renderQQ(s) {
   let probeOk = probe ? probe.ok : null;
   let probeDesc = "还没有体检。点「体检」看 agent 能不能读到 QQ 的界面。";
   if (probe) {
-    probeDesc = probe.ok
-      ? `可读。当前会话 <strong>${esc(probe.dialog_title || "?")}</strong>（${probe.is_group ? "群聊" : "私聊"}），`
-        + `会话 ${probe.session_count ?? "?"} 个，消息列表 ${probe.ml_list_found ? "已定位" : "未定位"}。`
-      : `读不到：${esc(probe.error || "未知原因")}`
-        + `<br><span style="color:var(--faint)">最常见的两个原因：QQ 没有以无障碍模式启动；或主窗口被最小化/藏在托盘里。</span>`;
+    // 三种情况要分开说，因为它们**处置动作完全不同**：
+    //   可读        —— 什么都不用做
+    //   没打开会话  —— 点一下左侧任意会话即可（不需要重启 QQ！）
+    //   树是空壳    —— 才轮到「重启 QQ 到可读状态」
+    // 以前后两种挤在同一句「读不到」里，人会去白重启一次。
+    if (probe.ok) {
+      probeDesc = `可读。当前会话 <strong>${esc(probe.dialog_title || "?")}</strong>`
+        + `（${probe.is_group ? "群聊" : "私聊"}），会话 ${probe.session_count ?? "?"} 个，`
+        + `消息列表${probe.ml_list_found ? "已定位" : "未定位"}、输入框${probe.editor_found ? "已定位" : "未定位"}。`;
+    } else if (probe.chat_open) {
+      probeDesc = `能读到界面，但 <strong>QQ 停在会话列表页、没打开任何会话</strong>`
+        + ` —— 聊天页的锚点（消息区、输入框）此刻都不存在，常驻会以 `
+        + `<span class="ecode">E-QQ-008</span> 退出。`
+        + `<br><span style="color:var(--faint)">只需要在 QQ 里点开任意一个会话，`
+        + `不用重启 QQ。隐藏桌面形态下宿主会自己完成这一步。</span>`;
+    } else {
+      probeDesc = `读不到：${esc(probe.error || "未知原因")}`
+        + `<br><span style="color:var(--faint)">最常见的两个原因：QQ 没有以无障碍模式启动；`
+        + `或主窗口被最小化/藏在托盘里。</span>`;
+    }
   }
   html += step("probe", probeOk, "3 · 界面可读（无障碍树）", probeDesc,
     `<button class="sm" data-act="qq-probe">${icon("eye")}体检</button>`
@@ -817,6 +851,164 @@ function renderRun(s) {
   if (!r.running) html += `<div class="notice ok" style="margin-top:12px">${icon("info")}
     <div>建议先用上面的「只读运行」观察一会儿日志，确认读到的消息、方向、昵称都对，再切到会真的发送的常驻。</div></div>`;
   $("#runBody").innerHTML = html;
+}
+
+/* ============================================================ 渲染：隐藏桌面 */
+let HOST_SHOT_V = 0;      // 截图缓存破坏用的自增值（同一路径换内容，必须变 URL）
+let HOST_SHOT_AT = "";    // 已展示过的那张图的时间戳，变了才换 URL
+
+function renderHost(s) {
+  const h = s.host || {};
+  const g = s.grab_last || null;
+  const box = $("#hostBody");
+  if (!box) return;
+  // 抓图落的是**固定文件名**，浏览器会认路径缓存 —— 不换 v，新图永远不会出现。
+  if (g && g.at && g.at !== HOST_SHOT_AT) { HOST_SHOT_AT = g.at; HOST_SHOT_V++; }
+  const running = !!h.running;
+  $("#hostSub").innerHTML = running
+    ? `宿主运行中 · 桌面 ${esc(h.desktop || "?")}`
+    : "QQ 跑在另一张桌面上，不占你的屏幕";
+
+  // ---- 这张卡片存在的理由先说清楚：它和上面那张「常驻运行」不是同一套东西。
+  // 不说清的话，用户看到两个「常驻」，会以为是同一个开关的两个入口。
+  let html = `<div class="notice ${running ? "ok" : "warn"}" style="margin-bottom:12px">
+    ${icon(running ? "ghost" : "monitor")}
+    <div><b>这是 R4 路线：把 QQ 启动到一张你看不见的桌面上。</b>
+    好处是它不占屏幕、不会误关，而且「前台」在那张桌面上是它自己独占的 ——
+    发消息不需要抢你的前台、也不会把按键漏进别的程序。
+    <br><span style="opacity:.85">它与上面那张「常驻运行」（在自己桌面上跑 agent、需要抢前台）
+    <b>互斥</b>：两者会同时操作同一个 QQ 输入框，所以一次只能开一个。</span></div></div>`;
+
+  // ---- 状态
+  const phase = h.phase || "";
+  const st = !h.heartbeat_present ? { t: "从未启动", c: "" }
+    : running ? { t: "运行中", c: "ok" }
+    : h.stale ? { t: "疑似卡住（心跳停更）", c: "warn" }
+    : { t: "已停止", c: "" };
+  html += `<div class="grid2" style="margin-bottom:12px">
+    <div class="stat"><div class="k">状态</div><div class="v" style="font-family:var(--sans)">
+      <span class="badge ${st.c}">${esc(st.t)}</span></div></div>
+    <div class="stat"><div class="k">阶段</div><div class="v" style="font-family:var(--sans);font-size:13px">
+      ${esc(phase || "—")}</div></div>
+    <div class="stat"><div class="k">已运行</div><div class="v">${h.uptime != null ? fmtDur(h.uptime) : "—"}</div></div>
+    <div class="stat"><div class="k">宿主进程</div><div class="v" style="font-family:var(--mono);font-size:12px">
+      ${h.pid || "—"}${h.pid ? ` <span style="color:var(--faint)">${h.alive ? "活着" : "已不在"}</span>` : ""}</div></div>
+    <div class="stat"><div class="k">桌面</div><div class="v" style="font-family:var(--mono);font-size:12px">
+      ${esc(h.desktop || "—")}</div>
+      ${h.desktop_self && h.desktop_self !== h.desktop
+        ? `<div class="k" style="margin-top:4px;color:var(--warn)">宿主自报 ${esc(h.desktop_self)}（不一致！）</div>` : ""}</div>
+    <div class="stat"><div class="k">心跳</div><div class="v" style="font-family:var(--sans);font-size:13px">
+      ${h.heartbeat_present ? (h.age >= 0 ? `${h.age}s 前` : "—") : "还没写过"}</div></div>
+  </div>`;
+
+  if (running || h.heartbeat_present) {
+    html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">登录状态</div><div class="v" style="font-family:var(--sans);font-size:13px">
+        ${h.logged_in ? "已登录" : "未确认"}${h.nickname ? ` · ${esc(h.nickname)}` : ""}</div></div>
+      <div class="stat"><div class="k">那边的 QQ 进程</div><div class="v">${(h.qq_pids || []).length}</div>
+        <div class="k" style="margin-top:4px;font-family:var(--mono);font-size:11px">${esc((h.qq_pids || []).join(", ") || "—")}</div></div>
+    </div>`;
+  }
+
+  // ---- 异常态：每一条都要说「下一步做什么」，否则等于只报了个情绪
+  if (h.stale) {
+    html += `<div class="notice warn">${icon("warn")}<div>
+      宿主进程还在，但已经 <b>${h.age}s</b> 没更新心跳了（超过 ${h.stale_after_seconds}s 视为停摆）。
+      停在这一阶段：<b>${esc(phase || "未知")}</b>。
+      <br><span style="opacity:.85">常见原因：正卡在一次很慢的模型调用，或那张桌面上的 UI 操作被阻塞。
+      先看右边日志里 ${esc(h.log_path || "hostd.log")} 的最后几行 —— 它会说明卡在哪一步。</span></div></div>`;
+  }
+  if (!running && h.heartbeat_present && h.error) {
+    html += `<div class="notice err">${icon("warn")}<div>
+      上一次运行是这样结束的：<b>${esc(h.error)}</b>
+      ${h.note ? `<br><span style="opacity:.85">${esc(h.note)}</span>` : ""}
+      ${h.rc != null ? `<br><span style="opacity:.85">宿主的退出码 = ${esc(h.rc)}（0=正常，2=启动阶段失败 —— 看上面的「阶段」卡在哪一步）</span>` : ""}</div></div>`;
+  }
+  if (!running && h.heartbeat_present && !h.error) {
+    // 「上一次是**怎么**停的」在正常停止时同样需要答案 ——
+    // 只显示一句「已停止」，人分不清是自己点的、还是它自己退出来的。
+    const why = h.reason || h.note || "";
+    if (why) {
+      html += `<div class="notice ok">${icon("info")}<div>
+        <b>上一次已正常停止</b>（退出码 ${esc(h.rc ?? 0)}）<br>
+        <span style="opacity:.85">${esc(why)}</span>
+        ${h.note && h.reason && h.note !== h.reason ? `<br><span style="opacity:.85">${esc(h.note)}</span>` : ""}
+      </div></div>`;
+    }
+  }
+  if (h.stop_requested) {
+    html += `<div class="notice warn">${icon("clock")}<div>停止哨兵还在，
+      说明上一轮停止没走完。点一次「停止」即可清掉。</div></div>`;
+  }
+
+  // ---- 首次使用必须先扫码：隐藏桌面上没有第二个人能扫，这个前提不给清楚必然卡住
+  if (!h.logged_in && !running) {
+    html += `<div class="notice ok">${icon("info")}<div>
+      <b>第一次用要先把号登进去</b>（隐藏桌面上没人能扫码）。两种办法：
+      <br>① 在命令行跑 <span class="ecode">python -m app.host start --visible</span>
+      —— 这张 QQ 窗口会出现在你眼前，登录完关掉它即可（登录态留在独立 profile 里）；
+      <br>② 或者直接点下面的「启动常驻」，如果这台机器<b>登录过这个号</b>，
+      宿主机自己会把登录页上的「登录」按钮按掉，全程不需要你。</div></div>`;
+  }
+
+  // ---- 按钮
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">`;
+  if (running) {
+    html += `<button class="danger" data-act="host-stop">${icon("stop")}停止（连宿主一起）</button>
+             <button data-act="host-grab">${icon("camera")}抓一张现在的画面</button>`;
+  } else {
+    html += `<button class="primary" data-act="host-start">${icon("rocket")}启动常驻（会真的回复）</button>
+             <button data-act="host-start-dry">${icon("eye")}只读运行（不发送）</button>
+             <button data-act="host-start-idle">${icon("monitor")}只把 QQ 摆上去</button>`;
+  }
+  html += `</div>`;
+
+  // ---- 画面：非活动桌面唯一的可视化通道（PrintWindow）
+  const cap = (g && g.capture) || {};
+  const saved = (g && g.saved) || {};
+  html += `<div class="stat" style="margin-top:14px">
+    <div class="k">那张桌面上现在是什么样</div>`;
+  if (saved.ok && saved.path) {
+    html += `<div style="margin-top:8px">
+      <img id="hostShot" src="/api/host/shot.png?t=${encodeURIComponent(TOKEN)}&v=${HOST_SHOT_V}"
+           alt="隐藏桌面画面" style="max-width:100%;border:1px solid var(--border-strong);border-radius:var(--r-sm)">
+      <div style="font-size:11.5px;color:var(--faint);margin-top:6px">
+        抓于 ${esc(g.at || "?")}　${cap.w || "?"}×${cap.h || "?"}　
+        颜色种类 ${cap.distinct_colors ?? "?"}　平均亮度 ${cap.mean_luma ?? "?"}
+        ${cap.nonblack_ratio != null ? `　非黑占比 ${cap.nonblack_ratio}` : ""}
+      </div>`;
+    if (!cap.distinct_colors || cap.distinct_colors <= 1) {
+      html += `<div style="font-size:11.5px;color:var(--warn);margin-top:4px">
+        这张图几乎是全黑 —— 多半是抓早了（窗口还没画出来），或者那张桌面上的窗口被节流了。</div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div style="margin-top:6px;font-size:12px;color:var(--faint)">
+      ${saved.error || g && g.error ? esc(saved.error || g.error) : "还没抓过。点上面的「抓一张现在的画面」。"}
+      <br>隐藏桌面的窗口无法用普通截图（EnumWindows 只看得到自己所在桌面），
+      所以这里走 PrintWindow 让**那张桌面上的进程**自己把画面画出来。</div>`;
+  }
+  const wins = (g && g.windows) || {};
+  const ui = (g && g.uia) || {};
+  if (g && (wins.count || ui.ok)) {
+    html += `<div style="margin-top:8px;font-size:11.5px;font-family:var(--mono);color:var(--faint)">
+      枚举到 QQ 窗口 ${wins.count ?? 0} 个${g.window ? `，主窗口 hwnd=${g.window.hwnd} rect=${JSON.stringify(g.window.rect)}` : ""}
+      ${ui.ok ? `<br>界面：昵称=${esc(ui.nickname || "(无)")} 会话列表=${ui.has_recent_list} 消息区=${ui.has_ml_list} 节点=${ui.nodes_scanned}` : ""}
+    </div>`;
+  }
+  html += `</div>`;
+
+  // ---- 路径（出问题时用户要能自己去看）
+  html += `<div class="field" style="margin-top:12px"><label>相关文件</label><div>
+    <div style="font-size:11.5px;font-family:var(--mono);color:var(--faint);line-height:1.8">
+      ${esc(h.log_path || "")}（${h.log_bytes || 0} 字节）
+      <br>${esc(h.heartbeat_path || "")}
+    </div>
+    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="ghost sm" data-act="open-state">${icon("folder")}打开状态目录</button>
+    </div></div></div>`;
+
+  box.innerHTML = html;
 }
 
 /* ============================================================ 渲染：任务 */
@@ -999,7 +1191,7 @@ async function refresh(withProbe) {
   STATE = res.state;
   const s = STATE;
   $("#verLine").textContent = `v${s.version} · 端口 ${location.port} · 令牌 ${s.token_hint}…`;
-  renderPills(s); renderWarnings(s); renderQQ(s); renderRun(s); renderAdmin(s);
+  renderPills(s); renderWarnings(s); renderQQ(s); renderRun(s); renderHost(s); renderAdmin(s);
   if (TASKS.length) renderTasks(s);
   document.querySelectorAll("[data-act]").forEach(b => {
     if (b.dataset.act === "agent-start" || b.dataset.act === "agent-start-dry") {
@@ -1149,6 +1341,57 @@ async function handleAction(act, btn) {
       break;
     }
     case "agent-restart": await run("/api/agent/restart", {}, "重启常驻"); break;
+
+    /* ---------- 隐藏桌面（R4） ----------
+       启动前一定要说清两件事：它会在你的屏幕上「看不见地」登一个 QQ 号；
+       以及它会**真的发消息**。这两件都是不可逆的副作用，不能靠默认值带过去。 */
+    case "host-start": {
+      const h = s.host || {};
+      const ok = await confirmDialog({
+        title: "在隐藏桌面上启动常驻", confirmText: "启动（会真的发送）", danger: true,
+        body: `会把 QQ 与常驻宿主一起启动到隐藏桌面 <b>${esc(h.desktop || "QQAgentHidden")}</b> 上，
+          用的是<b>独立的 profile 目录</b>，和你自己正在用的那个 QQ 完全隔开。<br><br>
+          它会<b>真的回复并发送消息</b>。桌面上那个 QQ 号就是你的主号 ——
+          建议先用下面的「只读运行」看一会儿日志，确认读到的消息和方向都对。<br><br>
+          <b>前提：</b>这台机器登录过那个号。没登录过的话，隐藏桌面上没人能扫码 ——
+          先用命令行 <span class="ecode">python -m app.host start --visible</span> 登录一次。`
+      });
+      if (ok) await run("/api/host/start", { dry_run: false, wait: 3 }, "启动隐藏桌面常驻");
+      break;
+    }
+    case "host-start-dry":
+      await run("/api/host/start", { dry_run: true, wait: 3 }, "只读运行");
+      break;
+    case "host-start-idle": {
+      const ok = await confirmDialog({
+        title: "只把 QQ 摆到隐藏桌面上", confirmText: "启动",
+        body: `只启动 QQ 与宿主进程，<b>不跑回复循环</b> —— 它不会读也不会发任何消息。<br>
+          适合用来确认「能不能起来、能不能免扫码登录、画面长什么样」。`
+      });
+      if (ok) await run("/api/host/start", { no_agent: true, wait: 3 }, "启动隐藏桌面");
+      break;
+    }
+    case "host-stop": {
+      const h = s.host || {};
+      const ok = await confirmDialog({
+        title: "停止隐藏桌面常驻", danger: true, confirmText: "停止",
+        body: `会先给回复循环最多 20 秒把队列里已经生成好的回复发完，再退宿主进程。<br><br>
+          隐藏桌面上那个 QQ <b>默认会留着</b>（登录态也留着，下次启动直接复用）。
+          想连它一起结束，用命令行
+          <span class="ecode">python -m app.host stop --yes</span>。<br><br>
+          当前阶段：<b>${esc(h.phase || "未知")}</b>　已运行 ${fmtDur(h.uptime)}`
+      });
+      if (ok) await run("/api/host/stop", {}, "停止隐藏桌面常驻");
+      break;
+    }
+    case "host-grab":
+      // 抓图是派一个进程进那张桌面做 PrintWindow，单次几秒 —— 走后台任务。
+      // 完成之前别让按钮重复点：任务状态会从 /api/state 里回来。
+      toast("正在让那张桌面上的进程把画面画出来（约 2~5 秒）…");
+      await run("/api/host/grab", { wait: 1.5 }, "抓取画面");
+      setTimeout(() => refresh(false), 2500);
+      break;
+    case "open-state": await api("/api/system/open", { target: "state" }); break;
     case "task-run": {
       const t = TASKS.find(x => x.id === id); if (!t) return;
       const params = {};
@@ -1323,7 +1566,7 @@ $("#btnTheme").addEventListener("click", () => setTheme(document.documentElement
 
 /* ---------- 静态图标 ---------- */
 $("#brandMark").innerHTML = ICONS.robot;
-["i-qq:robot","i-run:activity","i-play:play","i-sliders:sliders","i-shield:shield",
+["i-qq:robot","i-run:activity","i-host:ghost","i-play:play","i-sliders:sliders","i-shield:shield",
  "i-term:term","i-warn:warn","i-diag:cap"].forEach(x => {
   const [id, name] = x.split(":"); const n = document.getElementById(id); if (n) n.innerHTML = ICONS[name];
 });
@@ -1338,7 +1581,7 @@ function connect() {
     if (d.type === "log") addLine(d.line);
     else if (d.type === "state") {
       STATE = d.state;
-      renderPills(STATE); renderWarnings(STATE); renderRun(STATE); renderAdmin(STATE);
+      renderPills(STATE); renderWarnings(STATE); renderRun(STATE); renderHost(STATE); renderAdmin(STATE);
       const r = STATE.qq && STATE.qq.probe;
       if (r) renderQQ(STATE);
       if (TASKS.length) renderTasks(STATE);

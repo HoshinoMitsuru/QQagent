@@ -45,9 +45,21 @@
 - 前台依赖的真实范围（实测）：**读取完全免前台**（最小化也能读），切会话走 `InvokePattern` 也免前台。
   ⚠️ 原写「只有写文本必须抢前台」—— **已证伪**，见下面「写文本」条目。
 
-## 后台化运行（R4）—— 已实测全部通过
+## 两棵并列目录树（V1 / V2）与 V2 现状
 
-（详见文末「后台化运行（R4）」一节，此处不重复。）
+- **V1** `pc-agent-demo-vm/`（附着式，服务 VM），代码零改动，tag `v1.0-vm-attach`。
+- **V2** `pc-agent-demo-r4/`（R4 独立桌面托管），tag `v2.0-r4-mechanism`。
+  V2 是从 V1 复制出来的，**里面仍有大量 V1 的附着逻辑**（尚未替换，待拍板）。
+- V2 已实机验证：独立 profile 启动 → 免扫码登录 → **打开一个会话** →
+  常驻宿主 `app/hostd.py` 跑 `agent.run_forever()` → **真的发出回复** → 优雅停止；
+  控制台「隐藏桌面」面板（`GET /api/host/status|shot.png`、`POST /api/host/start|stop|grab`）
+  + 日志通道（`app/logtail.py` tail `logs/hostd.log`）。
+- **V2 的三条新增硬约束**（都是踩出来的）：
+  ① 宿主进程里**不要提前碰 UIA** —— 一次失败的 `Invoke` 会把本进程的 uiautomation
+     弄成永久坏状态（`-2147220991 事件无法调用任何订户`），登录/探测一律派**一次性子进程**；
+  ② 常驻前**必须有一个打开着的会话**（`ml-list`/`ExEditor-qq-msg-editor` 只在聊天页）
+     → `E-QQ-008`；且「点第一条」不够（第一条可能是公众号 webview），要按客观判据迭代候选；
+  ③ 读窗口标题必须走 `SendMessageTimeoutW` + 两阶段枚举（`EnumWindows` 回调里发消息会挂）。
 
 **理论依据**（解释为什么"藏起来"会导致停摆）：Chromium 在 Windows 上**自算遮挡**
 （z 序枚举减法），判定 occluded 后**停止渲染 + JS 节流**。会被判的情形：
@@ -99,18 +111,16 @@
    —— `test_errors.py` 里有源码扫描会拦住它。
    `agent.py` 侧：`report()` 带抑制（常驻用）、`diag()` 直接打印（命令行用）。
 
-## 已知使用约束（部署时必看，尚未修）
-1. **启动常驻前，QQ 里必须先手动打开一个会话。**
-   QQ 刚启动停在起始页，而 `ml-list` / `ExEditor-qq-msg-editor` / `send-msg` /
-   `chat-header__contact-name` 这些锚点**只存在于聊天页**，起始页一个都没
-   → `ml_list` 与 `editor` 均为 None → `QQWindow.dom_exposed()` 为 False
-   → `run_forever()` 报 `E-QQ-004` 并 return 2，常驻起不来。
-   当前处理：**手动点进任意一个会话**。
-   两个待修的误导点（详见 `.workbuddy/memory/2026-09-12.md` 22:14 条）：
-   ① `E-QQ-004` 的措辞只指向「无障碍参数没生效」，但「未打开会话」症状完全相同
-      —— 按它去重启 QQ 是白折腾；
-   ② 界面「体检」的判据是 `ml_list_found or session_count > 0`，而会话列表在左栏、
-      起始页也有 → **体检显示通过、常驻却报错退出**，两边判据不一致。
+## 已知使用约束（部署时必看）
+1. **启动常驻前，QQ 里必须先有一个打开着的会话** —— 2026-09-25 已**修好并精确报码**：
+   `ml-list` / `ExEditor-qq-msg-editor` / `send-msg` / `chat-header__contact-name`
+   只存在于聊天页，起始页一个都没 → `dom_exposed()` 为 False。
+   - `E-QQ-004` 与新增的 `E-QQ-008` 分工：判据是「`recent-contact-list` 在不在」。
+     会话列表在 = `E-QQ-008`（点开会话即可）；连会话列表都没有 = `E-QQ-004`（树是空壳）。
+     两个原误导点都改了：① 常驻不再拿「参数没生效」去解释「没打开会话」；
+     ② 界面「体检」的 `ok` 判据改成与 `dom_exposed()` **完全一致**（`ml_list_found or editor_found`，
+     不再把 `session_count` 算作可读），并单独给出 `chat_open` 字段让界面说清那一种情况。
+   - 隐藏桌面形态下由 `hostd` 自动完成（迭代候选会话条目，直到 `ml-list` 出现）。
 
 ## 已修的关键坑（防再犯）
 1. **掩码判据过窄 → 真密钥被覆盖**（`settings._is_mask`）。
@@ -136,6 +146,18 @@
    要读 `IsXxxPatternAvailable` 属性投影。实测 QQ 输入框：`IsValuePatternAvailable=False`、
    `IsTextPatternAvailable=True`（只读）→ **输入框没有任何可写 Pattern**，
    写入只能走窗口消息（或 CDP，但见下）。
+7. **`GetWindowTextLengthW` / `GetWindowTextW` 会给对方线程发消息**，对方不处理就
+   **无限期挂住**（无返回、无异常、无日志）。控制台的 `/api/state` 每 2s 被轮询，
+   曾因此整个状态流永久冻住（界面显示"心跳停更/连不上"，而进程活得好好的）。
+   正确做法：**两阶段**枚举（先收集不发消息的字段，枚举结束后再读标题）
+   + `SendMessageTimeoutW(SMTO_ABORTIFHUNG)`。且在 `EnumWindows` 回调**里**发消息
+   会静默拿到空标题（实测 45 个窗口全空）。
+8. **`_desktop_locked()` 不能用「有没有前台窗口」当判据** —— 非活动桌面上
+   `GetForegroundWindow()` 恒为 NULL，那是 R4 的正常态。判据应是
+   `OpenInputDesktop` 能不能打开（锁屏的直接证据）。
+9. **一个错误码只对应一个根因**这条也要用在「进程级状态」上：
+   宿主进程的退出码、agent 的退出码、心跳里的阶段，三者不能混用一个字段
+   （原名 `agent_rc` 会把「启动就失败」读成「正常返回 0」）。
 
 ## 后台化运行（R4）—— 已实测全部通过
 

@@ -23,6 +23,8 @@ test_ui.py —— 控制台壳的端到端测试（离线，不碰 QQ、不发�
     10 SSE 能收到日志与状态
     11 危险动作的确认信息存在（前端据此弹窗）
     12 令牌错误返回 401
+    15 前端脚本的语法与引用完整性（元素 id / 图标名 / node --check）
+    16 隐藏桌面面板的接口（每个 GET 都要给 JSON，不许用「断连」当报错）
 """
 
 from __future__ import annotations
@@ -525,6 +527,117 @@ def t14_tray():
 
 
 
+def t15_frontend_script():
+    """
+    前端脚本的**语法与引用完整性**。
+
+    ## 为什么这件事必须自动测
+
+    单文件 index.html 里的那一段 JS，后端**完全看不见它**。写错一个引号、
+    少定义一个图标、`$("#xxx")` 指到一个不存在的 id，后果是整页白屏 ——
+    而所有接口测试照样全绿（后端确实是对的）。用户看到的是「界面打不开」，
+    我们手里的证据却是「服务正常」，这类故障最费时间。
+
+    2026-09-25 真的写出来过一个：一个字符串用了双引号却跨了行，
+    `node --check` 一句话就指到了行号和位置。
+
+    所以这里固定做三件事：
+      1. 用 node 做一次真正的语法检查（没有 node 就跳过，不能因为缺工具而失败）
+      2. 所有 `$("#id")` / `getElementById("id")` 引用的 id 必须真的存在
+      3. 所有 `icon("name")` / `ICONS.name` 用到的图标必须有定义
+    """
+    log("\n[15] 前端脚本：语法与引用完整性")
+    import re
+    import shutil as _sh
+    import subprocess
+
+    html = open(os.path.join(HERE, "app", "web", "index.html"), encoding="utf-8").read()
+    blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
+    R.check("页面里有且只有一段主脚本", len(blocks) == 1, f"找到 {len(blocks)} 段")
+    src = blocks[-1] if blocks else ""
+
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    used = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', src))
+    used |= set(re.findall(r'getElementById\("([^"]+)"\)', src))
+    missing = sorted(u for u in used if u not in ids)
+    R.check("脚本引用的元素 id 都存在", not missing, f"缺：{missing}")
+
+    defined = set(re.findall(r"^\s*([a-zA-Z]+):\s*P\(", src, re.M))
+    wanted = set(re.findall(r'icon\("([a-zA-Z]+)"', src))
+    wanted |= set(re.findall(r"ICONS\.([a-zA-Z]+)", src))
+    R.check("脚本用到的图标都有定义", not (wanted - defined),
+            f"缺：{sorted(wanted - defined)}")
+
+    # 找 node：PATH → 常见安装位置。找不到就不做这一步（不能因为缺一个工具
+    # 把测试判失败，那会让人去修一个不存在的问题），上面两项引用检查仍然生效。
+    node = _sh.which("node") or ""
+    if not node:
+        for cand in (os.path.join(os.environ.get("ProgramFiles", ""), "nodejs", "node.exe"),
+                     os.path.join(os.environ.get("ProgramFiles(x86)", ""), "nodejs", "node.exe"),
+                     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "nodejs", "node.exe")):
+            if cand and os.path.isfile(cand):
+                node = cand
+                break
+    if not node:
+        log("      （本机找不到 node，跳过真正的语法检查 —— 上面两项引用检查仍在把关）")
+        return
+    tmp = os.path.join(TMP, "ui-check.js")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([node, "--check", tmp], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    detail = (r.stdout or "") + (r.stderr or "")
+    R.check("node --check 通过（整页白屏级错误）", r.returncode == 0,
+            detail.strip().splitlines()[:4])
+
+
+def t16_host_panel():
+    """
+    隐藏桌面面板：接口必须答得出话，**而且不能靠「连不上」来报错**。
+
+    GET 分支原先没有统一信封，某个路由里写错一个名字时，表现是连接被直接掐断
+    （浏览器只看到 RemoteDisconnected），用户读到的是「后端挂了」——
+    真相却只是少了一行 `app = settings.load_app_settings()`。
+    所以这里逐个 GET 接口都要拿到带 ok 字段的 JSON，而不是一个异常。
+    """
+    log("\n[16] 隐藏桌面面板接口")
+
+    def probe(path, body=None):
+        """连不上时返回 (0, {...}) 而不是把异常抛出去 —— 断连本身就是被测的一项。"""
+        try:
+            return http(path, body)
+        except Exception as exc:
+            return 0, {"_disconnected": f"{type(exc).__name__}: {exc}"}
+
+    for path in ("/api/host/status", "/api/state"):
+        st, res = probe(path)
+        R.check(f"{path} 返回 JSON 且带 ok（不是断连）",
+                st == 200 and isinstance(res, dict) and "ok" in res,
+                f"HTTP {st} {str(res)[:160]}")
+
+    st, res = probe("/api/host/status")
+    R.check("host/status 带 daemon 段", "daemon" in (res or {}), str(res)[:160])
+    d = (res or {}).get("daemon") or {}
+    R.check("daemon 段字段齐全",
+            all(k in d for k in ("running", "stale", "age", "phase", "pid",
+                                 "heartbeat_path", "log_path")), str(list(d))[:200])
+    R.check("没跑宿主时状态是「未运行」而不是报错", d.get("running") is False,
+            str(d.get("running")))
+    R.check("host/status 带 last_grab 与桌面信息",
+            "last_grab" in (res or {}) and "desktop_target" in (res or {}),
+            str(list(res or {}))[:200])
+
+    st, res = probe("/api/host/shot.png")
+    R.check("没抓过图时 shot.png 给的是带码的错误而不是断连",
+            st in (404, 500) and isinstance(res, dict) and bool(res.get("code")),
+            f"HTTP {st} {str(res)[:160]}")
+
+    st, res = probe("/api/host/stop", {})
+    R.check("没跑宿主时 stop 是幂等的成功",
+            st == 200 and (res or {}).get("ok") is True,
+            f"HTTP {st} {str(res)[:160]}")
+
+
 # ============================================================ 主流程
 def main():
     log("=" * 70)
@@ -550,6 +663,8 @@ def main():
         t12_static_and_unknown()
         t13_uia_thread_and_defaults()
         t14_tray()
+        t15_frontend_script()
+        t16_host_panel()
     finally:
         rc = R.summary()
         try:

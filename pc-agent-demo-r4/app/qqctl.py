@@ -179,26 +179,112 @@ class _RECT(ctypes.Structure):
 
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
+_QQ_CLASSES = ("Chrome_WidgetWin_1", "Chrome_WidgetWin_0", "TXGuiFoundation")
 
-def top_windows() -> list[dict]:
-    out: list[dict] = []
+WM_GETTEXT = 0x000D
+SMTO_ABORTIFHUNG = 0x0002
+SMTO_BLOCK = 0x0001
+
+# ---- 函数签名一律显式声明（项目硬性约定 #6）。
+# 不声明的话 hwnd 会按 C int 传，64 位下是被静默截断的 —— 那种错不会抛异常，
+# 只会得到一个「查不到的窗口」，然后人去怀疑 QQ 是不是没在跑。
+_user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+_user32.GetWindowTextLengthW.restype = ctypes.c_int
+_user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetWindowTextW.restype = ctypes.c_int
+_user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetClassNameW.restype = ctypes.c_int
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                             ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
+_user32.GetWindowRect.restype = wintypes.BOOL
+_user32.IsWindowVisible.argtypes = [wintypes.HWND]
+_user32.IsWindowVisible.restype = wintypes.BOOL
+_user32.IsIconic.argtypes = [wintypes.HWND]
+_user32.IsIconic.restype = wintypes.BOOL
+_user32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+_user32.EnumWindows.restype = wintypes.BOOL
+_user32.SendMessageTimeoutW.argtypes = [
+    wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p,
+    ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t)]
+_user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+
+#: 读标题的超时上限（毫秒）。只对**没响应的**窗口付这个代价；
+#: 正常窗口是立即返回的，所以它不影响日常速度。
+TITLE_TIMEOUT_MS = 150
+
+
+def window_title(hwnd, timeout_ms: int = TITLE_TIMEOUT_MS, size: int = 512) -> str:
+    """
+    带**硬超时**地读一个窗口的标题。
+
+    ## 为什么不能用 GetWindowTextW / GetWindowTextLengthW
+
+    这两个会**给窗口所属的线程发消息**（WM_GETTEXTLENGTH / WM_GETTEXT）。
+    如果那个线程正卡着不处理消息，调用方就**无限期地挂在那里** ——
+    没有返回值、没有异常、没有日志。
+    2026-09-25 实测到过：控制台的 `/api/state` 每 2 秒被界面轮询一次，
+    它里面会枚举窗口，于是整个状态流就这样永久冻住了，界面显示的是
+    「心跳停更 / 连不上」，而真相是**服务线程被一个别人的窗口挂住了**。
+
+    `SendMessageTimeoutW` 是这件事的标准做法：给它一个毫秒上限，
+    超过就放弃并返回。`SMTO_ABORTIFHUNG` 让「对方已经无响应」这种情况立刻返回，
+    不用白等满超时。
+
+    ## 为什么不需要先问长度
+
+    `GetWindowTextLengthW` 是上面那两个危险调用之一。这里直接给一个够用的
+    固定缓冲（512 字符，窗口标题的上限本来是 255），一次调用拿到内容 ——
+    少一次跨进程消息，也少一个会挂死的地方。
+
+    返回值在超时/失败时是空串，与「标题本来就是空的」无法区分 ——
+    但这两者对调用方是同一件事，所以没有必要区分。
+    """
+    buf = ctypes.create_unicode_buffer(size)
+    res = ctypes.c_size_t()
+    try:
+        _user32.SendMessageTimeoutW(
+            hwnd, WM_GETTEXT, size, ctypes.addressof(buf),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, int(timeout_ms), ctypes.byref(res))
+    except Exception:
+        return ""
+    return buf.value
+
+
+def top_windows(with_titles: bool = False) -> list[dict]:
+    """
+    枚举本桌面上的顶层窗口。
+
+    ## 两阶段：先枚举、再读标题
+
+    `EnumWindows` 的回调里**不能发消息**（枚举期间系统处于一种内部锁状态，
+    在回调里 SendMessage 会超时返回空 —— 实测过：45 个窗口全部拿到空标题）。
+    所以这里先把不涉及消息的字段（类名 / pid / 几何 / 可见性）收集完，
+    等枚举**结束之后**再回头读标题。
+
+    `with_titles=False`（默认）时，只对 **QQ 类名**的窗口去读标题。
+    读标题是唯一会跨进程发消息的一步，而 `qq_windows()` 根本不用标题
+    （它只按类名 + pid + 几何判断）。把这一步缩到「我们真正关心的那几个窗口」上，
+    等于把「会被别人的卡死窗口拖住」的面积从整张桌面缩到 QQ 自己。
+    需要全部标题的场合（诊断）传 `with_titles=True`。
+    """
+    raw: list[dict] = []
 
     def cb(hwnd, _lparam):
+        # ⚠️ 这里**只做不发消息的调用**（理由见上面）。GetClassNameW /
+        # GetWindowThreadProcessId / GetWindowRect / IsWindowVisible / IsIconic
+        # 都不给对方线程发消息，所以它们不会挂。
         try:
-            length = _user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(length + 2)
-            _user32.GetWindowTextW(hwnd, buf, length + 1)
-
             cls = ctypes.create_unicode_buffer(256)
             _user32.GetClassNameW(hwnd, cls, 256)
-
             pid = wintypes.DWORD()
             _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             rect = _RECT()
             _user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            out.append({
+            raw.append({
                 "hwnd": int(hwnd),
-                "title": buf.value,
+                "title": "",
                 "class": cls.value,
                 "pid": int(pid.value),
                 "visible": bool(_user32.IsWindowVisible(hwnd)),
@@ -213,10 +299,11 @@ def top_windows() -> list[dict]:
         _user32.EnumWindows(_WNDENUMPROC(cb), 0)
     except Exception:
         pass
-    return out
 
-
-_QQ_CLASSES = ("Chrome_WidgetWin_1", "Chrome_WidgetWin_0", "TXGuiFoundation")
+    for w in raw:
+        if with_titles or w["class"] in _QQ_CLASSES:
+            w["title"] = window_title(w["hwnd"])
+    return raw
 
 
 def qq_windows() -> list[dict]:
@@ -420,7 +507,8 @@ def check_accessibility(configured_qq: str = "") -> dict:
             out["last_direction"] = msgs[-1].direction if msgs else ""
         except Exception as exc:
             out["error"] = f"读消息失败：{type(exc).__name__}: {exc}"
-        # 会话列表能读到，才算无障碍树整体可用
+        # 会话列表另外报一份（诊断用），但**它不作为「可读」的判据** ——
+        # 会话列表在左栏/起始页也有，而聊天页的锚点（ml-list / editor）没有。
         try:
             import qqid
             sessions = qqid.list_sessions(q.win)
@@ -428,12 +516,20 @@ def check_accessibility(configured_qq: str = "") -> dict:
         except Exception as exc:
             out["session_count"] = 0
             out.setdefault("error", f"读会话列表失败：{type(exc).__name__}: {exc}")
+        # 顺手判一下「是不是停在会话列表页」—— 这是常驻起不来的最常见原因，
+        # 体检在这里说清楚，用户就不必等到启动常驻时才看到报错。
+        out["chat_open"] = bool(out.get("session_count")) and not (
+            out.get("ml_list_found") or out.get("editor_found"))
         return out
 
     try:
         data = UIA.call(job, timeout=45.0)
         result.update(data)
-        result["ok"] = bool(data.get("ml_list_found")) or bool(data.get("session_count"))
+        # ⚠️ 判据必须与 `QQWindow.dom_exposed()` **完全一致**：聊天页锚点在不在。
+        # 原来写的是 `ml_list_found or session_count`，于是「停在会话列表页」这种
+        # 常驻一定起不来的状态，体检却显示通过 —— 两边判据不一致会让人以为
+        # 「体检说没问题，所以是启动常驻的代码有 bug」，方向整个错。
+        result["ok"] = bool(data.get("ml_list_found")) or bool(data.get("editor_found"))
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
     result["uia"] = UIA.status()      # 加载 agent 之后再刷一次，此时能看到真实结果

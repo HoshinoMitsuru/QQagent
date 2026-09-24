@@ -293,6 +293,14 @@ def run_ui(safe: bool = False) -> int:
     except Exception:
         pass
 
+    # 隐藏桌面的宿主进程没有 stdout 管道（CreateProcessW 不接管），
+    # 它把输出写进 logs/hostd.log，这里把那个文件接进日志总线 ——
+    # 少了这一步，界面上永远看不到那边发生了什么。
+    from . import host as hostmod
+    from . import logtail
+    logtail.start(hostmod.HOSTD_LOG)
+    BUS.emit(f"已挂上隐藏桌面宿主的日志通道：{hostmod.HOSTD_LOG}", tag="BOOT", source="ui")
+
     if fresh_config:
         BUS.emit("这是首次运行，已生成 config.json。请先到「模型接入」填好 API Key。",
                  tag="BOOT", source="ui")
@@ -323,6 +331,17 @@ def run_ui(safe: bool = False) -> int:
     if not safe and app.get("auto_start_agent"):
         res = SUP.start_resident(dry_run=False)
         BUS.emit("已按设置自动开始常驻" if res.get("ok") else f"自动开始常驻失败：{res.get('error')}",
+                 tag="RUN" if res.get("ok") else "WARN", source="ui")
+
+    # ---- 隐藏桌面常驻（V2）：按设置自动起。
+    # 与上面的 V1 常驻互斥 —— 两者会同时操作同一个 QQ 输入框，所以只认一个。
+    if not safe and app.get("hidden_desktop_autostart") and not app.get("auto_start_agent"):
+        name = str(app.get("hidden_desktop") or "").strip() or "QQAgentHidden"
+        res = hostmod.start_daemon(desktop_name=name,
+                                   qq_exe=str(app.get("qq_exe_path") or ""),
+                                   chat=str(app.get("hidden_desktop_chat") or ""))
+        BUS.emit(f"已按设置把常驻宿主丢进隐藏桌面 {name}（pid {res.get('pid')}）"
+                 if res.get("ok") else f"自动启动隐藏桌面常驻失败：{res.get('error')}",
                  tag="RUN" if res.get("ok") else "WARN", source="ui")
 
     # ---- 收尾：三个退出入口（托盘菜单 / 界面按钮 / Ctrl+C）全部汇到这里

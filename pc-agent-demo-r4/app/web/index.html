@@ -380,20 +380,26 @@ textarea{font-family:var(--mono);font-size:12.5px;line-height:1.55;resize:vertic
 
     <section class="card">
       <div class="card-head">
-        <span id="i-run"></span>
-        <h2>常驻运行</h2>
-        <div class="sub">自动回复主循环</div>
-      </div>
-      <div class="card-body" id="runBody"></div>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
         <span id="i-host"></span>
         <h2>隐藏桌面（独立 profile）</h2>
-        <div class="sub" id="hostSub">QQ 跑在另一张桌面上，不占你的屏幕</div>
+        <div class="sub" id="hostSub">QQ 跑在另一张桌面上 —— 不占你的屏幕，也不碰你手上的那个号</div>
       </div>
       <div class="card-body" id="hostBody"><div class="empty">正在读取…</div></div>
+    </section>
+
+    <!-- ⚠️ 顺序说明：这张卡**故意排在「隐藏桌面」后面**。
+         它操作的是**你自己桌面上正在用的那个 QQ**，是 V1 的旧路线；
+         而 V2 的主线是上面那张。曾经它排在前面，结果很自然地发生了一次：
+         有人在 V2 的 exe 上点了这里的「开始常驻」，于是程序去操作他桌面上
+         登录着的**主号**（而不是隐藏桌面上的小号），还真的发出了一条回复。
+         卡片的标题和确认框现在都把「操作谁」写在最显眼处。 -->
+    <section class="card">
+      <div class="card-head">
+        <span id="i-run"></span>
+        <h2>常驻运行（操作你桌面上的 QQ）</h2>
+        <div class="sub">自动回复主循环 · V1 路线</div>
+      </div>
+      <div class="card-body" id="runBody"></div>
     </section>
 
     <section class="card">
@@ -607,6 +613,38 @@ function errToast(res, prefix) {
 
 function codeChip(code) {
   return code ? `<span class="ecode" title="点击查看这个错误码的说明">${esc(code)}</span>` : "";
+}
+
+/**
+ * 把「这次会回复谁」翻成人话。
+ *
+ * 这条策略出过一次事故：exe 在自己那一层生成了**默认配置**，而默认是
+ * `private_chat_only = false`（群聊也回）。有人在不知道这件事的情况下启动了常驻，
+ * 于是 AI 的回复进了一个群。默认值本身是有意的，但**必须在启动前被看见**。
+ *
+ * ⚠️ 必须放在**模块级**（不能塞在 renderRun 里面）：它同时被点击处理器用，
+ * 而函数声明只在它所在的那个函数体内可见 —— 放错地方就是「点按钮报
+ * ReferenceError」，而 `node --check` 只查语法、查不出这种作用域问题。
+ */
+function policyText(st) {
+  const p = (st && st.reply_policy) || {};
+  if (p.private_chat_only === undefined) return "（读不到，先看「参数配置」卡片）";
+  const kw = (p.trigger_prefixes || []).map(esc).join(" / ") || "（没配触发词）";
+  const how = `<span style="opacity:.85">要收紧：参数配置 → 私聊限定 / 群聊需触发词。</span>`;
+  // 这四种组合要与 agent.py 里的判定逐条对齐：
+  //     need_trigger = (not always_reply) or (is_group and group_requires_trigger)
+  // 别凭印象描述 —— 这是一句安全提示，说错比不说更糟。
+  if (p.private_chat_only) {
+    return `只回<b>私聊</b>；群聊一律不回。${how}`;
+  }
+  if (!p.always_reply) {
+    return `私聊和群聊都<b>需要以触发词开头</b>（${kw}）才会回。`;
+  }
+  if (p.group_requires_trigger) {
+    return `私聊会回；群聊需以 ${kw} 开头（或该会话处于连续对话），否则不回。${how}`;
+  }
+  return `<b style="color:var(--warn)">私聊和群聊都会回，而且群里连触发词都不需要</b>
+          —— 群里任何人说话都可能被回。${how}`;
 }
 
 function confirmDialog({title, body, confirmText, cancelText, danger, infoOnly}) {
@@ -848,8 +886,19 @@ function renderRun(s) {
     : `<button class="primary" data-act="agent-start">${icon("rocket")}开始常驻（会真的回复）</button>
        <button data-act="agent-start-dry">${icon("eye")}只读运行（不发送）</button>`;
   html += `</div>`;
-  if (!r.running) html += `<div class="notice ok" style="margin-top:12px">${icon("info")}
-    <div>建议先用上面的「只读运行」观察一会儿日志，确认读到的消息、方向、昵称都对，再切到会真的发送的常驻。</div></div>`;
+  if (!r.running) {
+    // 把「操作谁」和「用哪份配置」放在按钮**正下方**：这两件事各出过一次问题
+    // （操作到了主号；exe 的数据目录是它自己那一层、于是读的是另一份配置）。
+    const probe0 = (s.probe) || {};
+    const who = probe0.dialog_title || (s.agent && s.agent.title) || "";
+    const dataDir = (s.paths && s.paths.data_dir) || "?";
+    html += `<div class="notice warn" style="margin-top:12px">${icon("info")}
+      <div>这条路线的操作对象是<b>你自己桌面上正在用的那个 QQ</b>${who ? `：上次读到 <b>${esc(who)}</b>` : "（还没体检过，点上面「体检」可以看清是哪个号）"}。
+      要操作另一个号、且不打扰你，请用上面的<b>隐藏桌面（独立 profile）</b>。</div></div>`;
+    html += `<div class="notice ok" style="margin-top:8px">${icon("info")}
+      <div>建议先用上面的「只读运行」观察一会儿日志，确认读到的消息、方向、昵称都对，再切到会真的发送的常驻。<br>
+      <span style="opacity:.85">本次配置来自：<code>${esc(dataDir)}</code></span></div></div>`;
+  }
   $("#runBody").innerHTML = html;
 }
 
@@ -1335,7 +1384,38 @@ async function handleAction(act, btn) {
     }
     case "qq-wait": await run("/api/qq/wait", { timeout: 180 }, "等待 QQ 就绪"); break;
     case "qq-wait-cancel": await run("/api/qq/wait/cancel", {}, "取消等待"); break;
-    case "agent-start": await run("/api/agent/start", { dry_run: false }, "启动常驻"); break;
+    case "agent-start": {
+      // ⚠️ 这个确认框不是走过场，它补的是一个**真实发生过的事故**：
+      //    在 V2（R4 版）的 exe 上，有人点了这张卡的「开始常驻」——
+      //    这条路线操作的是**本机桌面上登录着的那个 QQ**，也就是他自己的**主号**，
+      //    于是程序读了主号的会话列表，并且真的往一个群里发了一条 AI 回复。
+      //    当时界面上没有任何一处告诉他「你要操作的是哪个号」。
+      //    所以确认框里必须把三件事摆出来：操作对象、数据目录、会发生什么。
+      const s0 = STATE || {};
+      const probe0 = s0.probe || {};
+      const hb0 = s0.agent || {};
+      const who = probe0.dialog_title || hb0.title || "";
+      const dataDir = (s0.paths && s0.paths.data_dir) || "?";
+      const ok = await confirmDialog({
+        title: "确认：操作你桌面上的那个 QQ？",
+        body: `这条路线（V1）附着的是<b>你自己桌面上正在用的 QQ</b>：
+              <code>${esc(s0.qq && s0.qq.main ? `hwnd ${s0.qq.main.hwnd}` : "自动挑最大的可见窗口")}</code><br>
+              ${who ? `上次它读到的会话是 <b>${esc(who)}</b> —— 如果不是你以为的那个号，别继续。`
+                    : `<span style="color:var(--warn)">还没有体检过，不知道会挑到哪个号 —— 建议先点「体检」看一眼。</span>`}
+              <br><br>
+              它会：读会话列表 → 等多条消息合并 → 调模型 → <b>真的把回复发出去</b>。
+              发送期间会抢一次前台，你的键盘输入可能被打断。<br><br>
+              <b>回复范围</b>：${policyText(s0)}<br><br>
+              本次读的是这个数据目录里的配置：<br>
+              <code>${esc(dataDir)}</code><br>
+              （exe 的数据目录是它**自己所在的那一层**，不是源码目录 —— 换过位置就等于换了配置。）
+              <br><br>
+              如果你要的是「不打扰你、操作另一个号」，请用<b>上面那张「隐藏桌面（独立 profile）」卡片</b>。`,
+        confirmText: "我确认，操作的是它", danger: true
+      });
+      if (ok) await run("/api/agent/start", { dry_run: false }, "启动常驻");
+      break;
+    }
     case "agent-start-dry": await run("/api/agent/start", { dry_run: true }, "只读运行"); break;
     case "agent-stop": {
       const ok = await confirmDialog({

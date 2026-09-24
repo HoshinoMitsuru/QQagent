@@ -107,36 +107,50 @@ if not "%QQAGENT_NO_ICON%"=="1" (
   )
 )
 
-rem ---- clean previous artefacts ----------------------------------------------
-if exist "build\qq-agent" rmdir /s /q "build\qq-agent" >nul 2>&1
-if exist "dist\qq-agent.exe" del /q "dist\qq-agent.exe" >nul 2>&1
-
-rem ---- build ------------------------------------------------------------------
-echo.
-echo [i] Building (console=%QQAGENT_CONSOLE% onedir=%QQAGENT_ONEDIR%) ...
-echo.
-"%PY%" -m PyInstaller --noconfirm --clean qq-agent.spec || goto :fail
-
 rem ---- artifact name ----------------------------------------------------------
 rem PyInstaller always emits dist\qq-agent.exe (the spec hard-codes that name),
 rem so the three variants used to overwrite each other and had to be renamed by
 rem hand. That is how a "console build" could silently clobber the admin build.
-rem Now the switch decides the file name:
+rem The switch decides the file name:
 rem   (none)                 dist\qq-agent.exe              <- the deliverable
 rem   nadmin                 dist\qq-agent-noadmin.exe      <- no UAC prompt
 rem   console                dist\qq-agent-console.exe      <- keeps a console
 rem   nadmin console         dist\qq-agent-noadmin-console.exe
+rem
+rem This block MUST run before the cleanup below: the cleanup has to know which
+rem file it is allowed to delete. It used to delete dist\qq-agent.exe
+rem unconditionally, so building the default first and a variant second
+rem **deleted the deliverable** and left only the variant.
 set "SUFFIX="
 if "%QQAGENT_NO_ADMIN%"=="1" set "SUFFIX=noadmin"
 if "%QQAGENT_CONSOLE%"=="1" (
   if defined SUFFIX (set "SUFFIX=!SUFFIX!-console") else (set "SUFFIX=console")
 )
-if "%QQAGENT_ONEDIR%"=="1" goto :skiprename
-if defined SUFFIX (
-  if exist "dist\qq-agent-!SUFFIX!.exe" del /q "dist\qq-agent-!SUFFIX!.exe" >nul 2>&1
-  move /y "dist\qq-agent.exe" "dist\qq-agent-!SUFFIX!.exe" >nul || goto :fail
+if "%QQAGENT_ONEDIR%"=="1" (
+  set "TARGET=dist\qq-agent"
+  set "TARGET_EXE=dist\qq-agent\qq-agent.exe"
+) else if defined SUFFIX (
+  set "TARGET=dist\qq-agent-!SUFFIX!.exe"
+  set "TARGET_EXE=!TARGET!"
+) else (
+  set "TARGET=dist\qq-agent.exe"
+  set "TARGET_EXE=dist\qq-agent.exe"
 )
-:skiprename
+
+rem ---- clean previous artefacts ----------------------------------------------
+if exist "build\qq-agent" rmdir /s /q "build\qq-agent" >nul 2>&1
+if exist "!TARGET_EXE!" del /q "!TARGET_EXE!" >nul 2>&1
+
+rem ---- build ------------------------------------------------------------------
+echo.
+echo [i] Building (console=%QQAGENT_CONSOLE% onedir=%QQAGENT_ONEDIR% name=!TARGET!) ...
+echo.
+"%PY%" -m PyInstaller --noconfirm --clean qq-agent.spec || goto :fail
+
+rem NOTE: no renaming here on purpose. The spec names the artefact from the same
+rem switches (see APP_NAME there), so PyInstaller writes the final file directly.
+rem An earlier version built dist\qq-agent.exe and then renamed it -- which
+rem silently overwrote the default deliverable whenever a variant was built.
 
 echo.
 echo ============================================================================
@@ -144,13 +158,8 @@ if "%QQAGENT_ONEDIR%"=="1" (
   echo [OK] Output folder: dist\qq-agent\
   echo      Run: dist\qq-agent\qq-agent.exe
 ) else (
-  if defined SUFFIX (
-    set "ART=dist\qq-agent-!SUFFIX!.exe"
-  ) else (
-    set "ART=dist\qq-agent.exe"
-  )
-  echo [OK] Output file: !ART!
-  for %%F in ("!ART!") do echo      Size: %%~zF bytes
+  echo [OK] Output file: !TARGET!
+  for %%F in ("!TARGET!") do echo      Size: %%~zF bytes
   if defined SUFFIX (
     echo.
     echo [i] This is a VARIANT build ^(not the default deliverable^).

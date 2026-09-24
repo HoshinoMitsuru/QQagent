@@ -139,6 +139,22 @@ def build_state(with_probe: bool = False, with_cmdlines: bool = False) -> dict:
     app = settings.load_app_settings()
     agent_cfg = settings.load_merged()
     key = settings.resolve_api_key_display()
+    # 「这次会回复谁」是启动常驻前最该看见的一件事，所以放进状态里给界面用。
+    # 事故背景：exe 在自己那一层生成了**默认配置**（private_chat_only=false，
+    # 即群聊也回），有人在没被告知的情况下启动了常驻，于是往一个群里发了回复。
+    # 界面现在会在确认框里把这条策略原文念出来。
+    _chat = agent_cfg.get("chat") or {}
+    policy = {
+        # ⚠️ 键名必须与 agent 实际读的一致（agent.py:3310 的
+        # `need_trigger = (not always_reply) or (is_group and group_requires_trigger)`）。
+        # 第一版这里写成 chat.trigger_keywords / aggregate.window_seconds ——
+        # 两个键都不存在，界面就会把「当前没有触发词、群里任何消息都会被回」
+        # 印在一句**安全警告**里。警告说假话比没有警告更糟。
+        "private_chat_only": bool(_chat.get("private_chat_only")),
+        "always_reply": bool(_chat.get("always_reply", True)),
+        "group_requires_trigger": bool(_chat.get("group_requires_trigger", True)),
+        "trigger_prefixes": [str(x) for x in (_chat.get("trigger_prefixes") or [])][:4],
+    }
     st = SUP.state()
     qq = _qq_summary(app, with_probe=with_probe)
     # 只算一次：这个函数虽然便宜（读一个 JSON + 一次 OpenProcess），
@@ -184,6 +200,8 @@ def build_state(with_probe: bool = False, with_cmdlines: bool = False) -> dict:
             "key_present": key["present"],
             "key_source": key["source"],
         },
+        # 启动常驻前要看清的两件事之一（另一件是「操作哪个号」）：这次会回复谁。
+        "reply_policy": policy,
         "qq": qq,
         "supervisor": st,
         "host": hd,

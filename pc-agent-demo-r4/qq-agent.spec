@@ -25,6 +25,26 @@ ONEDIR = os.environ.get("QQAGENT_ONEDIR") == "1"
 NO_ADMIN = os.environ.get("QQAGENT_NO_ADMIN") == "1"
 NO_ICON = os.environ.get("QQAGENT_NO_ICON") == "1"
 
+# ---------------------------------------------------------------- 产物名
+# ⚠️ 产物名必须在这里决定，不能「先构建成 qq-agent.exe 再改名」。
+#
+# PyInstaller 只会按 `name=` 写文件。名字写死成 `qq-agent` 的话，构建任何变体
+# 都会**先覆盖掉 dist\qq-agent.exe**（默认交付版），然后再被改名成变体 ——
+# 于是「先建默认版、再建变体」的结果是：默认版产物不见了。
+# 这件事实测遇到过：建完 nadmin 之后 `dist\qq-agent.exe` 就没了。
+#
+# 所以让开关直接决定文件名，PyInstaller 写哪个就是哪个，互不干扰：
+#   (none)          qq-agent
+#   nadmin          qq-agent-noadmin
+#   console         qq-agent-console
+#   nadmin console  qq-agent-noadmin-console
+_SUFFIX = ""
+if NO_ADMIN:
+    _SUFFIX += "-noadmin"
+if CONSOLE:
+    _SUFFIX += "-console"
+APP_NAME = "qq-agent" + _SUFFIX
+
 # ---------------------------------------------------------------- 资源
 datas = [
     (os.path.join(HERE, "app", "web"), "app/web"),          # WebUI 静态文件
@@ -95,7 +115,7 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 exe_kwargs = dict(
-    name="qq-agent",
+    name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -113,7 +133,7 @@ if not NO_ICON and os.path.isfile(icon_path):
 
 if ONEDIR:
     exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **exe_kwargs)
-    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="qq-agent")
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=APP_NAME)
 else:
     exe = EXE(pyz, a.scripts, a.binaries, a.datas, [],
               exclude_binaries=False, **exe_kwargs)

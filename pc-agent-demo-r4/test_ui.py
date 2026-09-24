@@ -182,6 +182,22 @@ def t2_state():
             all(k in s["qq"] for k in ("running", "processes", "windows", "exe", "autostart")))
     R.check("未配置 Key 时给出警告",
             any("API Key" in w for w in s["warnings"]), str(s["warnings"]))
+
+    # ---- reply_policy：界面拿它念出「这次会回复谁」 ----
+    # 这一条是补的，因为**第一版字段名全是错的**（写成 chat.trigger_keywords /
+    # aggregate.window_seconds，真实键是 chat.trigger_prefixes / always_reply /
+    # group_requires_trigger），于是界面在一句**安全警告**里印了假话。
+    # 当时没有任何测试盯着这个字段 —— 加字段而不加断言，就等于没加。
+    rp = s.get("reply_policy")
+    R.check("含 reply_policy", isinstance(rp, dict), str(rp)[:160])
+    if isinstance(rp, dict):
+        for k in ("private_chat_only", "always_reply", "group_requires_trigger"):
+            R.check(f"reply_policy.{k} 是布尔（键名对得上）",
+                    isinstance(rp.get(k), bool), repr(rp.get(k)))
+        R.check("reply_policy.trigger_prefixes 是**非空**列表（键名对得上）",
+                isinstance(rp.get("trigger_prefixes"), list)
+                and len(rp["trigger_prefixes"]) > 0,
+                repr(rp.get("trigger_prefixes")))
     if VERBOSE:
         log(json.dumps(s, ensure_ascii=False, indent=2)[:1500])
 
@@ -527,6 +543,62 @@ def t14_tray():
 
 
 
+def _top_level_ancestor_ranges(src: str) -> list[tuple[int, int]]:
+    """
+    找出所有「最外层函数」占据的行区间（1 起，含首尾）。
+
+    做法：逐字符扫，维护一个「函数起始位置」的栈 —— 只在遇到 `function` 关键字
+    时压栈（不追踪箭头函数，本项目这一层统一用 `function` 声明）。
+    一次遇到 `function` 时，若还没进过任何函数，它就是一个最外层函数。
+    配对的大括号决定它的结束行。
+
+    只需要「够用」：用来判断某个调用点有没有落在正确的函数范围内。
+    """
+    import re as _re
+    ranges: list[tuple[int, int]] = []
+    depth = 0
+    cur_top_start = None
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        # 跳过字符串与注释，避免里面的 {} 干扰配对
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "\"'`":
+            quote = ch
+            i += 1
+            while i < n:
+                if src[i] == "\\":
+                    i += 2
+                    continue
+                if src[i] == quote:
+                    break
+                i += 1
+            i += 1
+            continue
+        if src.startswith("function", i) and _re.match(r"function\s+[A-Za-z_$]", src[i:]):
+            if depth == 0 and cur_top_start is None:
+                cur_top_start = i
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and cur_top_start is not None:
+                a = src[:cur_top_start].count("\n") + 1
+                b = src[: i + 1].count("\n") + 1
+                ranges.append((a, b))
+                cur_top_start = None
+        i += 1
+    return ranges
+
+
 def t15_frontend_script():
     """
     前端脚本的**语法与引用完整性**。
@@ -570,6 +642,42 @@ def t15_frontend_script():
 
     # 找 node：PATH → 常见安装位置。找不到就不做这一步（不能因为缺一个工具
     # 把测试判失败，那会让人去修一个不存在的问题），上面两项引用检查仍然生效。
+    # ---- 函数作用域：声明在某个函数**里面**的函数，别处调不到 ----
+    # 这一条是 2026-09-25 补的，因为我**正好犯了这个错**：
+    # 把一个 `policyText()` 声明写在了 renderRun() 内部，却在点击处理器里调用它。
+    # `node --check` 只验语法，完全查不出这种问题 —— 表现是**点那个按钮时
+    # ReferenceError**，页面上其它一切正常（所以很难第一时间联想到作用域）。
+    #
+    # 判据（保守但够用）：如果某个函数名在全文只声明过一次、且它声明在另一个函数
+    # **内部**，那么对它的调用必须落在「最外层那个祖先函数」的范围内；
+    # 落在别处就是调不到。重名的函数一律跳过（可能是合法的遮蔽）。
+    decls = {}
+    for m in re.finditer(r"(?m)^\s*function\s+([A-Za-z_$][\w$]*)\s*\(", src):
+        name = m.group(1)
+        decls.setdefault(name, []).append(src[:m.start()].count("\n") + 1)
+    top_ancestor = _top_level_ancestor_ranges(src)
+    bad_calls = []
+    for name, lines in decls.items():
+        if len(lines) != 1:
+            continue
+        decl_line = lines[0]
+        ancestor = None
+        for (a, b) in top_ancestor:
+            if a <= decl_line <= b:
+                ancestor = (a, b)
+                break
+        if not ancestor:
+            continue                      # 声明在模块级：任何地方都能调
+        for m in re.finditer(rf"(?<![\w$.]){re.escape(name)}\s*\(", src):
+            call_line = src[:m.start()].count("\n") + 1
+            if call_line == decl_line:
+                continue
+            if not (ancestor[0] <= call_line <= ancestor[1]):
+                bad_calls.append((name, decl_line, call_line))
+    R.check("没有「声明在函数内部、却在别处调用」的函数", not bad_calls,
+            "；".join(f"{n} 声明于第 {d} 行，却在第 {c} 行调用"
+                      for n, d, c in bad_calls[:4]))
+
     node = _sh.which("node") or ""
     if not node:
         for cand in (os.path.join(os.environ.get("ProgramFiles", ""), "nodejs", "node.exe"),

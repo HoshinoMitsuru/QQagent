@@ -4,34 +4,39 @@ __pycache__/
 *.pyo
 
 # 探针 / 诊断输出（非源码）
-# 2026-09-24：这些探针脚本与输出统一收进 pc-agent-demo/archive/，
+# 2026-09-24：这些探针脚本与输出统一收进 <树>/archive/，
 # 所以规则跟着改路径。**脚本本身要入库**（它们是「当时怎么验证的」的证据链），
 # 这里只忽略体量大的原始 dump —— 那种内容可以用脚本随时重新导出。
-pc-agent-demo/archive/probe-report.json
-pc-agent-demo/archive/probe-stdout.txt
-pc-agent-demo/archive/probe-tree.txt
-pc-agent-demo/archive/peek-fixed.txt
+#
+# 2026-09-24 晚：项目按运行形态拆成两棵并列的独立树，
+# 忽略规则改用 `pc-agent-demo*/` 通配，两棵树共用同一套：
+#   pc-agent-demo-vm/  = V1，附着到「已登录 QQ」的 VM 环境版（附着式）
+#   pc-agent-demo-r4/  = V2，独立 Windows 桌面（R4）托管版
+pc-agent-demo*/archive/probe-report.json
+pc-agent-demo*/archive/probe-stdout.txt
+pc-agent-demo*/archive/probe-tree.txt
+pc-agent-demo*/archive/peek-fixed.txt
 
 # PC 端本地密钥（绝不入库）
-pc-agent-demo/secrets.local.json
+pc-agent-demo*/secrets.local.json
 
 # PC 端运行状态：按会话持久化的上下文
-pc-agent-demo/state/
-pc-agent-demo/*.json.bad
+pc-agent-demo*/state/
+pc-agent-demo*/*.json.bad
 
 # ---- 控制台壳（exe）相关的构建产物与运行时数据 ----
 # 构建中间件与产物：可重新生成，不入库（exe 有几十 MB）
-pc-agent-demo/build/
-pc-agent-demo/dist/
-pc-agent-demo/*.spec.bak
+pc-agent-demo*/build/
+pc-agent-demo*/dist/
+pc-agent-demo*/*.spec.bak
 # 打包用的隔离环境
-pc-agent-demo/.venv/
+pc-agent-demo*/.venv/
 # 图标是 build_icon.py 生成的，但生成结果要能随仓库走（构建时省一步）
-# 所以刻意**不**忽略 pc-agent-demo/app/assets/qq-agent.ico
+# 所以刻意**不**忽略 pc-agent-demo*/app/assets/qq-agent.ico
 # 控制台运行期产生的东西
-pc-agent-demo/app-settings.json
-pc-agent-demo/logs/
-pc-agent-demo/config.backup-*.json
+pc-agent-demo*/app-settings.json
+pc-agent-demo*/logs/
+pc-agent-demo*/config.backup-*.json
 # 用户可能在项目目录里直接跑控制台，那会在仓库根产生一份状态目录
 /.venv/
 

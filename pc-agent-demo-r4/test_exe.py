@@ -14,10 +14,12 @@ test_exe.py —— 打包产物的验收测试
 
 覆盖：
     1  exe 存在、体积合理
+    1b R4 的两个宿主子模式可用（--run-hostagent / --run-hostd）——
+       它们是「进隐藏桌面」的唯一入口，且**只能**由 exe 自己扮演
     2  --version / --help 正常
     3  --run-agent 子模式可用，且**数据目录落在 exe 旁边**（冻结适配的关键）
     4  --safe 起服务、写出 state/ui.json（端口 + 令牌）
-    5  /api/state、/api/settings、/api/tasks 都通
+    5  /api/state、/api/settings、/api/tasks、/api/host/* 都通
     6  真的能起子进程任务并跑完（验证 exe 自调用自己这条链路）
     7  改配置能落盘到 exe 旁边的数据目录
     8  SSE 能收到日志
@@ -95,6 +97,42 @@ def http(base, path, body=None, token=None, raw=False, timeout=25):
             return e.code, {"ok": False, "error": b.decode("utf-8", "replace")}
 
 
+class NeedElevation(RuntimeError):
+    """exe 带 requireAdministrator 清单，而当前进程没有提升权限。"""
+
+
+def _run(args, **kw):
+    """
+    启动 exe，并把「权限不够」翻译成一条能照做的说明。
+
+    ## 为什么必须单独处理 WinError 740
+
+    默认构建出来的 `qq-agent.exe` 带 `requireAdministrator` 清单。
+    `CreateProcess`（`subprocess` 用的就是它）**不会弹 UAC** ——
+    权限不够时它直接返回 740「请求的操作需要提升」。结果就是本测试以一段
+    `OSError: [WinError 740]` 回溯结束，看起来像程序坏了，
+    而真相只是「从非提升的终端里跑，启动不了那个变体」。
+
+    正确做法不是让用户去猜，而是明说：要么用管理员终端跑，
+    要么测 `dist\\qq-agent-noadmin.exe`（`build.bat nadmin` 产出）——
+    两者代码完全一样，差的只有那份清单。
+    """
+    kw.setdefault("creationflags", NO_WINDOW)
+    try:
+        return subprocess.run(args, **kw)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 740:
+            raise NeedElevation(
+                "这个 exe 申请了管理员权限，而非提升的进程**无法**用 CreateProcess 启动它"
+                "（UAC 不会被触发）。两种做法：\n"
+                "  ① 用「以管理员身份运行」打开的终端再跑本测试；\n"
+                "  ② 构建免 UAC 变体并测它（代码完全一样，只差清单）：\n"
+                "       build.bat nadmin\n"
+                "       python test_exe.py dist\\qq-agent-noadmin.exe"
+            ) from exc
+        raise
+
+
 def wait_for(cond, timeout=60.0, interval=0.4):
     end = time.time() + timeout
     while time.time() < end:
@@ -129,21 +167,36 @@ def main():
     try:
         # ---------------- 1. 命令行模式 ----------------
         print("\n[1] 命令行模式")
-        r = subprocess.run([exe, "--version"], capture_output=True, timeout=90,
-                           cwd=work, creationflags=NO_WINDOW)
+        r = _run([exe, "--version"], capture_output=True, timeout=90, cwd=work)
         out = r.stdout.decode("utf-8", "replace").strip()
         R.check("--version 正常", r.returncode == 0 and "QQAgent" in out, out[:100])
         print(f"      {out}")
 
-        r = subprocess.run([exe, "--help"], capture_output=True, timeout=90,
-                           cwd=work, creationflags=NO_WINDOW)
+        r = _run([exe, "--help"], capture_output=True, timeout=90, cwd=work)
         out = r.stdout.decode("utf-8", "replace")
         R.check("--help 正常", r.returncode == 0 and "--run-agent" in out)
+        R.check("--help 里列出了 R4 的两个宿主子模式",
+                "--run-hostagent" in out and "--run-hostd" in out,
+                out[-400:])
+
+        # ---------------- 1b. R4 的两个宿主角色 ----------------
+        # 这两个**只由 exe 自己扮演**（app/host.py 用 lpDesktop 把它们丢进隐藏桌面）。
+        # 源码模式永远正常，所以「有没有真的打进 exe、子命令有没有接上」
+        # 只有在真 exe 上才验得出来 —— 而这正是 R4 的全部功能入口。
+        print("\n[1b] R4 宿主子模式（--run-hostagent / --run-hostd）")
+        for flag, must in (("--run-hostagent", "--open-chat"),
+                           ("--run-hostd", "--desktop")):
+            r = _run([exe, flag, "--help"], capture_output=True,
+                     timeout=120, cwd=work)
+            out = (r.stdout + r.stderr).decode("utf-8", "replace")
+            R.check(f"{flag} 可执行（不是 ModuleNotFoundError）",
+                    r.returncode == 0 and must in out,
+                    out[-400:])
 
         # ---------------- 2. agent 子模式 + 数据目录 ----------------
         print("\n[2] agent 子模式与数据目录（冻结适配的关键）")
-        r = subprocess.run([exe, "--run-agent", "--state"], capture_output=True, timeout=120,
-                           cwd=work, creationflags=NO_WINDOW)
+        r = _run([exe, "--run-agent", "--state"], capture_output=True,
+                 timeout=120, cwd=work)
         out = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
         R.check("--run-agent 可执行", r.returncode == 0, out[-300:])
         R.check("agent 输出正常（不是 ImportError）",
@@ -188,6 +241,23 @@ def main():
 
         st, d = http(base, "/api/tasks", token=token)
         R.check("/api/tasks 通", st == 200 and len(d.get("tasks", [])) >= 10)
+
+        # R4 的隐藏桌面接口也要通：这几条同时验两件事 ——
+        # app.host 被打进 exe 了（否则 500/断连），以及没跑宿主时它给的是
+        # 「明确的未运行状态」而不是报错（面板的两态都要能说清楚）。
+        st, d = http(base, "/api/host/status", token=token)
+        R.check("/api/host/status 通", st == 200 and d.get("ok"), str(d)[:200])
+        R.check("没跑宿主机时状态是「未运行」而不是报错",
+                (d.get("daemon") or {}).get("running") is False,
+                str(d.get("daemon"))[:200])
+        R.check("host 状态里有 E-DESK 相关的路径字段",
+                "log_path" in (d.get("daemon") or {})
+                and "heartbeat_path" in (d.get("daemon") or {}),
+                str(list(d.get("daemon") or {}))[:200])
+        st, d = http(base, "/api/host/shot.png", token=token)
+        R.check("没抓过图时 shot.png 给的是带码的错误（不是断连）",
+                st in (404, 500) and isinstance(d, dict) and d.get("code"),
+                f"HTTP {st} {str(d)[:160]}")
 
         # 错误码目录必须被打进 exe —— 漏了的话「带码报错」会静默退化成裸异常，
         # 而且只有在真 exe 上才会暴露（源码模式永远正常）。
@@ -318,4 +388,12 @@ def _tail(path, n=800):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except NeedElevation as exc:
+        print()
+        print("=" * 70)
+        print("[i] 这个 exe 启动不了，原因不是它坏了：")
+        print(exc)
+        print("=" * 70)
+        raise SystemExit(3)

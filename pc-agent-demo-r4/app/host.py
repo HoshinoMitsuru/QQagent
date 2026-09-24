@@ -366,9 +366,40 @@ def describe() -> dict:
     }
 
 
-# ============================================================ 抓图（派宿主进程进那张桌面）
+# ============================================================ 派子进程
 #: 宿主进程的产出文件。壳读它，才知道隐藏桌面上到底发生了什么。
 GRAB_JSON = os.path.join(paths.STATE_DIR, "host-grab.json")
+
+#: 模块名 → 冻结后的子命令。R4 的两个角色都是包内模块，不能靠 `-m`。
+_FROZEN_SUBCMD = {
+    "app.hostagent": "--run-hostagent",
+    "app.hostd": "--run-hostd",
+}
+
+
+def child_args(module: str) -> list[str]:
+    """
+    组装「让本程序再跑一个自己」时该用的参数前缀。
+
+    ## 为什么不能一律用 `-m`
+
+    源码模式：`python -m app.hostagent` 最直接，`sys.executable` 就是解释器。
+    冻结之后 `sys.executable` 是 **exe 自己**，而 exe 不认识 `-m` ——
+    必须换成 exe 自己的子命令（`--run-hostagent` / `--run-hostd`），
+    再由 `app/main.py` 转发回同一份代码。
+
+    这是打包版最容易漏的一环：**源码下一切正常，exe 里报的却是一句
+    「无法识别的参数」**，然后人会去查 QQ 路径。所以这里把两种形态收在同一个
+    函数里，谁新增一个宿主角色都只改这一处（`_FROZEN_SUBCMD` 也一起加）。
+    """
+    if getattr(sys, "frozen", False):
+        cmd = _FROZEN_SUBCMD.get(module)
+        if not cmd:
+            # 没登记就按约定推一个 —— 与其静默用 `-m`（必然失败），
+            # 不如让失败信息直接指出「这里漏登记了」。
+            cmd = "--run-" + module.split(".")[-1]
+        return [cmd]
+    return ["-m", module]
 
 
 def grab(png_path: str = "", desktop_name: str = "", *, wait: float = 0.0,
@@ -392,9 +423,9 @@ def grab(png_path: str = "", desktop_name: str = "", *, wait: float = 0.0,
 
     走文件不走 stdout：`CreateProcessW` 没接管管道（见 desktop.spawn 的说明）。
 
-    ⚠️ 冻结成 exe 后 `sys.executable` 是 exe 自己，接不了 `-m app.hostagent`。
-    那里显式报错而不是静默失败 —— 打包时要把宿主做成 exe 的子命令，
-    在那之前这条只在源码运行下可用。
+    冻结成 exe 后 `sys.executable` 是 exe 自己，接不了 `-m app.hostagent` ——
+    这一点由 `child_args()` 统一处理（换成 `--run-hostagent`），
+    调用方不需要关心当前是源码还是打包。
     """
     out = {"ok": False, "desktop": desktop_name or desktop.DEFAULT_NAME,
            "json": GRAB_JSON, "png": "", "error": ""}
@@ -402,14 +433,10 @@ def grab(png_path: str = "", desktop_name: str = "", *, wait: float = 0.0,
     if not desktop.exists(name):
         out["error"] = (f"E-DESK-001 桌面 {name} 不存在（QQ 没起在上面，或上次已退出）")
         return out
-    if getattr(sys, "frozen", False):
-        out["error"] = ("打包版还没接宿主：sys.executable 是 exe 自身，"
-                        "不能用 -m 启动 app.hostagent。请先用源码运行验证这条链路。")
-        return out
 
-    png = png_path or os.path.join(paths.STATE_DIR, "desktop-shot.png")
+    png = png_path or SHOT_PNG
     out["png"] = png
-    args = ["-m", "app.hostagent", "--out", GRAB_JSON, "--png", png]
+    args = child_args("app.hostagent") + ["--out", GRAB_JSON, "--png", png]
     if uia:
         args.append("--uia")
     if tree_path:
@@ -596,11 +623,6 @@ def start_daemon(*, desktop_name: str = "", profile: str = "", qq_exe: str = "",
     """
     out = {"ok": False, "pid": 0, "desktop": "", "profile": "", "args": [],
            "error": ""}
-    if getattr(sys, "frozen", False):
-        out["error"] = ("打包版还没接宿主：sys.executable 是 exe 自身，"
-                        "不能用 -m 启动 app.hostd。请先用源码运行验证这条链路。")
-        return out
-
     st = daemon_status()
     if st["running"]:
         out["error"] = f"E-PROC-001 常驻宿主已经在运行（pid {st['pid']}，已运行 {st['uptime']}s）"
@@ -624,7 +646,7 @@ def start_daemon(*, desktop_name: str = "", profile: str = "", qq_exe: str = "",
         except Exception:
             pass
 
-    args = ["-m", "app.hostd", "--desktop", name]
+    args = child_args("app.hostd") + ["--desktop", name]
     if profile:
         args += ["--profile", profile]
     if qq_exe:

@@ -127,9 +127,29 @@ def build_ico(path: str) -> str:
     return path
 
 
-if __name__ == "__main__":
+def project_root() -> str:
+    """
+    找到「含有 app/ 的那一层」，也就是仓库根。
+
+    ## 为什么要找，而不是直接拼 `__file__` 的上级
+
+    这个脚本原先在仓库根，产出写成 `<自己所在目录>/app/assets/qq-agent.ico` 是对的。
+    后来它被收进了 `archive/`（探针与构建辅助统一归档），那句拼法就变成了
+    `<根>/archive/app/assets/…` —— 图标照样生成成功、退出码照样是 0，
+    只是**生成到了一个没人看的地方**，而 build.bat 里 `if exist 图标` 那一句
+    因为找不到文件会静默降级（不带图标继续构建）。这种「成功但没生效」最难查。
+
+    所以改成往上找一层：谁含有 `app/`，谁就是根。这样脚本放在根或 archive/ 都对。
+    """
     here = os.path.dirname(os.path.abspath(__file__))
-    target = os.path.join(here, "app", "assets", "qq-agent.ico")
+    for cand in (here, os.path.dirname(here)):
+        if os.path.isdir(os.path.join(cand, "app")):
+            return cand
+    return os.path.dirname(here)
+
+
+if __name__ == "__main__":
+    target = os.path.join(project_root(), "app", "assets", "qq-agent.ico")
     build_ico(target)
     print(f"已生成图标：{target}（{os.path.getsize(target)} 字节，"
           f"{len(SIZES)} 个尺寸：{', '.join(map(str, SIZES))}）")

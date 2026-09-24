@@ -43,6 +43,16 @@ hiddenimports = [
     "app.main", "app.server", "app.supervisor", "app.qqctl", "app.settings",
     "app.tray", "app.platform_win", "app.logbus", "app.paths", "app.runtime",
     "app.errors", "app.diagnose",
+    # ---- R4（独立桌面托管）专有 ----
+    # 这四个**必须显式列**，因为它们没有任何静态 import 能指向它们：
+    #   app.host     server 有 import，写上只是求稳
+    #   app.hostd    只由 app/host.py 以**子命令**方式拉起，静态分析看不到
+    #   app.hostagent 同上（由 host.grab / hostd 拉起）
+    #   app.logtail  main.run_ui 里 import，能自动找到；列出来是防止将来挪位置
+    # 漏掉的症状非常典型：源码模式全绿，exe 里点「抓一张画面」报
+    # ModuleNotFoundError: No module named 'app.hostagent'。
+    "app.host", "app.hostd", "app.hostagent", "app.logtail",
+    "app.desktop", "app.winmsg",
     # 错误码目录：agent 与 app 共用同一份。虽然两边都是静态 import（能被自动分析到），
     # 还是显式列出来 —— 它一旦漏掉，整个「带码报错」的能力会静默退化成裸异常。
     "error_codes",

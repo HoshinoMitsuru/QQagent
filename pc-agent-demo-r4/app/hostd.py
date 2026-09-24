@@ -479,7 +479,11 @@ def _run_agent(dry_run: bool, no_send: bool) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="python -m app.hostd",
+    # prog 要跟着形态走：冻结后 `--help` 里写「python -m app.hostd」会把人
+    # 引到一个在这台机器上根本不存在的命令上。
+    prog = ("qq-agent.exe --run-hostd" if getattr(sys, "frozen", False)
+            else "python -m app.hostd")
+    ap = argparse.ArgumentParser(prog=prog,
                                  description="隐藏桌面上的常驻宿主进程")
     ap.add_argument("--desktop", default=desktop.DEFAULT_NAME,
                     help="要驻守的桌面名（进程本身也应被启动到这张桌上）")

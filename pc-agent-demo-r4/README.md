@@ -27,6 +27,7 @@
 | `app/logtail.py` —— 把宿主的日志接进界面（宿主没有 stdout 管道） | ✅ 已落地 |
 | **控制台里的「隐藏桌面」面板**（状态 / 阶段 / 登录态 / 抓图 / 启停） | ✅ 已落地，接口 23 项全通过 |
 | `error_codes.py` 的 `E-QQ-008`（停在会话列表页，没打开任何会话） | ✅ 新增（把一条会误导人的 E-QQ-004 拆开了） |
+| **打包 exe**（`build.bat` → `dist\qq-agent.exe`，含 R4 的两个宿主子模式） | ✅ 已构建，`test_exe.py` 52 项全通过 |
 | V1 的附着逻辑（`agent.py` 里的前台/剪贴板链路） | ⚠️ 原样保留，**尚未替换** |
 | V1 的 VM 专用文档（`跨终端部署与操作手册.md` 等） | ⚠️ 原样保留，V2 不适用 |
 
@@ -180,6 +181,74 @@ SEND  → 'Psyche-嗅尘紫蝶'(QQ 3302676083) (｡･ω･｡) 收到啦～你�
 **关于心跳的一个细节**：看门线程必须**在启动期就起来**。等 QQ 画出窗口、等登录这段时间
 本来就可能几十秒，而它同时承担「写心跳」和「响应停止哨兵」——
 晚起的话界面在这段时间显示「心跳停更」（误判成卡死），按「停止」也没人接。
+
+## 打包成 exe
+
+```bat
+build.bat              :: dist\qq-agent.exe                 默认交付版（申请管理员）
+build.bat nadmin       :: dist\qq-agent-noadmin.exe         免 UAC（自动化测试用它）
+build.bat console      :: dist\qq-agent-console.exe         排错用，保留控制台
+build.bat dir          :: dist\qq-agent\                    目录版，启动快
+```
+
+R4 在打包上比 V1 多三件事，都是**源码模式永远正常、只在 exe 上暴露**的那一类：
+
+| 事 | 为什么 | 做法 |
+| --- | --- | --- |
+| **两个宿主角色要能由 exe 自己扮演** | `host.py` 是用 `lpDesktop` 把宿主丢进隐藏桌面的，源码下写 `python -m app.hostagent`；冻结后 `sys.executable` 是 exe 自己，**它不认识 `-m`** | 新增子命令 `--run-hostagent` / `--run-hostd`，由 `app/main.py` 转发；两种形态收在 `host.child_args()` 一处 |
+| **`app.hostd` / `app.hostagent` 必须进 `hiddenimports`** | 它们**没有任何静态 import 指向**它们（只被子命令拉起），PyInstaller 静态分析看不到 | 写进 `qq-agent.spec` 的 `hiddenimports`；漏掉的症状是「抓一张画面」报 `ModuleNotFoundError: No module named 'app.hostagent'` |
+| **变体产物名要自动决定** | spec 里 exe 名固定是 `qq-agent`，所以三种变体原本会**互相覆盖**，只能手工改名 | `build.bat` 按开关把产物重命名为 `-nadmin` / `-console` / `-nadmin-console` |
+
+顺带修掉的两个老毛病：
+
+* **`build.bat` 里图标那一步一直是坏的**：它调 `build_icon.py`，而那个脚本早已被收进
+  `archive/`，于是 `goto :fail`。现在路径写对，并且**产出缺失就报错**（原来是静默降级成不带图标的 exe）。
+  `archive/build_icon.py` 同时改成自己往上找「含有 `app/` 的那一层」作为项目根，
+  放哪一层都不会再把图标生成到没人在意的位置。
+* **文档写 `build.bat nadmin`、解析器只认 `noadmin`**：照文档敲的人会得到一个
+  「构建成功但清单不对」的 exe，然后第一次启动撞上 `WinError 740`。
+  现在两种拼写都收。
+
+### 打包产物的验收
+
+```bat
+python test_exe.py dist\qq-agent-noadmin.exe     # 52 项
+```
+
+测的是**真的 exe**（拷到干净临时目录、像用户那样跑起来、再用 HTTP 打它的接口）。
+为什么必须用免 UAC 变体：默认版带 `requireAdministrator` 清单，而
+**`CreateProcess` 不会弹 UAC** —— 从非提升的终端启动它只会得到 `WinError 740`。
+`test_exe.py` 现在会把这种情况翻译成一段可照做的说明，而不是甩一段回溯。
+
+R4 专有的验收项：`--help` 里列出两个宿主子模式、两个子模式各自可执行
+（验的是「有没有真的打进 exe」）、`/api/host/status` 与 `/api/host/shot` 可访问
+且未运行宿主时给的是「未运行」而不是报错。
+
+### 打包版真能进隐藏桌面吗：`archive/probe_exe_hidden_desktop.py`
+
+`test_exe.py` 只验到「`/api/host/status` 通」，那只能证明模块被打进包里。
+**真正容易在打包时才炸的是下一步** —— `desktop.spawn(sys.executable, child_args(...))`。
+所以另有一个探针把整条链路走完（14 项，全通过）：
+
+```
+起 exe（--safe）→ POST /api/host/start {no_agent} → 等心跳
+  → 核对自报桌面 / 认领到 QQ / 日志进了总线
+  → POST /api/host/grab → 取回图片（核对格式与 Content-Type）
+  → POST /api/host/stop → 确认进程退出
+```
+
+用 `--no-agent`：只验「宿主能不能被拉起来」，**不读上下文、不发消息**。
+
+### 打包版的图片是 BMP，不是 PNG
+
+`winmsg.grab_any` 优先写 PNG，**没有 Pillow 时退成 BMP**，而 `qq-agent.spec` 刻意排除了
+PIL —— 所以源码模式落 `desktop-shot.png`（55 KB），打包版落 `desktop-shot.bmp`（2.5 MB）。
+浏览器两者都能显示，所以这不是缺陷，但**服务端不能假定后缀**：
+
+> 第一版 `/api/host/shot.png` 死找 `.png`，于是在 exe 里「抓一张画面」**永远 404**
+> —— 明明图早就抓到了。现在改成**问上一次抓图结果要文件名**（`server._shot_path()`），
+> 按真实后缀给 MIME，白名单限定 `.png/.bmp/.jpg/.jpeg/.gif`。
+> 这类「源码正常、打包才坏」的问题只有跑真 exe 才发现，所以那道验收不能省。
 
 ## 范围
 

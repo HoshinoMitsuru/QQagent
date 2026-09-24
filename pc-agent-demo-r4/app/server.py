@@ -209,9 +209,39 @@ def _hidden_desktop(app: dict) -> str:
     return str((app or {}).get("hidden_desktop") or "").strip() or desktop.DEFAULT_NAME
 
 
-#: 抓图落盘位置。定义在 `host` 里 —— 宿主做免扫码登录时的探测也落同一个文件，
+#: 抓图**请求**的落盘位置。定义在 `host` 里 —— 宿主做免扫码登录时的探测也落同一个文件，
 #: 两处各写一份文件名迟早会漂移（那时界面会显示一张永远不更新的旧图）。
+#:
+#: ⚠️ 这只是「想要的路径」，**不等于最终文件名**：没有 Pillow 时 `winmsg.grab_any`
+#: 会把后缀换成 `.bmp`（打包版就是这样，因为 spec 排除了 PIL）。
+#: 要发图请用 `_shot_path()` 去问上一次抓图的结果。
 SHOT_PNG = host.SHOT_PNG
+
+#: 允许被发出去的图片后缀 → MIME。白名单而不是「按后缀猜」：
+#: 这条路由的输入来自磁盘上的一个文件路径，任何一条能读任意文件的路径都是漏洞。
+SHOT_MIME = {".png": "image/png", ".bmp": "image/bmp",
+             ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}
+
+
+def _shot_path() -> str:
+    """
+    上一次抓图**实际**写出来的那个文件；没有就返回空串。
+
+    判据分三层，缺一不可：
+      1. 抓图结果里记了 `saved.path`（hostagent 写进 host-grab.json 的）
+      2. 那个文件现在还在（别发一个已经不存在的路径）
+      3. 后缀在 `SHOT_MIME` 白名单里（同时也是「路径没有跑到别处去」的一道闸）
+    """
+    try:
+        saved = (host.last_grab() or {}).get("saved") or {}
+        p = str(saved.get("path") or "")
+    except Exception:
+        return ""
+    if not p or not os.path.isfile(p):
+        return ""
+    if os.path.splitext(p)[1].lower() not in SHOT_MIME:
+        return ""
+    return p
 
 
 # ============================================================ 请求处理
@@ -272,27 +302,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def _shot(self):
         """
-        把上一次抓到的隐藏桌面画面发出去（固定文件，不接受路径参数）。
+        把上一次抓到的隐藏桌面画面发出去。
 
-        为什么要一个专门的路由而不是复用 `_file()`：`_file()` 的根目录是
-        `app/web/`，而截图落在数据目录的 `state/` 里 —— 两者不在同一棵树。
-        与其把 web 目录的边界放宽（那正是目录穿越开始的地方），
-        不如让这条路由只认死一个文件名。
+        ## 为什么要一个专门的路由
+
+        `_file()` 的根目录是 `app/web/`，而截图落在数据目录的 `state/` 里 ——
+        两者不在同一棵树。与其把 web 目录的边界放宽（那正是目录穿越开始的地方），
+        不如让这条路由只认**上一次抓图结果里记下的那一个文件**。
+
+        ## ⚠️ 为什么不能假定它是 `.png`（打包版踩过）
+
+        抓图优先写 PNG，但**没有 Pillow 时会退成 BMP**（`winmsg.grab_any`）。
+        而 `qq-agent.spec` 刻意排除了 PIL —— 于是：
+
+            源码模式：Pillow 在 → 落 `desktop-shot.png` → 界面正常
+            打包版：  Pillow 被排除 → 落 `desktop-shot.bmp` → 这条路由死找 .png
+                      → 界面永远 404，「抓一张画面」看着像坏了（其实图早就抓到了）
+
+        所以正确做法是：**问上一次抓图的结果要文件名**，并按真实后缀给 MIME。
+        这也顺手让「以后换成 jpg/webp」不需要再改这里。
         """
-        if not os.path.isfile(SHOT_PNG):
+        path = _shot_path()
+        if not path:
             return self._json(E.envelope(
                 "E-PATH-002", "还没有抓过隐藏桌面的画面",
-                {"动作": "点面板上的「抓一张现在的画面」"}), 404)
+                {"动作": "点面板上的「抓一张现在的画面」",
+                 "预期产出": SHOT_PNG + "（没有 Pillow 时会退成 .bmp）"}), 404)
         try:
-            with open(SHOT_PNG, "rb") as f:
+            with open(path, "rb") as f:
                 data = f.read()
         except Exception as exc:
             return self._json(E.from_exception(exc, "E-PATH-001",
-                                               {"文件": SHOT_PNG}), 500)
+                                               {"文件": path}), 500)
+        ext = os.path.splitext(path)[1].lower()
         self._responded = True
         try:
             self.send_response(200)
-            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Type", SHOT_MIME.get(ext, "application/octet-stream"))
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -409,8 +455,11 @@ class Handler(BaseHTTPRequestHandler):
                                "last_grab": host.last_grab(),
                                "desktop_default": desktop.DEFAULT_NAME,
                                "desktop_exists": desktop.exists(_hidden_desktop(app)),
-                               "desktop_target": _hidden_desktop(app)})
-        if route == "/api/host/shot.png":
+                               "desktop_target": _hidden_desktop(app),
+                               "shot_path": _shot_path()})
+        # `/api/host/shot.png` 作为别名保留：界面和 bookmark 都可能还带着它，
+        # 而真正会变的是后缀（打包版落 .bmp），所以不给它另开一条语义。
+        if route in ("/api/host/shot", "/api/host/shot.png"):
             return self._shot()
         if route == "/api/errors":
             # 错误码目录（界面上的「错误码速查」用它）

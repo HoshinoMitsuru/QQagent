@@ -27,6 +27,8 @@
 | `u1_prod.py` | **agent.py 自己的命令行入口**搬到隐藏桌面上能不能跑完整一轮？ | ✅ 通。做法是把 `sys.argv` 改写成 agent 看到的样子再调 `A.main()`（复刻会漂移）；stdout 用 `redirect_stdout` 收进 JSON |
 | `probe_hostd_bisect.py` | 宿主进程里 UIA 读不到树，**是哪一步造成的**？ | **最简档位就复现** —— 与「Tee / 接管桌面句柄 / 认领进程 / 派子进程」全无关。同一个进程里手工遍历能读到 143 节点、`ControlFromHandle(hwnd).Name == 'QQ'`，而 `_scan_anchors()` 命中 **0 个锚点** → 真因是「**没打开任何会话**」，不是 COM/权限。每个档位必须**独立进程**（UIA 状态在同进程里会粘） |
 | `probe_host_panel.py` | 控制台「隐藏桌面」面板的接口真的通吗？ | ✅ 23 项全通过。**其中一条专门盯「不许用断连当报错」** —— GET 分支原先没有统一信封，某个路由里写错一个名字就表现成 `RemoteDisconnected` |
+| `probe_exe_hidden_desktop.py` | **打包版**能不能真的把宿主丢进隐藏桌面？ | ✅ 14 项全通过。`test_exe.py` 只验到「接口通」，而真正会炸的是下一步 `desktop.spawn(sys.executable, child_args(...))` —— 冻结后 exe 不认识 `-m app.hostd`。顺带抓到「打包版的图是 BMP 不是 PNG」这个只有真 exe 才暴露的问题 |
+| `build_icon.py` | 生成 exe 与托盘用的 .ico | 不引 Pillow，自己写 ICO（4 倍超采样再降采样）。⚠️ 它被收进 `archive/` 之后，`build.bat` 里那句 `build_icon.py` 就失效了（`goto :fail`），而目录改成「自己往上找含有 `app/` 的那一层」才不会再生成到没人在意的位置 |
 
 ### 为什么要用测试页而不是直接测 QQ
 

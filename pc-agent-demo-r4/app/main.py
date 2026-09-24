@@ -4,14 +4,21 @@ main.py —— 双模式入口
 
 同一个可执行文件，靠第一个参数决定自己是谁：
 
-    qq-agent.exe                  壳模式：起 WebUI、开托盘、拉起 QQ、按需启动常驻
-    qq-agent.exe --run-agent ...  把自己当 agent.py 跑（由壳以子进程方式调用）
-    qq-agent.exe --run-qqid  ...  把自己当 qqid.py 跑
+    qq-agent.exe                     壳模式：起 WebUI、开托盘、拉起 QQ、按需启动常驻
+    qq-agent.exe --run-agent ...     把自己当 agent.py 跑（由壳以子进程方式调用）
+    qq-agent.exe --run-qqid  ...     把自己当 qqid.py 跑
+    qq-agent.exe --run-hostagent ... 把自己当 app.hostagent 跑（R4：进隐藏桌面抓图/读界面/点登录）
+    qq-agent.exe --run-hostd ...     把自己当 app.hostd 跑（R4：隐藏桌面上的常驻宿主）
 
 **为什么必须共用同一个 exe**：冻结之后只有一个可执行文件。如果壳去调用
 「系统里的 python」，那台机器上就必须先装 Python 和一堆依赖，整个「拷过去就能用」
 的前提就没了。共用 exe 还有一个附带好处 —— 界面里跑的和命令行里跑的**必然是同一份代码**，
 不会出现「界面上能跑、命令行里不行」这种漂移。
+
+`--run-hostagent` / `--run-hostd` 是 R4 专有的，而且**只能这么走**：
+源码模式下 `app.host.py` 是用 `python -m app.hostagent` 把宿主丢进隐藏桌面的，
+而冻结之后 `sys.executable` 就是 exe 自己，它**不接受 `-m`** ——
+必须换成 exe 自己的子命令，再由这里转发（见 `app/host.py` 的 `child_args()`）。
 """
 
 from __future__ import annotations
@@ -60,10 +67,13 @@ def _ensure_root_on_path() -> None:
 # ============================================================ 子模式
 def run_script(module_name: str, args: list[str]) -> int:
     """
-    把自己当成 `agent.py` / `qqid.py` 来跑。
+    把自己当成 `agent.py` / `qqid.py` / `app.hostagent` / `app.hostd` 来跑。
 
     `sys.argv` 要重写成脚本的形态 —— 它们用的是 argparse，读的就是 sys.argv[1:]，
     而且 prog 名会出现在 `--help` 里，写成 exe 名会让帮助信息对不上文档。
+
+    `module_name` 支持点分路径（`app.hostd`）—— importlib 直接吃，
+    这对 R4 的两个宿主子模式是必需的：它们是包内模块，不是仓库根下的脚本。
     """
     _ensure_root_on_path()
     sys.argv = [f"{module_name}.py", *args]
@@ -474,6 +484,12 @@ def main() -> int:
             return run_script("agent", argv[1:])
         if head == "--run-qqid":
             return run_script("qqid", argv[1:])
+        # R4：隐藏桌面上的两个角色。它们由 app/host.py 用 lpDesktop 丢过去，
+        # 冻结后只能靠这两个子命令回到同一份代码（见 run_script 的说明）。
+        if head == "--run-hostagent":
+            return run_script("app.hostagent", argv[1:])
+        if head == "--run-hostd":
+            return run_script("app.hostd", argv[1:])
         if head == "--safe":
             return run_ui(safe=True)
         if head == "--takeover":
@@ -495,6 +511,8 @@ def main() -> int:
             print("  qq-agent.exe --safe         安全启动：不自动拉起 QQ / 不开托盘 / 不开浏览器")
             print("  qq-agent.exe --run-agent X  以 agent.py 的身份运行 X（内部使用）")
             print("  qq-agent.exe --run-qqid X   以 qqid.py 的身份运行 X（内部使用）")
+            print("  qq-agent.exe --run-hostagent X  R4 宿主：进隐藏桌面抓图/读界面/点登录（内部使用）")
+            print("  qq-agent.exe --run-hostd X      R4 宿主：隐藏桌面上的常驻进程（内部使用）")
             print("  qq-agent.exe --version      显示版本")
             print("\n所有 agent.py 的命令行参数都可以直接透传，例如：")
             print("  qq-agent.exe --run-agent --selftest")

@@ -969,13 +969,18 @@ function renderHost(s) {
   html += `<div class="stat" style="margin-top:14px">
     <div class="k">那张桌面上现在是什么样</div>`;
   if (saved.ok && saved.path) {
+    // 后缀要照实显示：打包版没有 Pillow，落的是 .bmp（约 2.5MB）。
+    // 写死「.png」会让人以为文件没生成，去磁盘上找错名字。
+    const fname = String(saved.path).split(/[\\/]/).pop();
     html += `<div style="margin-top:8px">
-      <img id="hostShot" src="/api/host/shot.png?t=${encodeURIComponent(TOKEN)}&v=${HOST_SHOT_V}"
+      <img id="hostShot" src="/api/host/shot?t=${encodeURIComponent(TOKEN)}&v=${HOST_SHOT_V}"
            alt="隐藏桌面画面" style="max-width:100%;border:1px solid var(--border-strong);border-radius:var(--r-sm)">
       <div style="font-size:11.5px;color:var(--faint);margin-top:6px">
         抓于 ${esc(g.at || "?")}　${cap.w || "?"}×${cap.h || "?"}　
         颜色种类 ${cap.distinct_colors ?? "?"}　平均亮度 ${cap.mean_luma ?? "?"}
         ${cap.nonblack_ratio != null ? `　非黑占比 ${cap.nonblack_ratio}` : ""}
+        <br>${esc(fname)}（${saved.bytes ?? "?"} 字节）
+        ${fname.endsWith(".bmp") ? "　—— 这个版本没有 Pillow，所以存成了 BMP；浏览器照样能看" : ""}
       </div>`;
     if (!cap.distinct_colors || cap.distinct_colors <= 1) {
       html += `<div style="font-size:11.5px;color:var(--warn);margin-top:4px">

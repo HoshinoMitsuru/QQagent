@@ -86,6 +86,16 @@
   ⚠️ 其中 `cdp_probe.py` 的「已探通」在当前 QQ 版本**不再成立**（QQ 丢弃了调试端口）。
 - 构建：`build.bat` → `qq-agent.spec` → `dist/qq-agent.exe`（onefile + windowed + uac_admin）。
   三个变体：admin / `qq-agent-noadmin.exe`（免 UAC）/ `qq-agent-console.exe`（诊断版）。
+  **开关名 `nadmin`（也接受 `noadmin`）**，产物名由 build.bat 自动决定，不再互相覆盖。
+- **打包的两条铁律**（都是踩出来的）：
+  ① **冻结后 `sys.executable` 是 exe 自己，不接受 `-m`** —— 任何「让程序再跑一个自己」
+     的地方都要走子命令（`--run-agent/--run-qqid/--run-hostagent/--run-hostd`），
+     V2 里统一收在 `host.child_args()`；只被动态拉起的模块必须写进 spec 的 hiddenimports。
+  ② **打包版没有 Pillow**（spec 刻意排除）→ `winmsg.grab_any` 落的是 `.bmp` 不是 `.png`。
+     服务端不能假定后缀，要问抓图结果要文件名（`server._shot_path()`）。
+- **验收顺序**：`test_exe.py`（真 exe，**必须用 `-noadmin` 变体**，默认版带
+  requireAdministrator 清单而 CreateProcess 不弹 UAC → `WinError 740`）
+  → `archive/probe_exe_hidden_desktop.py`（打包版真能进隐藏桌面，14 项）。
 - 测试：`test_errors.py`(252)、`test_ui.py`(104)、`test_text_port.py`(104)、
   `test_discovery.py`(43)、`reply_queue.py --selftest`(68)、`test_exe.py`(45)；
   另有 3 套真机测试 `test_live_chain` / `test_pipeline` / `test_send_guard`。

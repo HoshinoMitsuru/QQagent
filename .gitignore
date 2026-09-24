@@ -42,3 +42,7 @@ pc-agent-demo*/config.backup-*.json
 
 # 手机端阅读用临时 txt 副本（源文件为同名 .js）
 小清澈3.0.txt
+
+# .workbuddy/tmp/ 是「一次性排查脚本」的暂存区，不属于项目资产。
+# 与它相对，.workbuddy/memory/ 是要入库的（项目日志与长期笔记）。
+/.workbuddy/tmp/

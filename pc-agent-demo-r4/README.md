@@ -182,6 +182,26 @@ SEND  → 'Psyche-嗅尘紫蝶'(QQ 3302676083) (｡･ω･｡) 收到啦～你�
 本来就可能几十秒，而它同时承担「写心跳」和「响应停止哨兵」——
 晚起的话界面在这段时间显示「心跳停更」（误判成卡死），按「停止」也没人接。
 
+### 怎么操作（三种方式，从省事到麻烦）
+
+| 方式 | 怎么做 | 适合 |
+| --- | --- | --- |
+| **界面**（推荐） | 双击 `dist\qq-agent.exe` → 浏览器里那张「隐藏桌面（独立 profile）」卡片上的按钮 | 所有人。启动 / 只读 / 只摆 QQ / 停止 / 抓图都在上面 |
+| **`hostctl.bat`** | 双击它，或 `hostctl status` / `start` / `stop` / `stop-qq` / `log` / `open` | 想用命令行但不想记 python 路径 —— 它自己 cd、自己挑一份装了依赖的 python |
+| 手敲 `python -m app.host ...` | **必须先 `cd` 到本目录**，并且要用**装了依赖的那份 python**（系统 python 会 `ModuleNotFoundError`） | 调试 / 脚本化 |
+
+`python -m app.host` 那两条坑不是小事：`-m app.host` 是从**当前目录**解析 `app` 包的，
+而 `where python` 找到的第一个解释器通常没装 `uiautomation` / `comtypes`。
+所以命令行用法请优先走 `hostctl.bat`。
+
+⚠️ 两个 `.bat`（`hostctl.bat` / `run_ui.bat`）**必须保持纯 ASCII**。
+`cmd` 按 OEM 代码页读 `.bat`，UTF-8 中文会在**行尾吞掉 CR** 让两行粘连，
+`rem` 前缀一起被吃掉之后 —— 实测**注释里的 `pip install -r requirements.txt` 真的被执行了**。
+中文提示一律交给 python 侧输出（它自己管编码）。
+同理，`if ... (` 块里的 `echo` 文本**不能出现未转义的 `)`** ——
+那会提前闭合代码块，把块内的语句变成无条件执行（`hostctl.bat` 第一版就这么静默失效的：
+脚本一声不响退出，输出为空）。
+
 ## 打包成 exe
 
 ```bat

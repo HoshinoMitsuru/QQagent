@@ -1510,6 +1510,11 @@ CLS_AVATAR = "avatar-span"
 CLS_TIMESTAMP = "message__timestamp"
 CLS_USERNAME = "user-name"
 
+#: 输入框为空时 QQ 显示的占位提示。**它不是内容** ——
+#: 判「输入框是不是空的」必须把它算进去，否则空框会被当成「有字」，
+#: 于是回读校验一直认为「上一轮的字还在」，把真正的原因盖掉。
+EDITOR_PLACEHOLDER = "按住 Win + Alt"
+
 SKIP_TYPES = {"ScrollBarControl", "ThumbControl", "TitleBarControl"}
 SCAN_MAX_DEPTH = 24
 SCAN_MAX_NODES = 8000
@@ -1911,6 +1916,10 @@ class QQWindow:
         self.fg_before_switch: int = 0
         self.ocr = OcrReader(cfg)
         self._ocr_warned = False
+        #: 上一次写入走的是哪一档（零激活 / focus / focus+渲染层）。
+        #: 诊断报告里要能看见它 —— 「写得进去」和「靠加了多少动作才写进去」
+        #: 是两件事，后者决定这个方案在别的机器上还灵不灵。
+        self.last_write_plan = ""
 
     # ---------------------------------------------------- 附着
     def attach(self) -> bool:
@@ -2374,6 +2383,13 @@ class QQWindow:
              顺手挪走你的光标位置；UIA 的 editor.SetFocus() 已经足够拿到键盘焦点。
              万一某些版本 SetFocus 不够，send_text 里的回读校验会兜住，不会发出错内容。
         """
+        # ---- V2 / V1 的分岔口 ----
+        # clipboard = V1 原路：抢前台 → 剪贴板 → Ctrl+V（服务用户桌面上的 QQ）
+        # wmchar    = V2 新路：窗口消息直投（服务隐藏桌面上的 QQ，见 _type_via_wmchar）
+        # 默认仍是 clipboard，所以 V1 的行为一字未改；V2 由 config.json 显式打开 wmchar。
+        if (self.cfg.get("uia", {}).get("write_mode") or "clipboard").lower() == "wmchar":
+            return self._type_via_wmchar(text)
+
         if self.editor is None:
             self.refresh_layout(force=True)
         if self.editor is None:
@@ -2424,6 +2440,102 @@ class QQWindow:
         finally:
             self._release_foreground(prev_fg)   # 无论成功失败，都把焦点还回去
             self.fg_before_switch = 0           # 用掉了，下次由新的切会话重新记
+
+    # ---------------------------------------------------- V2 写入路径（窗口消息）
+    def _editor_is_empty(self) -> bool:
+        """输入框是不是空的。**占位提示算空**（见 EDITOR_PLACEHOLDER 的说明）。"""
+        t = self.editor_text() or ""
+        return (not t.strip()) or (EDITOR_PLACEHOLDER in t)
+
+    def _clear_editor_wmchar(self, top: int, max_presses: int = 80) -> bool:
+        """
+        逐字 Backspace 清空输入框（窗口消息版）。
+
+        ## 为什么不用现成的 `clear_editor()`
+
+        它靠 `auto.SendKeys("{Ctrl}a")` / `"{Delete}"` —— 那条路最终是
+        `SendInput` → **OS 输入队列**，而输入队列只服务「当前 input desktop 的前台窗口」。
+        隐藏桌面投不进去；用户桌面会打给当时真正前台的**别人的程序**（等于帮别人删东西）。
+
+        而且 U2 实测过一个反直觉的点：**就算把 `Ctrl+A → Backspace` 改成窗口消息发，
+        QQ 的 ProseMirror 也只删掉 1 个字**。逐字退格是唯一清干净的办法。
+
+        ⚠️ 只在**确实有内容**时才退。空输入框直接返回 True，不做任何动作。
+        """
+        from app import winmsg as W
+        for _ in range(max_presses):
+            if self._editor_is_empty():
+                return True
+            W.send_vk(top, 0x08)          # VK_BACK
+        return self._editor_is_empty()
+
+    def _type_via_wmchar(self, text: str) -> bool:
+        """
+        V2 的写入路径：**窗口消息投 `WM_CHAR`**，不经 OS 输入队列。
+
+        ## 为什么非换不可
+
+        原路（剪贴板 + `SendKeys("{Ctrl}v")`）的终点是输入队列：
+          · 在隐藏桌面上投不进去 —— 那张桌面上根本没有「前台窗口」可言；
+          · 在用户桌面上会打进**当时真正前台的那个程序** —— 帮别人粘一段东西。
+        「抢前台」这种补救在隐藏桌面上也不成立（`SetForegroundWindow` 恒失败）。
+
+        ## 三档阶梯（实测：隐藏桌面第 1 档就成）
+
+            1  零激活     直接向顶层窗口投递
+            2  focus      `focus_steps` 后投顶层
+            3  focus+渲染层  投 `Chrome_RenderWidgetHostHWND`
+
+        为什么从最简的开始试：那张桌面上 QQ 是唯一窗口，Chromium 一上来就自认
+        active，所以通常连 `SetFocus` 都不必调。每档写完都**回读验证**才停 ——
+        `SendMessageTimeout` 返回非 0 **只代表消息进了队列**，不代表对方处理了。
+        """
+        from app import winmsg as W
+
+        if self.editor is None:
+            self.refresh_layout(force=True)
+        if self.editor is None:
+            report("E-UIA-004", "找不到输入框（ExEditor-qq-msg-editor）",
+                   ctx={"消息列表": self.ml_list is not None,
+                        "窗口可见": _visible(self.win) if self.win else False,
+                        "标题": self.dialog_title or "(无)"})
+            return False
+
+        top = self.hwnd
+        if not top:
+            report("E-UIA-004", "拿不到窗口句柄，没法投递窗口消息",
+                   ctx={"附着状态": self.win is not None})
+            return False
+        kids = W.find_child(top, "Chrome_RenderWidgetHostHWND", visible_only=False)
+        renderer = kids[0] if kids else 0
+
+        # 输入框里有残留时先清掉：否则回读分不清「新写的」和「上一轮的」
+        if not self._editor_is_empty():
+            if not self._clear_editor_wmchar(top):
+                report("E-SEND-003", "输入框里原有的内容清不掉，放弃写入（不覆盖草稿）",
+                       ctx={"残留": (self.editor_text() or "")[:60]})
+                return False
+
+        tried = []
+        for label, do_focus, which in (("零激活", False, 0),
+                                       ("focus", True, 0),
+                                       ("focus+渲染层", True, 1)):
+            if do_focus:
+                W.focus_steps(top, renderer if which else 0)
+            target = (renderer if which else top) or top
+            sent = W.send_text(target, text, mode="char")
+            got = self.editor_text() or ""
+            tried.append({"档位": label, "投递条数": sent.get("delivered"),
+                          "回读": got[:60]})
+            if got.strip() == text.strip():
+                self.last_write_plan = label
+                return True
+            self._clear_editor_wmchar(top)      # 这一档没落地，清干净再试下一档
+
+        report("E-SEND-003", "窗口消息写不进输入框（三档都试过了）",
+               ctx={"尝试": tried, "顶层句柄": top, "渲染层句柄": renderer,
+                    "提示": "确认 QQ 是用 --force-renderer-accessibility 启动的"})
+        return False
 
     def wait_send_enabled(self, timeout: float | None = None) -> bool:
         """

@@ -123,7 +123,9 @@
     "honor_own_outgoing": false
   },
 
+  "_write_mode说明": "V2 的写入路径。clipboard = V1 原路（抢前台 → 剪贴板 → Ctrl+V，服务用户桌面上的 QQ）；wmchar = 窗口消息直投（服务隐藏桌面上的 QQ）。隐藏桌面上 clipboard 必失效：它的终点是 OS 输入队列，而队列只服务当前 input desktop 的前台窗口。实测 wmchar 在隐藏桌面上第一档（零激活）就落地。",
   "uia": {
+    "write_mode": "wmchar",
     "read_chain": ["uia", "ocr"],
     "direction_mode": "auto",
     "ocr_lang": "chi_sim+eng",

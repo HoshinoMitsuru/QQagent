@@ -1128,7 +1128,7 @@ def t16_static_sanity():
                         "import app.main, app.server, app.supervisor, app.qqctl,"
                         " app.settings, app.platform_win, app.diagnose, app.errors,"
                         " app.logbus, app.paths, app.runtime, app.tray,"
-                        " app.desktop, app.winmsg,"
+                        " app.desktop, app.winmsg, app.host,"
                         " error_codes, reply_queue; print('IMPORT_OK')" % HERE],
                        capture_output=True, timeout=120, cwd=HERE,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

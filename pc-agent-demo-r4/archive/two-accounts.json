@@ -1,0 +1,430 @@
+{
+  "generated_at": "2026-09-24 23:37:06",
+  "question": "两个 QQ 实例能否各自读出自己的 QQ 号？",
+  "windows": [
+    {
+      "hwnd": 3870090,
+      "rect": [
+        560,
+        284,
+        2002,
+        1246
+      ],
+      "pid": 22924,
+      "uin_like": [],
+      "qq_text": [],
+      "key_nodes": [
+        {
+          "depth": 14,
+          "type": "ButtonControl",
+          "class": "profile_signature text-ellipsis editable",
+          "aid": "",
+          "name": "个性签名:一声清嗟,点击编辑",
+          "rect": [
+            868,
+            297,
+            953,
+            331
+          ],
+          "vis": true
+        },
+        {
+          "depth": 14,
+          "type": "ButtonControl",
+          "class": "weather-widget user-profile-card__weather q-theme-tokens-light",
+          "aid": "",
+          "name": "天气:雾,点击查看详情",
+          "rect": [
+            1659,
+            290,
+            1738,
+            338
+          ],
+          "vis": true
+        },
+        {
+          "depth": 15,
+          "type": "ButtonControl",
+          "class": "avatar user-avatar user-avatar--clip",
+          "aid": "",
+          "name": "Susurrus-苏霖韵的头像",
+          "rect": [
+            662,
+            296,
+            698,
+            332
+          ],
+          "vis": true
+        },
+        {
+          "depth": 15,
+          "type": "ButtonControl",
+          "class": "icon icon-online avatar__status",
+          "aid": "",
+          "name": "在线状态",
+          "rect": [
+            684,
+            318,
+            700,
+            334
+          ],
+          "vis": true
+        }
+      ],
+      "sessions": [],
+      "scanned": 134
+    },
+    {
+      "hwnd": 15010452,
+      "rect": [
+        540,
+        233,
+        2151,
+        1389
+      ],
+      "pid": 18000,
+      "uin_like": [],
+      "qq_text": [],
+      "key_nodes": [
+        {
+          "depth": 14,
+          "type": "ButtonControl",
+          "class": "profile_signature text-ellipsis editable",
+          "aid": "",
+          "name": "个性签名:句号，于每一个日期的圈点中预示，终莅临于数字外不完美的圆的缺席。,点击编辑",
+          "rect": [
+            852,
+            246,
+            1183,
+            280
+          ],
+          "vis": true
+        },
+        {
+          "depth": 14,
+          "type": "ButtonControl",
+          "class": "weather-widget user-profile-card__weather q-theme-tokens-light",
+          "aid": "",
+          "name": "天气:雾,点击查看详情",
+          "rect": [
+            1807,
+            239,
+            1886,
+            287
+          ],
+          "vis": true
+        },
+        {
+          "depth": 15,
+          "type": "ButtonControl",
+          "class": "avatar user-avatar user-avatar--clip",
+          "aid": "",
+          "name": "Psyche-嗅尘紫蝶的头像",
+          "rect": [
+            642,
+            245,
+            678,
+            281
+          ],
+          "vis": true
+        },
+        {
+          "depth": 15,
+          "type": "ButtonControl",
+          "class": "icon icon-online avatar__status",
+          "aid": "",
+          "name": "在线状态",
+          "rect": [
+            664,
+            267,
+            680,
+            283
+          ],
+          "vis": true
+        },
+        {
+          "depth": 16,
+          "type": "ButtonControl",
+          "class": "chat-header__contact-name",
+          "aid": "",
+          "name": "凡杜林办事处",
+          "rect": [
+            990,
+            317,
+            1196,
+            351
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -2260,
+            1044,
+            -2211
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "西兰花炒蛋",
+          "rect": [
+            996,
+            -1972,
+            1044,
+            -1923
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "东雪莲（莲苞初绽）",
+          "rect": [
+            996,
+            -1717,
+            1044,
+            -1668
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -1597,
+            1044,
+            -1548
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -1417,
+            1044,
+            -1368
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -1297,
+            1044,
+            -1248
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -1177,
+            1044,
+            -1128
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -997,
+            1044,
+            -948
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "东雪莲（莲苞初绽）",
+          "rect": [
+            996,
+            -877,
+            1044,
+            -828
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "古斯塔夫 卡尔",
+          "rect": [
+            996,
+            -757,
+            1044,
+            -708
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "古斯塔夫 卡尔",
+          "rect": [
+            996,
+            -535,
+            1044,
+            -486
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -253,
+            1044,
+            -204
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            -133,
+            1044,
+            -84
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "古斯塔夫 卡尔",
+          "rect": [
+            996,
+            -13,
+            1044,
+            36
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "古斯塔夫 卡尔",
+          "rect": [
+            996,
+            107,
+            1044,
+            156
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "古斯塔夫 卡尔",
+          "rect": [
+            996,
+            227,
+            1044,
+            276
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "东雪莲（莲苞初绽）",
+          "rect": [
+            996,
+            509,
+            1044,
+            558
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            857,
+            1044,
+            906
+          ],
+          "vis": true
+        },
+        {
+          "depth": 22,
+          "type": "GroupControl",
+          "class": "avatar-span",
+          "aid": "",
+          "name": "半精灵法师泽菲尔.伊格温",
+          "rect": [
+            996,
+            977,
+            1044,
+            1026
+          ],
+          "vis": true
+        }
+      ],
+      "sessions": [],
+      "scanned": 760
+    }
+  ]
+}

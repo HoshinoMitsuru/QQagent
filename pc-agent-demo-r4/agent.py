@@ -1510,6 +1510,19 @@ CLS_AVATAR = "avatar-span"
 CLS_TIMESTAMP = "message__timestamp"
 CLS_USERNAME = "user-name"
 
+def _norm_ws(s: str) -> str:
+    """
+    回读校验用的归一化：**换行不算差异**。
+
+    ProseMirror 里换行不产生可见字符 —— 写入 `A\\n\\nB` 之后回读是 `AB`。
+    不归一化的话，一条含换行的回复会被判成「回读与预期不符（E-SEND-003）」，
+    而实际上**字全都写进去了**。这个误判会让明明成功的发送反复重试、最终撤单。
+
+    只剔换行，不剔空格：空格是内容，换行不是。
+    """
+    return re.sub(r"[\r\n]+", "", s or "").strip()
+
+
 #: 输入框为空时 QQ 显示的占位提示。**它不是内容** ——
 #: 判「输入框是不是空的」必须把它算进去，否则空框会被当成「有字」，
 #: 于是回读校验一直认为「上一轮的字还在」，把真正的原因盖掉。
@@ -2516,6 +2529,21 @@ class QQWindow:
                        ctx={"残留": (self.editor_text() or "")[:60]})
                 return False
 
+        # ⚠️ 这一句是这条路径能不能成的**关键**，别删。
+        #
+        # `WM_CHAR` 能不能落地，判据是「编辑器是否处于 ProseMirror-focused」，
+        # 不是「窗口是不是前台」（U2 实测结论）。而焦点会被各种动作弄丢 ——
+        # 最典型的就是**取号**：qqid 会打开资料卡再关掉，窗口焦点来回一换，
+        # 编辑器的 DOM 焦点就没了，之后投多少 WM_CHAR 都会被丢弃
+        # （表现：投递条数 42、回读空，三档全败）。
+        #
+        # `SetFocus` 是**控件级**调用，不走输入队列，隐藏桌面上照样有效。
+        focus_err = ""
+        try:
+            self.editor.SetFocus()
+        except Exception as exc:
+            focus_err = f"{type(exc).__name__}: {exc}"
+
         tried = []
         for label, do_focus, which in (("零激活", False, 0),
                                        ("focus", True, 0),
@@ -2527,14 +2555,16 @@ class QQWindow:
             got = self.editor_text() or ""
             tried.append({"档位": label, "投递条数": sent.get("delivered"),
                           "回读": got[:60]})
-            if got.strip() == text.strip():
+            if _norm_ws(got) == _norm_ws(text):
                 self.last_write_plan = label
                 return True
             self._clear_editor_wmchar(top)      # 这一档没落地，清干净再试下一档
 
         report("E-SEND-003", "窗口消息写不进输入框（三档都试过了）",
                ctx={"尝试": tried, "顶层句柄": top, "渲染层句柄": renderer,
-                    "提示": "确认 QQ 是用 --force-renderer-accessibility 启动的"})
+                    "SetFocus 失败": focus_err or "无",
+                    "提示": "确认 QQ 是用 --force-renderer-accessibility 启动的；"
+                            "若刚做过取号/开关弹窗，编辑器焦点可能已被抢走"})
         return False
 
     def wait_send_enabled(self, timeout: float | None = None) -> bool:
@@ -5178,6 +5208,25 @@ def main() -> int:
         log("INFO", f"本轮入队 {handled} 条")
         agent.flush(force=True)
         agent.serve_queue()
+        # 把这一轮真正结算掉。
+        #
+        # 原来到这里就结束了，而队列项通常**还没到期**（日志停在「还需 2.3s」），
+        # 于是 `--once` 看起来跑通了、其实一条都没发出去 ——
+        # 「只跑一轮」的语义应该是「把这一轮跑完」，不是「入队就走」。
+        # 这里补一个有限等待：队列清空就走，最多等静默窗上限 + 15 秒。
+        #
+        # ⚠️ 判据必须是「队列里还有没有项」，**不能**用 `queue.unsent()`。
+        # `unsent()` 的语义是「已定稿(frozen)待发」，而 `serve_queue` 是两阶段的：
+        # 第一趟只做 prepare（读 + 生成），此时项还没定稿、unsent() 为空 ——
+        # 拿它当条件会让循环一次都不进，表现成「跑通了但一条都没发」。
+        budget = float((cfg.get("queue") or {}).get("max_hold_seconds") or 30.0) + 15.0
+        deadline = time.time() + budget
+        while agent.queue.items and time.time() < deadline:
+            time.sleep(0.5)
+            agent.serve_queue()
+        if agent.queue.items:
+            log("WARN", f"等待 {budget:.0f}s 后队列里仍有 {len(agent.queue.items)} 项"
+                        f"（常驻模式下会继续重试）")
         agent.store.save(force=True)
         print("\n最近 3 条解析结果：")
         for m in agent.qq.read_messages(limit=3):

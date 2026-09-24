@@ -36,27 +36,51 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
+def _mark(path: str, stage: str) -> None:
+    """
+    随时把「走到哪一步了」写进结果文件。
+
+    为什么需要它：`--once`（真发）那次子进程退出码是 2 却**连结果文件都没写出来**，
+    而 `finally` 是一定会跑的 —— 这说明进程死在比 `finally` 更早、且不走
+    Python 异常机制的地方。没有中间标记就只能靠猜；有了标记，死在哪一步一目了然。
+    """
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"stage": stage, "pid": os.getpid()}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--send", default="", help="走 agent.send_once 真发一条（有副作用！）")
     ap.add_argument("--peek", type=int, default=0, help="走 agent.py 的读消息入口")
     ap.add_argument("--sessions", action="store_true", help="列会话列表")
+    ap.add_argument("--args", default="",
+                    help="原样透传给 agent.main() 的参数串，如 \"--once --no-send\"。"
+                         "这是本脚本最有用的开关：agent.py 的任意命令行模式都能被搬到隐藏桌面上跑。")
     a = ap.parse_args()
 
     res: dict = {"ok": False, "error": "", "traceback": ""}
     buf = io.StringIO()
+    _mark(a.out, "start")
     try:
         from app import desktop
         res["desktop"] = desktop.current_name()
         res["pid"] = os.getpid()
+        _mark(a.out, "imported-app")
 
         import agent as A
+        _mark(a.out, "imported-agent")
 
         code = 0
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             cfg = A.load_config()
-            if a.send:
+            if a.args:
+                code = _run_agent_main(a.args)
+            elif a.send:
                 code = A.send_once(cfg, a.send, force=True)
             elif a.peek:
                 code = A.peek(cfg, a.peek) if hasattr(A, "peek") else _peek(cfg, a.peek)
@@ -78,6 +102,26 @@ def main() -> int:
         except Exception:
             pass
     return 0 if res.get("ok") else 1
+
+
+def _run_agent_main(argstr: str) -> int:
+    """
+    把参数串原样喂给 `agent.main()`。
+
+    为什么要绕这一下：`--once` 这类逻辑是**内联在 agent.main() 里的**，
+    外面没有可直接调用的函数。与其在这里复刻一遍（复刻就意味着会漂移），
+    不如把 sys.argv 改成 agent.py 看到的样子，让它自己走完整流程。
+
+    `main()` 用 `raise SystemExit(code)` 结束，所以必须接住它取码。
+    """
+    import shlex
+    import agent as A       # A 是 main() 的局部变量，这里要自己引一次
+    sys.argv = ["agent.py"] + shlex.split(argstr)
+    try:
+        A.main()
+        return 0
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
 
 
 def _sessions(cfg) -> int:

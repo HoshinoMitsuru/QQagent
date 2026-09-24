@@ -115,6 +115,28 @@ _gdi32.GetDIBits.restype = ctypes.c_int
 _dwmapi.DwmGetWindowAttribute.argtypes = [HWND, DWORD, ctypes.c_void_p, DWORD]
 _dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
 
+# 焦点 / 激活这一组。**全部要显式声明 restype** —— 它们返回的都是句柄，
+# 不声明会被 ctypes 当 C int 截断成 32 位，而截断是静默的。
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = HWND
+_user32.SetForegroundWindow.argtypes = [HWND]
+_user32.SetForegroundWindow.restype = BOOL
+_user32.BringWindowToTop.argtypes = [HWND]
+_user32.BringWindowToTop.restype = BOOL
+_user32.AttachThreadInput.argtypes = [DWORD, DWORD, BOOL]
+_user32.AttachThreadInput.restype = BOOL
+_user32.SetActiveWindow.argtypes = [HWND]
+_user32.SetActiveWindow.restype = HWND
+_user32.GetActiveWindow.argtypes = []
+_user32.GetActiveWindow.restype = HWND
+_user32.SetFocus.argtypes = [HWND]
+_user32.SetFocus.restype = HWND
+_user32.GetFocus.argtypes = []
+_user32.GetFocus.restype = HWND
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.GetCurrentThreadId.argtypes = []
+_kernel32.GetCurrentThreadId.restype = DWORD
+
 
 class _BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [("biSize", DWORD), ("biWidth", ctypes.c_long),
@@ -246,9 +268,14 @@ def main_window(classes: tuple[str, ...] = (), pid: int = 0) -> dict | None:
     return best
 
 
-def find_child(hwnd: int, cls_name: str) -> list[int]:
+def find_child(hwnd: int, cls_name: str, *, visible_only: bool = True) -> list[int]:
     """
-    枚举 hwnd 的子孙窗口，返回类名匹配且可见的那些。
+    枚举 hwnd 的子孙窗口，返回类名匹配的那些。
+
+    `visible_only=False` 是**诊断用**的：Chromium 的 renderer 子窗口在某些版本上
+    不带 `WS_VISIBLE`，只看可见的话会得到"没有 renderer 子窗口"的结论，
+    然后误判成"只能投给顶层窗口" —— 而顶层窗口在拿不到焦点时会丢消息。
+    排查"投递目标"这一步时务必两种都看。
 
     ## 为什么需要往下找一层
 
@@ -263,12 +290,141 @@ def find_child(hwnd: int, cls_name: str) -> list[int]:
     def _cb(h, _lp):
         buf = ctypes.create_unicode_buffer(256)
         _user32.GetClassNameW(h, buf, 256)
-        if buf.value == cls_name and _user32.IsWindowVisible(h):
+        if buf.value == cls_name and (not visible_only or _user32.IsWindowVisible(h)):
             out.append(int(h))
         return True
 
     _user32.EnumChildWindows(hwnd, _ENUM_PROC(_cb), 0)
     return out
+
+
+def child_classes(hwnd: int, limit: int = 40) -> list[dict]:
+    """
+    枚举子窗口的类名（诊断用）。
+
+    为什么需要它：投递目标选错了，表现是"发了但没落地"，
+    和"没焦点"长得一模一样 —— 无法从返回值上区分。
+    所以排查时必须先把"这棵树里到底有哪些窗口"列出来。
+    """
+    out: list[dict] = []
+
+    def _cb(h, _lp):
+        if len(out) >= limit:
+            return False
+        buf = ctypes.create_unicode_buffer(256)
+        _user32.GetClassNameW(h, buf, 256)
+        out.append({"hwnd": int(h), "class": buf.value,
+                    "visible": bool(_user32.IsWindowVisible(h))})
+        return True
+
+    _user32.EnumChildWindows(hwnd, _ENUM_PROC(_cb), 0)
+    return out
+
+
+# ============================================================ 焦点与激活
+def foreground_hwnd() -> int:
+    """
+    当前前台窗口。**注意这是「所在桌面」的前台** ——
+    桌面不同则前台不同，隐藏桌面上有自己的前台和我们的窗口无关。
+    """
+    return int(_user32.GetForegroundWindow() or 0)
+
+
+def thread_id_of(hwnd: int) -> int:
+    """创建该窗口的线程 id（`AttachThreadInput` 要的是它，不是 pid）。"""
+    return int(_user32.GetWindowThreadProcessId(hwnd, None) or 0)
+
+
+def set_foreground(hwnd: int, *, bring_to_top: bool = True) -> dict:
+    """
+    把窗口切到前台。
+
+    ## ⚠️ 这是**有副作用**的：在用户桌面上调用，等于偷走用户当前的焦点
+
+    所以它在工程里的位置只有一个：**对照实验 / 诊断**。
+    生产路径不该用它 —— R4 的全部价值就是让目标窗口**自己**在另一张桌面上成为前台，
+    从而根本不需要抢用户的前台。
+
+    Windows 只允许「拥有输入焦点归属的交互式进程」调用 `SetForegroundWindow`；
+    被服务 / SSH / 计划任务拉起的进程会**静默失败**（返回值 0，不报错）。
+    返回值 1 也可能只是"之前的前台窗口被最小化"这种幸运情况，
+    所以是否真的成功请以 `verify=True` 的回读为准。
+    """
+    prev = foreground_hwnd()
+    ret = 0
+    if bring_to_top:
+        _user32.BringWindowToTop(hwnd)
+    ret = int(_user32.SetForegroundWindow(hwnd) or 0)
+    time.sleep(0.12)
+    now = foreground_hwnd()
+    return {"ok": now == hwnd, "ret": ret, "prev": prev,
+            "now": now, "hwnd": int(hwnd)}
+
+
+def focus_steps(top_hwnd: int, child_hwnd: int = 0, *,
+                attach: bool = True, active: bool = True,
+                focus_top: bool = True, focus_renderer: bool = True,
+                gap: float = 0.12) -> dict:
+    """
+    按计划逐步建立「能收到 `WM_CHAR`」的条件，每步之后记录 前台 / 活动 / 焦点。
+
+    ## 为什么做成可消融的开关，而不是一整套固定动作
+
+    这几步里有两步是**有副作用的**：
+
+      · `AttachThreadInput` 把我们的输入队列接到目标线程上 —— 接错会影响真实输入
+      · `SetActiveWindow` / `SetFocus` 会改 OS 焦点 —— **在用户桌面上跑就等于偷用户的焦点**
+
+    所以「最小必需集合」直接决定工程里要不要用它们。多留一步 = 多一个副作用点，
+    必须逐个证伪，而不是"能跑就行"。
+
+    已有结论（两边**相反**，别混着用）：
+
+      · **隐藏桌面上**：探针做过消融，结论是**一个都不需要** —— 那张桌面上只有它
+        一个窗口，Windows 在显示时就把焦点给了它，Chromium 从一开始就认为自己是 active
+      · **用户桌面上**：有竞争前台，结论相反，需要 `SetFocus` 到 renderer 子窗口
+
+    ⚠️ **焦点状态有粘性**：renderer 一旦被聚焦过，后面所有方案都会"成功"，消融就废了。
+    所以消融必须**每档一次独立进程、一个全新窗口**，不能在一个进程里连着跑。
+
+    返回时已自动解除 `AttachThreadInput` —— 这一步**不能留着**，
+    留着就是长期把两条输入队列串在一起。
+    """
+    tid_target = thread_id_of(top_hwnd)
+    tid_me = int(_kernel32.GetCurrentThreadId())
+    steps: list[dict] = []
+    attached = False
+
+    def snap(step: str, ret) -> None:
+        steps.append({"step": step, "ret": int(ret or 0),
+                      "fg": foreground_hwnd(),
+                      "active": int(_user32.GetActiveWindow() or 0),
+                      "focus": int(_user32.GetFocus() or 0)})
+
+    try:
+        if attach and tid_target and tid_target != tid_me:
+            attached = bool(_user32.AttachThreadInput(tid_target, tid_me, True))
+            snap("AttachThreadInput", int(attached))
+            if attached:
+                time.sleep(gap)
+        snap("初始", 1)
+        if active:
+            snap("SetActiveWindow(top)", _user32.SetActiveWindow(top_hwnd))
+            time.sleep(gap)
+        if focus_top:
+            snap("SetFocus(top)", _user32.SetFocus(top_hwnd))
+            time.sleep(gap)
+        if focus_renderer and child_hwnd:
+            snap("SetFocus(renderer)", _user32.SetFocus(child_hwnd))
+            time.sleep(gap)
+    finally:
+        if attached:
+            try:
+                _user32.AttachThreadInput(tid_target, tid_me, False)
+            except Exception:
+                pass
+    return {"tid_target": tid_target, "tid_me": tid_me,
+            "attached_used": attached, "steps": steps}
 
 
 # ============================================================ 文本投递
@@ -325,6 +481,69 @@ def send_text(hwnd: int, text: str, *, mode: str = "char",
         "delivered": sum(1 for v in returns if v != 0),
         "returns": returns, "elapsed": round(time.time() - t0, 3),
     }
+
+
+# ============================================================ 按键投递（非字符键）
+VK_CONTROL = 0x11
+VK_MENU = 0x12            # Alt
+VK_SHIFT = 0x10
+VK_BACK = 0x08
+VK_DELETE = 0x2E
+VK_RETURN = 0x0D
+VK_ESCAPE = 0x1B
+
+
+def send_vk(hwnd: int, vk: int, *, ctrl: bool = False, shift: bool = False,
+            alt: bool = False, gap: float = 0.04) -> dict:
+    """
+    投递一个**虚拟键**（Ctrl+A / Delete / Enter 这类没有字符的键）。
+
+    ## 为什么必须走窗口消息，不能用 `auto.SendKeys`
+
+    `uiautomation` 的 `SendKeys` 底层是 `SendInput` —— 它投的是 **OS 输入队列**，
+    而输入队列只服务于**当前 input desktop 的前台窗口**。两条后果：
+
+      1. 隐藏桌面上根本投不进去（我们的进程不在那张桌面）
+      2. 在用户桌面上投，会打到**当时前台的那个窗口**上 ——
+         也就是别人的程序。Ctrl+A 再 Delete 落在那里，等于删掉用户正在写的东西。
+
+    所以非字符键也必须走窗口消息，和字符走同一条路。
+
+    ⚠️ 这一条同时也是「发送」动作的实现基础（Enter / Ctrl+Enter）。
+    在把它接到真实发送链路上之前，请确认目标窗口就是你想发的那个。
+    """
+    res = ctypes.c_size_t(0)
+    returns: list[int] = []
+
+    def post(msg, wp, lp) -> int:
+        return int(_user32.SendMessageTimeoutW(
+            hwnd, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS,
+            ctypes.byref(res)))
+
+    def scan_of(v: int) -> int:
+        return (_user32.MapVirtualKeyW(v, MAPVK_VK_TO_VSC) & 0xFF) if v else 0
+
+    mods = [(VK_CONTROL, ctrl), (VK_MENU, alt), (VK_SHIFT, shift)]
+    try:
+        for m, on in mods:
+            if on:
+                returns.append(post(WM_KEYDOWN, m, 1 | (scan_of(m) << 16)))
+        sc = scan_of(vk)
+        down = 1 | (sc << 16)
+        returns.append(post(WM_KEYDOWN, vk, down))
+        returns.append(post(WM_KEYUP, vk, down | (1 << 30) | (1 << 31)))
+        for m, on in reversed(mods):
+            if on:
+                returns.append(post(WM_KEYUP, m,
+                                    1 | (scan_of(m) << 16) | (1 << 30) | (1 << 31)))
+        if gap:
+            time.sleep(gap)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, "vk": int(vk), "mods": [m for m, on in mods if on],
+            "calls": len(returns),
+            "delivered": sum(1 for v in returns if v != 0),
+            "returns": returns}
 
 
 # ============================================================ 画面抓取

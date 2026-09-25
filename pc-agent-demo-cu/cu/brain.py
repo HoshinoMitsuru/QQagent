@@ -62,6 +62,10 @@ CU_DEFAULTS: dict = {
     "max_steps": 8,
     "max_tokens": 2048,
     "system_prompt": "",            # 追加到内置系统提示之后
+    # 发送后视觉校验（F5）：send_text 成功后自动截图 + 视觉模型确认气泡出现。
+    # 校验是旁证，不推翻 UIA 读回结论；inconclusive 不算失败。
+    "verify_sends": True,
+    "verify_model": "",             # 留空 = 用主 model（deepseek-flash 自带图像理解）
     # 实测白名单：附着主号时只允许切换/发送到这些会话（空 = 不限制）。
     # 2026-09-25 苏霖韵拍板：attach 实测仅限群「我，我们」与小号「苏霖韵」。
     "open_chat_allow": [],
@@ -78,7 +82,10 @@ _SYSTEM_PROMPT = """你是一个 QQ 客户端的执行规划器（Computer Use A
    线索再决定下一步；同一个动作不要原样重试超过一次。
 4. send_text 可能返回 needs_confirmation=true（主号执行面必须人工确认）：
    此时停下等待，不要尝试绕过确认机制。
-5. 任务完成或确认无法完成时，用一段简短的中文总结交代：做了什么、结果如何、
+5. send_text 回执里的 verify 字段是发送后的视觉旁证（confirmed=截图确认 /
+   mismatch=截图里没找到 / inconclusive=无法校验）。mismatch 时如实告知用户
+   「视觉校验未确认」，不要声称发送已被视觉确认。
+6. 任务完成或确认无法完成时，用一段简短的中文总结交代：做了什么、结果如何、
    遇到什么问题。不要虚构你没做到的事。
 """
 
@@ -159,10 +166,20 @@ class Brain:
                 + "、".join(self.allow) + "。名单之外的会话会被拒绝，不要重试。")
         self._poster = poster or self._post
         self._last_sessions: list[dict] = []   # open_chat index → 名字翻译用
+        # F5 视觉校验：send_text 成功后自动截图问模型「气泡真的出现了吗」
+        self._verifier = None
+        if cu_cfg.get("verify_sends"):
+            from cu.verifier import Verifier
+            self._verifier = Verifier(self)
 
     # ---------------------------------------------------- HTTP
+    def post(self, payload: dict) -> dict:
+        """HTTP 通道的**唯一入口**：chat 与 verifier 都走这里。
+        测试通过构造参数注入 poster 替身，不碰网络。"""
+        return self._poster(payload)
+
     def _post(self, payload: dict) -> dict:
-        """默认 HTTP 通道。测试注入 poster 替身，不碰网络。"""
+        """默认 HTTP 通道（真实 requests）。测试不要直接调本方法。"""
         try:
             resp = requests.post(
                 self.url,
@@ -307,6 +324,9 @@ class Brain:
                                                 "ctx": {"闸": "人工确认"}}}
                             emit("rejected", {"tool": name, "text": info["text"]}, step)
 
+                    if name == "send_text" and result.get("ok") and self._verifier:
+                        result = self._verify_send(ex, raw_args, result, step, emit)
+
                     if name == "list_sessions" and result.get("ok"):
                         self._last_sessions = result.get("sessions") or []
                     emit("tool_result", {"tool": name, "result": result}, step)
@@ -322,6 +342,36 @@ class Brain:
             return {"ok": False, "steps": steps,
                     "error": {"code": exc.code, "detail": exc.detail_text,
                               "ctx": exc.context}}
+
+    def _verify_send(self, ex: Executor, raw_args, result: dict,
+                     step: int, emit) -> dict:
+        """send_text 成功后的视觉旁证：截图 → 视觉模型 → 结论并进回灌信封。
+
+        校验失败/inconclusive **不推翻**发送结果（UIA 读回已通过），
+        只把结论附在 verify 字段里，让模型与上层自己权衡。
+        """
+        from cu.verifier import VerifyResult
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+        except json.JSONDecodeError:
+            args = {}
+        text = str(args.get("text") or "")
+
+        shot_path, shot_err = "", ""
+        try:
+            shot = ex.screenshot()
+            shot_path = shot.path if shot.ok else ""
+            shot_err = "" if shot.ok else (shot.error or "抓图失败")
+        except Exception as exc:  # noqa: BLE001
+            shot_err = f"{type(exc).__name__}: {exc}"
+
+        if shot_path:
+            vr = self._verifier.verify_send(text, shot_path)
+        else:
+            vr = VerifyResult(False, "inconclusive", shot_err or "截图不可用", "")
+        result["verify"] = vr.to_dict()
+        emit("verified", {"verdict": vr.verdict, "detail": vr.detail}, step)
+        return result
 
     def _current_chat_hint(self, ex: Executor) -> str:
         """确认弹层里给人看的「现在要发给谁」。失败不阻塞确认流程。"""

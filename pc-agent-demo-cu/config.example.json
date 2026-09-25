@@ -155,6 +155,9 @@
     "max_steps": 8,
     "max_tokens": 2048,
     "system_prompt": "",
+    "_verify说明": "send_text 成功后的视觉旁证：自动截图喂给视觉模型确认气泡出现。verify_model 留空 = 用主 model（deepseek-flash 自带图像理解）。校验不推翻 UIA 读回结论，inconclusive 不算失败。",
+    "verify_sends": true,
+    "verify_model": "",
     "open_chat_allow": []
   }
 }

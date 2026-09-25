@@ -211,7 +211,12 @@ class AttachExecutor(Executor):
             # 不在这里断言根因：win.send_text 内部已经用精确码 report 过
             raise ExecutorError("E-CU-001", "发送未成功（根因见前一条错误码日志）",
                                 {"route": win.last_write_plan})
-        return SendReceipt(ok=True, route=win.last_write_plan,
+        return SendReceipt(ok=True,
+                           # last_write_plan 只在 wmchar 路径赋值（2026-09-25
+                           # 真机实测：剪贴板路径回执 route=""）——
+                           # 空时回退 write_mode_resolved（clipboard/wmchar）
+                           route=(win.last_write_plan
+                                  or getattr(win, "write_mode_resolved", "")),
                            chat_title=win.title_now())
 
     def screenshot(self, path: str = "") -> Shot:

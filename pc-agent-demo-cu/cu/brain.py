@@ -394,10 +394,19 @@ class Brain:
         return result
 
     def _current_chat_hint(self, ex: Executor) -> str:
-        """确认弹层里给人看的「现在要发给谁」。失败不阻塞确认流程。"""
+        """确认弹层里给人看的「现在要发给谁」。失败不阻塞确认流程。
+
+        两面 extra 形态不同（2026-09-25 真机实测：弹层一直显示「（未知）」）：
+        - attach：diagnose_dom 的中文平铺键，「窗口」的值就是标题字符串；
+        - hosted：extra["window"] 是 {"title": ...} 形态。
+        取不到就空串，由上层显示「（未知）」。"""
         try:
             h = ex.health()
-            return h.extra.get("window", {}).get("title", "") if isinstance(
-                h.extra, dict) else ""
+            e = h.extra if isinstance(h.extra, dict) else {}
+            title = e.get("窗口")
+            if not title:
+                w = e.get("window") or {}
+                title = w.get("title") or "" if isinstance(w, dict) else ""
+            return title or ""
         except Exception:
             return ""

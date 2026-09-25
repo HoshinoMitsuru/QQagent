@@ -237,6 +237,25 @@ case("未传 confirm 回调 = 一律拒绝（fail-closed）",
      not any(c[0] == "send_text" and c[2] is True for c in ex3.calls)
      and r["ok"], str(ex3.calls))
 
+# ---- 确认提示标题：两面 health extra 形态都要认（2026-09-25 真机：
+# attach 面弹层一直显示「（未知）」—— extra 是中文平铺键，代码只认英文）----
+b4, ex4, _ = make_brain([])
+ex4.health = lambda: Health(True, mode="stub", chat_open=True,
+                            extra={"窗口": "我，我们", "消息列表": True})
+case("确认提示标题：attach 面（中文平铺键）取到标题",
+     b4._current_chat_hint(ex4) == "我，我们", "")
+case("确认提示标题：hosted 面（英文 window.title）取到标题",
+     b4._current_chat_hint(StubExecutor()) == "苏霖韵", "")
+
+
+class EmptyHealthEx(StubExecutor):
+    def health(self):
+        return Health(True, mode="stub", chat_open=True, extra={})
+
+
+case("确认提示标题：extra 什么都没有 → 空串（上层显示「未知」）",
+     b4._current_chat_hint(EmptyHealthEx()) == "", "")
+
 # ============================================================ 白名单
 print("§4 open_chat 白名单闸（实测授权：仅「我，我们」「苏霖韵」）")
 ALLOW = ["我，我们", "苏霖韵"]

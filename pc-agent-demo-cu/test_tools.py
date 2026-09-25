@@ -147,8 +147,8 @@ print("§3 dispatch 层的确认锁（E-CU-004）")
 ex = StubExecutor()
 ex.require_confirmation = True        # 模拟 attach 面
 r = dispatch(ex, "send_text", {"text": "这条要先给人看"})
-case("未 armed → needs_confirmation 信封",
-     r["ok"] is False and r["code"] == "E-CU-004"
+case("未 armed → needs_confirmation 信封（与错误信封同形）",
+     r["ok"] is False and r["error"]["code"] == "E-CU-004"
      and r["needs_confirmation"] is True and r["text"] == "这条要先给人看", str(r))
 case("锁拦截时原语根本没被调用",
      not any(c[0] == "send_text" for c in ex.calls), str(ex.calls))

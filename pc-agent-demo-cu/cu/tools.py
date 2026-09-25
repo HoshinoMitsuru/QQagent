@@ -23,7 +23,8 @@ attach 面的发送必须人工确认（E-CU-004 的设计）。**给模型看�
 ## 信封约定（Brain 要按它决定下一步）
 
     成功     {"ok": True,  "tool": 名称, ...动作各自的字段}
-    确认锁   {"ok": False, "code": "E-CU-004", "needs_confirmation": True,
+    确认锁   {"ok": False, "needs_confirmation": True, "text": ...,
+              "error": {"code": "E-CU-004", ...}}   （2026-09-25 起与错误信封同形）
               "text": 拟发送内容}              ← 只出现在 send_text
     失败     {"ok": False, "error": {"code", "detail", "ctx"}}
              （ExecutorError 原样转信封；意外异常兜底 E-CU-001）
@@ -165,9 +166,15 @@ def _run_read_recent(ex: Executor, args: dict, armed: bool) -> dict:
 
 def _run_send_text(ex: Executor, args: dict, armed: bool) -> dict:
     if ex.require_confirmation and not armed:
-        return {"ok": False, "code": "E-CU-004", "needs_confirmation": True,
+        # 2026-09-25：形状统一为标准错误信封（此前是扁平 {"code": ...}，
+        # 与 ExecutorError 的 {"error": {...}} 两套形状，CLI/MCP 的 JSON
+        # 契约没法写）。needs_confirmation 顶层保留 —— Brain 靠它触发确认。
+        return {"ok": False, "needs_confirmation": True,
                 "text": args.get("text", ""),
-                "detail": "主号执行面的发送必须人工确认后由上层以 armed=True 重发"}
+                "error": {"code": "E-CU-004",
+                          "detail": "主号执行面的发送必须人工确认后由上层"
+                                    "以 armed=True 重发",
+                          "ctx": {"策略": "attach=人工确认；hosted=全自主"}}}
     receipt = ex.send_text(args.get("text", ""), armed=armed)
     return {"ok": True, **receipt.to_dict()}
 

@@ -152,8 +152,12 @@ class Executor(ABC):
         """列出当前会话列表（只读，不点击不切换）。"""
 
     @abstractmethod
-    def open_chat(self, name: str = "", index: int = 0) -> dict:
-        """切到一个会话。name 优先（子串匹配），否则用 index。返回含 opened 字段。"""
+    def open_chat(self, name: str = "", index: int = -1) -> dict:
+        """切到一个会话。name 优先（子串匹配），否则用 index。
+
+        index 的语义（2026-09-25 修正）：**0 起的合法序号**，与 list_sessions
+        返回的 index 一致；-1 = 未指定（name 与 index 都缺 → E-CU-005）。
+        实测踩坑：把 0 当「未指定」会挡掉列表第一个会话（恰是常测的群）。"""
 
     @abstractmethod
     def read_recent(self, limit: int = 12) -> list[ChatMessage]:

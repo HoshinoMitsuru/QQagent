@@ -113,9 +113,11 @@ case("字段映射正确",
      and cards[1].is_group is True, str(cards))
 case("open_chat 按名字子串命中",
      ex_attach.open_chat("霖韵").get("opened") == "苏霖韵", "")
+case("open_chat index=0 是合法序号（列表第一条）",
+     ex_attach.open_chat(index=0).get("opened") == "苏霖韵", "")
 case("open_chat 名字无匹配抛 E-CU-005",
      expect_code(lambda: ex_attach.open_chat("不存在的人"), "E-CU-005"), "")
-case("open_chat 无 name 且 index=0 抛 E-CU-005",
+case("open_chat 无 name 且无 index 抛 E-CU-005",
      expect_code(lambda: ex_attach.open_chat(), "E-CU-005"), "")
 def override_ns(base, **kw):
     """复制 stub 命名空间并覆盖若干属性（SimpleNamespace 不允许 kwarg 重复）。"""

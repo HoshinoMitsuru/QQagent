@@ -120,10 +120,13 @@ case("list_sessions 信封",
      r["ok"] and r["tool"] == "list_sessions" and r["count"] == 2
      and r["sessions"][1]["is_group"] is True, str(r))
 r = dispatch(ex, "open_chat", {"name": "霖韵"})
-case("open_chat 透传 name",
-     r["ok"] and ex.calls[-1] == ("open_chat", "霖韵", 0) and r["opened"] == "霖韵", str(r))
+case("open_chat 透传 name（index 缺省 = -1 未指定）",
+     r["ok"] and ex.calls[-1] == ("open_chat", "霖韵", -1) and r["opened"] == "霖韵", str(r))
 r = dispatch(ex, "open_chat", {"index": 2})
 case("open_chat 透传 index", ex.calls[-1] == ("open_chat", "", 2), str(ex.calls[-1]))
+r = dispatch(ex, "open_chat", {"index": 0})
+case("index=0 是合法序号不是缺省",
+     ex.calls[-1] == ("open_chat", "", 0), str(ex.calls[-1]))
 r = dispatch(ex, "read_recent", {"limit": 30})
 case("read_recent 信封",
      r["ok"] and r["count"] == 1 and r["messages"][0]["direction"] == "other", str(r))

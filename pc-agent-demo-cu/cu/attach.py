@@ -29,8 +29,10 @@ attach.py —— 附着主号的执行面（用户桌面，进程内 UIA）
 
 from __future__ import annotations
 
+import ctypes
 import os
 import time
+from ctypes import wintypes
 
 import agent
 import error_codes as EC
@@ -39,6 +41,12 @@ from app import paths, winmsg
 
 from cu.base import (ChatMessage, Executor, ExecutorError, Health,
                      SendReceipt, SessionInfo, Shot)
+
+# ShowWindow：本模块自用的最小声明（遵守「纯 ctypes 显式 argtypes」约定）
+_user32 = ctypes.windll.user32
+_user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+_user32.ShowWindow.restype = wintypes.BOOL
+_SW_RESTORE = 9
 
 
 def _dataclass_to_chat(m) -> ChatMessage:
@@ -72,8 +80,32 @@ class AttachExecutor(Executor):
             self._attached = True
         return win
 
-    def _cards(self) -> list:
-        """会话卡片（qqid.SessionCard），list_sessions / open_chat 共用。"""
+    def _ensure_qq_visible(self, hwnd: int = 0) -> None:
+        """QQ 最小化时自动 SW_RESTORE 还原（2026-09-25 实测驱动）。
+
+        ## 为什么是「还原」而不是「抢前台」
+
+        实测结论（见 archive/probe_minimized.py / probe_switch_nofg.py）：
+        最小化时 Chromium 节流 renderer，**会话列表读不出、Invoke 静默失效**；
+        但被遮挡（还原后不置顶）时 Invoke 与读取都可用。所以只还原、
+        不调 force_foreground —— 尽量不打扰用户。
+
+        ## 实测现场（2026-09-25）
+
+        主号最小化时 list_sessions 三连 E-QQ-007「会话列表为空」，
+        还原窗口后同一函数立刻读出全部会话。"""
+        if not hwnd:
+            _, hwnd = qqid.find_qq_main_window()
+        if not hwnd or not winmsg.is_iconic(hwnd):
+            return
+        _user32.ShowWindow(hwnd, _SW_RESTORE)
+        agent.log("INFO", f"QQ 处于最小化，已还原窗口（hwnd={hwnd}，不抢前台）")
+        time.sleep(1.5)   # 给 renderer 一点时间恢复 a11y 树
+
+    def _cards(self) -> tuple:
+        """会话卡片（qqid.SessionCard），list_sessions / open_chat 共用。
+        最小化导致读空时自动还原窗口重试一次。"""
+        self._ensure_qq_visible()
         desc, hwnd = qqid.find_qq_main_window()
         if not hwnd:
             raise ExecutorError("E-QQ-003", "找不到可见的 QQ 主窗口",
@@ -86,8 +118,18 @@ class AttachExecutor(Executor):
             raise ExecutorError(mapped.code, mapped.detail_text or "读会话列表失败",
                                 {"异常": f"{type(exc).__name__}: {exc}"})
         if not cards:
+            # 最小化是 E-QQ-007 的常见隐形根因：还原后再试一次
+            self._ensure_qq_visible(hwnd)
+            try:
+                cards = qqid.list_sessions(win)
+            except Exception as exc:
+                cards = []
+                agent.log("INFO", f"还原后重读会话列表仍失败：{type(exc).__name__}: {exc}")
+        if not cards:
             raise ExecutorError("E-QQ-007", "会话列表为空",
-                                {"建议": "确认 QQ 停在「消息」标签页，且刚启动的话稍等几秒"})
+                                {"建议": "确认 QQ 停在「消息」标签页；若窗口最小化，"
+                                         "程序已自动还原过一次，仍读不出请把 QQ 窗口"
+                                         "还原到桌面上再试"})
         return win, cards
 
     # ---------------------------------------------------- 六原语
@@ -97,10 +139,11 @@ class AttachExecutor(Executor):
                             unread=c.unread, is_group=c.looks_group)
                 for c in cards]
 
-    def open_chat(self, name: str = "", index: int = 0) -> dict:
-        if not name and index <= 0:
+    def open_chat(self, name: str = "", index: int = -1) -> dict:
+        if not name and index < 0:
             raise ExecutorError("E-CU-005",
-                                "open_chat 需要 name（子串匹配）或 index（>0）之一",
+                                "open_chat 需要 name（子串匹配）或 index（>=0，"
+                                "list_sessions 给出的序号）之一",
                                 {"name": name, "index": index})
         win, cards = self._cards()
         target = None
@@ -154,10 +197,16 @@ class AttachExecutor(Executor):
 
     def screenshot(self, path: str = "") -> Shot:
         win = self._ensure_attached()
+        # ⚠️ win.hwnd 是 @property —— 加括号会把 int 当函数调（'int' object is
+        # not callable，2026-09-25 真机实测踩过）。另外最小化时 GetWindowRect
+        # 给 0x0，抓图必然失败，先还原。
+        hwnd = win.hwnd
+        if hwnd:
+            self._ensure_qq_visible(hwnd)
         p = path or os.path.join(
             paths.STATE_DIR, f"cu-shot-{time.strftime('%Y%m%d-%H%M%S')}.png")
         try:
-            res = winmsg.grab_any(win.hwnd(), p)
+            res = winmsg.grab_any(hwnd, p)
         except Exception as exc:
             return Shot(ok=False, error=f"{type(exc).__name__}: {exc}")
         if not res.get("ok"):
@@ -173,8 +222,9 @@ class AttachExecutor(Executor):
                           extra=ctx)
         code, ctx = win.diagnose_dom()
         ok = win.dom_exposed()
-        chat_open = bool(ctx.get("chat_open")
-                         or ctx.get("ml_list_found") or ctx.get("editor_found"))
+        # diagnose_dom 的 ctx 用中文键（消息列表/输入框/窗口可见）——
+        # 2026-09-25 实测发现：按英文键取永远 False
+        chat_open = bool(ctx.get("消息列表") or ctx.get("输入框"))
         return Health(ok=ok, mode=self.name, chat_open=chat_open,
                       code=("" if ok else code), detail=("" if ok else "DOM 未暴露"),
                       extra=ctx)

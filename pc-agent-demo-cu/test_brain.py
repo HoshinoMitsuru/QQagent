@@ -256,7 +256,7 @@ b, ex, payloads = make_brain([
 ], allow=ALLOW)
 r = b.run(ex, "找苏霖韵")
 case("名单内目标（子串）放行",
-     r["ok"] and ("open_chat", "霖韵", 0) in ex.calls, str(ex.calls))
+     r["ok"] and ("open_chat", "霖韵", -1) in ex.calls, str(ex.calls))
 
 b, ex, payloads = make_brain([
     ai_msg(tool_calls=[tc("l1", "list_sessions", {})]),

@@ -94,8 +94,13 @@ class HostedExecutor(Executor):
                             is_group=bool(s.get("is_group")))
                 for i, s in enumerate(cu.get("sessions") or [])]
 
-    def open_chat(self, name: str = "", index: int = 0) -> dict:
-        out = self._run(open_chat=True, chat=name, chat_index=index)
+    def open_chat(self, name: str = "", index: int = -1) -> dict:
+        if not name and index < 0:
+            raise ExecutorError("E-CU-005",
+                                "open_chat 需要 name（子串匹配）或 index（>=0）之一",
+                                {"name": name, "index": index})
+        # hostagent 语义：index 0 = 第一条；-1（未指定）归到 0
+        out = self._run(open_chat=True, chat=name, chat_index=max(index, 0))
         oc = out.get("open_chat") or {}
         if not oc.get("ok"):
             raise ExecutorError(_map_host_error(oc.get("error") or "开图失败"),

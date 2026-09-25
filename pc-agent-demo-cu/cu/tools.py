@@ -145,8 +145,16 @@ def _run_list_sessions(ex: Executor, args: dict, armed: bool) -> dict:
 
 
 def _run_open_chat(ex: Executor, args: dict, armed: bool) -> dict:
-    return {"ok": True, **ex.open_chat(name=args.get("name") or "",
-                                       index=int(args.get("index") or 0))}
+    # index 缺省是 -1（未指定），**不是 0** —— 0 是合法序号（列表第一条）。
+    # 2026-09-25 真机实测踩坑：把 0 当未指定会挡掉常测的群。
+    name = args.get("name") or ""
+    index = -1
+    if "index" in args:
+        try:
+            index = int(args["index"])
+        except (TypeError, ValueError):
+            index = -1
+    return {"ok": True, **ex.open_chat(name=name, index=index)}
 
 
 def _run_read_recent(ex: Executor, args: dict, armed: bool) -> dict:

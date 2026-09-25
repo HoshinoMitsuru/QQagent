@@ -228,6 +228,9 @@ class Brain:
             return ""
         name = args.get("name") or ""
         if not name:
+            if "index" not in args:
+                # name 与 index 都缺：这不是白名单问题，让执行层报 E-CU-005
+                return ""
             idx = int(args.get("index") or 0)
             found = [s for s in self._last_sessions if s.get("index") == idx]
             name = found[0].get("name", "") if found else ""

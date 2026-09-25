@@ -40,6 +40,10 @@ from cu.tools import dispatch                       # noqa: E402
 #: attach 实测白名单（与用户拍板的授权一致）
 ATTACH_ALLOW = ["我，我们", "苏霖韵"]
 
+#: hosted 实测目标闸：全自主发送已授权，但测试期目标限定为主号（收信方
+#: 是用户自己的主号「Psyche-嗅尘紫蝶」）与测试群，防模型漂到别的会话。
+HOSTED_ALLOW = ["Psyche-嗅尘紫蝶", "我，我们"]
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="CU Brain 真机实测")
@@ -65,9 +69,12 @@ def main() -> int:
     if a.mode == "hosted":
         from cu.hosted import HostedExecutor
         ex = HostedExecutor(cfg)
-        # hosted 全自主；require_confirmation=False，confirm 保持 None
+        # hosted 全自主（require_confirmation=False），但测试期仍给目标闸：
+        # 只许开「主号 / 测试群」，防模型把消息发进别的会话
+        cu["open_chat_allow"] = HOSTED_ALLOW
         print("=" * 78)
-        print("执行面 hosted（独立桌面小号）｜全自主发送已授权")
+        print(f"执行面 hosted（独立桌面小号）｜全自主发送已授权"
+              f"｜目标闸：{'、'.join(HOSTED_ALLOW)}")
     else:
         from cu.attach import AttachExecutor
         ex = AttachExecutor(cfg)
@@ -96,9 +103,12 @@ def main() -> int:
     # ---- 预检：执行面体检（只读）----
     h = dispatch(ex, "health", {})
     print(f"[预检] health → {json.dumps(h, ensure_ascii=False)[:300]}")
-    if not h.get("ok"):
+    if not h.get("ok") and h.get("code") != "E-QQ-008":
         print("[X] 执行面体检未通过，先解决上面的错误码再实测（参错误码 fixes）")
         return 1
+    if h.get("code") == "E-QQ-008":
+        # 已登录但停在会话列表页 = 可工作状态：Brain 的第一个动作就是 open_chat
+        print("[i] QQ 已登录、停在会话列表页（E-QQ-008）—— Brain 会自己开会话，继续")
 
     # ---- 跑 Brain ----
     r = brain.run(ex, a.task, confirm=confirm,

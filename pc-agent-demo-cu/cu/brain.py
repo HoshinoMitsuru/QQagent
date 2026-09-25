@@ -377,6 +377,11 @@ class Brain:
             args = {}
         text = str(args.get("text") or "")
 
+        # 截图前等一拍：send_text 返回 ok 只代表「写入+回车已投递」，
+        # 气泡上屏有渲染延迟 —— 2026-09-25 hosted 真机实测：立即截图
+        # 抓到的是发送前画面（verify 误报 mismatch），消息实际已到达。
+        time.sleep(1.2)
+
         shot_path, shot_err = "", ""
         try:
             shot = ex.screenshot()

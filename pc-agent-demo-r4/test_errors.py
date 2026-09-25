@@ -1583,7 +1583,7 @@ def t20_livelock_and_false_alarm():
     R.check("SKIP_SELF 常量存在（_admit 与 _report_round 用它对齐）",
             isinstance(agent.SKIP_SELF, str) and agent.SKIP_SELF, agent.SKIP_SELF)
     a2 = agent.Agent(agent.load_config(), dry_run=True)
-    m_self = agent.Message(sender="Susurrus-苏霖韵", content="我刚发的话",
+    m_self = agent.Message(sender="Susurrus-本人", content="我刚发的话",
                            direction="me", key="aid:1", dir_src="class")
     _w, why_self = a2._admit(m_self, "group:963650468")
     R.check("有 class 证据的『me』→ 原因标记为「自己发的消息」",

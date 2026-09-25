@@ -32,12 +32,12 @@ exe 的**数据目录**按 `QQ_AGENT_HOME` 环境变量 → exe 所在目录 逐
 
 ```powershell
 # 委托式：一步完成任务（hosted 全自主发送）
-qq-cu.exe run --task "给「Psyche-嗅尘紫蝶」发一句『在吗』" --json
+qq-cu.exe run --task "给「测试目标A」发一句『在吗』" --json
 
 # 工具式：调用方 agent 自己编排
 qq-cu.exe health --json
 qq-cu.exe sessions --json
-qq-cu.exe open --name "Psyche-嗅尘紫蝶" --json
+qq-cu.exe open --name "测试目标A" --json
 qq-cu.exe read --limit 10 --json
 qq-cu.exe send --text "你好" --json
 ```
@@ -49,7 +49,7 @@ qq-cu.exe send --text "你好" --json
 | `--mode hosted`（默认） | 独立桌面小号，**全自主发送**（用户已授权） |
 | `--mode attach` | 附着主号，**永远 fail-closed**：非交互终端直接拒绝（E-CU-004 信封），交互终端逐条 y/n。**不提供预授权通道** |
 
-- hosted 面有目标闸（`open_chat_allow`，测试期仅「Psyche-嗅尘紫蝶」「我，我们」）
+- hosted 面有目标闸（`open_chat_allow`，测试期仅「测试目标A」「测试群B」）
 - `run --mode attach` 在 agent shell（非交互 stdin）里被确认回调拒绝 → 任务失败而不是误发
 
 ## 前置条件

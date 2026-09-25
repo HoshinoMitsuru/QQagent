@@ -168,7 +168,7 @@
 				"key": "apiKey",
 				"type": "string",
 				"defaultValue": "",
-				"value": "sk-702f9f106d70402582e470d1674518ed",
+				"value": "",
 				"deprecated": true,
 				"description": ""
 			},

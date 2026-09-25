@@ -110,7 +110,7 @@ class AttachExecutor(Executor):
         Chrome_WidgetWin_1，不管标题）**本来就不一致**，两条路会定位到
         不同的窗口：
 
-        - 主窗口开着会话时标题是会话名（如「我，我们」）而非 "QQ"，
+        - 主窗口开着会话时标题是会话名（如「测试群B」）而非 "QQ"，
           find_qq_main_window 匹配不到它，却可能匹配到别的宽≥600 窗口；
         - 那个窗口的 UIA 树里没有会话列表 → list_sessions 返回空 →
           E-QQ-007 假象；「现场」键报的窗口状态也是它的，与附着窗口

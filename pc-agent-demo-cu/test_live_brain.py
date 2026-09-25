@@ -2,12 +2,12 @@
 """
 test_live_brain.py —— Brain 真机实测 harness（会真的操作 QQ，看清楚再跑）
 
-## 实测授权（2026-09-25 苏霖韵拍板，写死在本文件头，改动需他本人确认）
+## 实测授权（2026-09-25 本人拍板，写死在本文件头，改动需他本人确认）
 
 | 执行面 | 对象 | 发送授权 |
 | --- | --- | --- |
-| hosted（R4 独立桌面） | 托管小号「苏霖韵」 | ✅ 允许真实发送（全自主） |
-| attach（附着主号「嗅尘紫蝶」） | 仅群「我，我们」与小号「苏霖韵」 | ⚠️ 允许，但**每条发送都要控制台人工确认** |
+| hosted（R4 独立桌面） | 托管小号「本人」 | ✅ 允许真实发送（全自主） |
+| attach（附着主号「测试目标A」） | 仅群「测试群B」与小号「本人」 | ⚠️ 允许，但**每条发送都要控制台人工确认** |
 
 attach 面的目标白名单是**硬闸**（cu/brain.py 的 open_chat_allow）：
 名单外的会话在原语被调用之前就被拦截，模型重试也没用。
@@ -37,12 +37,10 @@ import agent                                       # noqa: E402
 from cu.brain import Brain, load_cu_config          # noqa: E402
 from cu.tools import dispatch                       # noqa: E402
 
-#: attach 实测白名单（与用户拍板的授权一致）
-ATTACH_ALLOW = ["我，我们", "苏霖韵"]
-
-#: hosted 实测目标闸：全自主发送已授权，但测试期目标限定为主号（收信方
-#: 是用户自己的主号「Psyche-嗅尘紫蝶」）与测试群，防模型漂到别的会话。
-HOSTED_ALLOW = ["Psyche-嗅尘紫蝶", "我，我们"]
+#: 实测白名单由本地 config.json 提供（该文件不入库，真实目标名只留在本机）：
+#:   cu.attach_allow     —— attach 面发送白名单
+#:   cu.open_chat_allow  —— hosted 面目标闸
+#: 对应名单为空时该模式 fail-closed 拒绝执行，不存在任何硬编码兜底名单。
 
 
 def main() -> int:
@@ -56,6 +54,8 @@ def main() -> int:
 
     cfg = agent.load_config()
     cu = load_cu_config(cfg)
+    attach_allow = list(cu.get("attach_allow") or [])
+    hosted_allow = list(cu.get("open_chat_allow") or [])
     if a.base_url:
         cu["base_url"] = a.base_url
     if a.model:
@@ -70,15 +70,23 @@ def main() -> int:
         from cu.hosted import HostedExecutor
         ex = HostedExecutor(cfg)
         # hosted 全自主（require_confirmation=False），但测试期仍给目标闸：
-        # 只许开「主号 / 测试群」，防模型把消息发进别的会话
-        cu["open_chat_allow"] = HOSTED_ALLOW
+        # 只许开名单内目标，防模型把消息发进别的会话
+        if not hosted_allow:
+            print("[X] hosted 目标闸未配置：请在本地 config.json 的 cu.open_chat_allow "
+                  "填写测试目标（该文件不入库，不会进 git）")
+            return 2
+        cu["open_chat_allow"] = hosted_allow
         print("=" * 78)
         print(f"执行面 hosted（独立桌面小号）｜全自主发送已授权"
-              f"｜目标闸：{'、'.join(HOSTED_ALLOW)}")
+              f"｜目标闸：{'、'.join(hosted_allow)}")
     else:
         from cu.attach import AttachExecutor
         ex = AttachExecutor(cfg)
-        cu["open_chat_allow"] = ATTACH_ALLOW   # 必须在 Brain 构造之前注入
+        if not attach_allow:
+            print("[X] attach 白名单未配置：请在本地 config.json 的 cu.attach_allow "
+                  "填写测试目标（该文件不入库，不会进 git）")
+            return 2
+        cu["open_chat_allow"] = attach_allow   # 必须在 Brain 构造之前注入
 
         def confirm(info: dict) -> bool:
             print("\n" + "!" * 78)
@@ -88,7 +96,7 @@ def main() -> int:
             return ans == "y"
 
         print("=" * 78)
-        print(f"执行面 attach（附着主号）｜白名单：{'、'.join(ATTACH_ALLOW)}"
+        print(f"执行面 attach（附着主号）｜白名单：{'、'.join(attach_allow)}"
               f"｜每条发送逐条人工确认")
 
     brain = Brain(cu, cfg)

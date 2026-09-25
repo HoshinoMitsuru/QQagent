@@ -56,7 +56,7 @@
   默认模型 `deepseek-flash`（V4.1-Flash，自带图像理解+Tool Calls+1M 上下文，
   已核实官方文档，verifier 免第二路视觉 Key）。
   分期 F1(基建+基线✅)→F2(Executor双执行面+安全锁✅)→F3(工具化 dispatch✅)
-  →F4(Brain tool calling 循环+实测授权：hosted 小号全自主、attach 主号仅「我，我们/苏霖韵」
+  →F4(Brain tool calling 循环+实测授权：hosted 小号全自主、attach 主号仅「测试群B/本人」
   白名单+逐条确认✅)→F5(Verifier 视觉校验：截图+deepseek-flash 图像理解三态结论✅)
   →F6 WebUI→F7 exe 验收。详见 2026-09-25 日志。
 - V2 已实机验证：独立 profile 启动 → 免扫码登录 → **打开一个会话** →

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         小清澈-接入AI聊天
-// @author       bilibili@嗅尘紫蝶
+// @author       bilibili@测试目标A
 // @version      1.3.0
 // @description  接入 DeepSeek/OpenAI 兼容接口的海豹 JS 插件，支持 .ai 指令、中文前缀自动唤起和连续对话模式，支持多人格切换
 // @timestamp    2026-04-26

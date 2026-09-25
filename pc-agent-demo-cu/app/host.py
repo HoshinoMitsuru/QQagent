@@ -460,7 +460,7 @@ def grab(png_path: str = "", desktop_name: str = "", *, wait: float = 0.0,
     if open_chat:
         args.append("--open-chat")
         if chat:
-            # ⚠️ 用 `=` 形式：`--chat 苏霖韵` 这种带中文值的写法本身没问题，
+            # ⚠️ 用 `=` 形式：`--chat 本人` 这种带中文值的写法本身没问题，
             # 但值以 `-` 开头时 argparse 会把它当成另一个选项（踩过同类坑）。
             args.append(f"--chat={chat}")
         if chat_index:

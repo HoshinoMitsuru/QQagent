@@ -91,7 +91,7 @@ class StubExecutor(Executor):
 
     def send_text(self, text, *, armed=None):
         self.calls.append(("send_text", text, armed))
-        return SendReceipt(True, route="wmchar", chat_title="苏霖韵")
+        return SendReceipt(True, route="wmchar", chat_title="本人")
 
     def screenshot(self, path=""):
         self.calls.append(("screenshot", path))

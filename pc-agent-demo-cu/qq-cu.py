@@ -2,7 +2,7 @@
 """
 qq-cu —— pc-agent-demo-cu 的正式 CLI 入口（F6：Agent 可调用接口）
 
-## 定位（2026-09-25 苏霖韵拍板：形态 3 + 接口 A）
+## 定位（2026-09-25 本人拍板：形态 3 + 接口 A）
 
 调用方是 **Agent 应用**（Codex / Claude Code / WorkBuddy），不是人。
 所以本工具没有操作面板，只有两条调用路径：
@@ -29,10 +29,10 @@ qq-cu —— pc-agent-demo-cu 的正式 CLI 入口（F6：Agent 可调用接口�
 
 ## 用法示例
 
-    qq-cu run --mode hosted --task "给「Psyche-嗅尘紫蝶」发一句『在吗』" --json
+    qq-cu run --mode hosted --task "给「测试目标A」发一句『在吗』" --json
     qq-cu health  --mode hosted --json
     qq-cu sessions --mode hosted --json
-    qq-cu open    --mode hosted --name "Psyche-嗅尘紫蝶" --json
+    qq-cu open    --mode hosted --name "测试目标A" --json
     qq-cu read    --mode hosted --limit 10 --json
     qq-cu shot    --mode hosted --json
     qq-cu send    --mode hosted --text "你好" --json

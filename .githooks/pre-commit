@@ -1,0 +1,4 @@
+#!/bin/sh
+# 敏感信息入库检查（词表：tools/sensitive-words.local.txt，gitignored）。
+# 启用：git config core.hooksPath .githooks
+python tools/check_sensitive.py || exit 1

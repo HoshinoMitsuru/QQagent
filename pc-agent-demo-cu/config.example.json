@@ -145,7 +145,7 @@
     "_restore_foreground": "方案C：true = 写完后把前台窗口还给调用前的那个窗口，降低打扰；false = 关掉（QQ 会继续霸占最上层）",
     "restore_foreground": true
   },
-  "_cu说明": "LLM Computer Use 规划层（pc-agent-demo-cu 新增）。base_url/model 独立于 llm 节；api_key 留空 = 复用主 llm 密钥（secrets.local.json）。max_steps 是单任务的工具调用轮数上限，防模型打转烧 token。open_chat_allow 非空 = open_chat 只允许名单内目标（附着主号实测的安全闸，attach 白名单由 test_live_brain.py 注入，这里留空 = 不限制）。",
+  "_cu说明": "LLM Computer Use 规划层（pc-agent-demo-cu 新增）。base_url/model 独立于 llm 节；api_key 留空 = 复用主 llm 密钥（secrets.local.json）。max_steps 是单任务的工具调用轮数上限，防模型打转烧 token。open_chat_allow 非空 = open_chat 只允许名单内目标（hosted 实测目标闸）；attach_allow 非空 = attach 面发送白名单（test_live_brain.py 读取）。两者都是真名名单，只填在本机 config.json（不入库），留空 = 对应模式 fail-closed 拒绝。",
   "cu": {
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-flash",
@@ -159,6 +159,7 @@
     "verify_sends": true,
     "verify_model": "",
     "thinking": false,
-    "open_chat_allow": []
+    "open_chat_allow": [],
+    "attach_allow": []
   }
 }

@@ -76,7 +76,7 @@ done
 | `r4_hidden_replied.png` | 隐藏桌面上，小号**回复主号**之后的画面（U1 一条龙的收口证据） |
 | `r4_hostd_running.png` | **常驻宿主**跑起来之后那张桌面的画面（账号已登录、聊天页已打开、回复已发出） |
 | `r4-hostd-tree.txt` | 宿主启动失败时那棵树的剪影：`ml-list` / `ExEditor-qq-msg-editor` / `send-msg` **各 0 个**，而 `recent-contact-list` 在 —— 「没打开会话」这个根因的全部依据 |
-| `r4_hostd_tree_chat.txt` | 点开一个真实会话之后的树：上面那三个锚点**各 1 个**，`chat-header__contact-name` = `'Psyche-嗅尘紫蝶'` |
+| `r4_hostd_tree_chat.txt` | 点开一个真实会话之后的树：上面那三个锚点**各 1 个**，`chat-header__contact-name` = `'测试目标A'` |
 | `two-accounts.json` | 双账号侦察的结构化结果（两实例命令行逐字相同、只读拿不到 QQ 号） |
 | `@AutomationLog.txt` | **uiautomation 库自己写的错误日志**。内容是 `尚未调用 CoInitialize` + `Can not load UIAutomationCore.dll` —— 正是「全进程只能有一条线程碰 UIA，且启动时必须 `UIAutomationInitializerInThread()`」这条硬性约定的来源 |
 

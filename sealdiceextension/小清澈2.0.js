@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         小清澈-QQ陪伴
-// @author       bilibili@嗅尘紫蝶
+// @author       bilibili@测试目标A
 // @version      2.0.0
 // @description  特化QQ陪伴版本——接入DeepSeek/OpenAI兼容接口的海豹JS插件。自动回复、连续对话、图片识别全部默认开启，开箱即用的QQ群聊/私聊AI陪伴体验
 // @timestamp    2026-07-05
@@ -524,7 +524,7 @@ function replyLong(ctx, msg, text) {
 
   if (seal.ext.find(EXT_NAME)) return;
 
-  const ext = seal.ext.new(EXT_NAME, "嗅尘紫蝶", "2.0.0");
+  const ext = seal.ext.new(EXT_NAME, "测试目标A", "2.0.0");
 
   const cmdAi = seal.ext.newCmdItemInfo();
   cmdAi.name = "ai";

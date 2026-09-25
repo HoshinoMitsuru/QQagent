@@ -130,19 +130,19 @@ Chromium 一上来就自认 active，连 `SetFocus` 都不必调。
 端到端实测（生产 `send_once`，全程零前台、零打扰）：
 
 ```
-[窗口] title='Psyche-嗅尘紫蝶'  群聊=False
+[窗口] title='测试目标A'  群聊=False
 [✓] send_text 返回 True
-回读： 【我方】Susurrus-苏霖韵: 【U1生产路径】wmchar 写入测试，收到请忽略
+回读： 【我方】Susurrus-本人: 【U1生产路径】wmchar 写入测试，收到请忽略
 ```
 
 完整一轮（这条才是「能不能干活」的证据）：
 
 ```
-RECV  Psyche-嗅尘紫蝶: 我选择发的测试消息是：预祝顺利。
+RECV  测试目标A: 我选择发的测试消息是：预祝顺利。
 AGG   聚合 3 条 → 1 个待回复项入队
 CONT  连续对话已激活
-SEND  → 'Psyche-嗅尘紫蝶'(QQ 3302676083) (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
-回读： 【我方】Susurrus-苏霖韵: (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
+SEND  → '测试目标A'(QQ 3302676083) (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
+回读： 【我方】Susurrus-本人: (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
 ```
 
 用户在自己桌面上发了那条消息，回复由**隐藏桌面上的 QQ** 发出 —— 全程屏幕无变化。
@@ -254,7 +254,7 @@ R4 专有的验收项：`--help` 里列出两个宿主子模式、两个子模�
 [01:37:35] BOOT  这是首次运行，已生成 config.json。请先到「模型接入」填好 API Key。
 [01:37:57] EXEC  启动子进程：qq-agent.exe --run-agent
 [01:37:57] RUN   常驻进程已启动 —— 会真的回复并发送消息
-[01:37:58] INFO  已附着 QQ 窗口，标题='Psyche-嗅尘紫蝶'，群聊=False     ← 主号
+[01:37:58] INFO  已附着 QQ 窗口，标题='测试目标A'，群聊=False     ← 主号
 [01:39:37] SEND  → '凡杜林办事处'(QQ 1106928276) 哈哈，可能是我最近吃多了？…  ← 真的发出了
 ```
 
@@ -593,7 +593,7 @@ qq-agent.exe --run-agent --watch 60      # 控制台里也有对应按钮
 
 ```
   [第7轮] ★ 新增 1 条（本轮共读 12 条）
-      【对方】Psyche-嗅尘紫蝶      key=aid:7684140137907339382        在吗
+      【对方】测试目标A      key=aid:7684140137907339382        在吗
 ```
 
 它同时做三件交叉验证：
@@ -858,7 +858,7 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 WindowControl '资料卡' class='Chrome_WidgetWin_1'          ← 顶层窗口，不是主窗口的子节点
   └ … 'Chrome Legacy Window' / RootWebArea
       └ GroupControl 'buddy-profile' aid='mini-buddy-profile'
-          ├ ButtonControl  'Psyche-嗅尘紫蝶的头像'
+          ├ ButtonControl  '测试目标A的头像'
           ├ GroupControl   'buddy-profile__header-name-wrap' → '查看XXX的个人主页'
           ├ GroupControl   'buddy-profile__header-uid'       ← QQ 号在这里
           │   └ TextControl 'QQ 3302676083'                  ← 私聊带前缀
@@ -885,7 +885,7 @@ GroupControl 'buddy-profile__header-sub-wrap'
 （`state/uid-map.json`）。缓存的键是**会话列表上显示的名字**（通常是备注名）。
 
 > 实测：备注名和资料卡上的真实昵称**可以完全不同**。
-> 例：会话列表显示 `光みつる`，资料卡上却是 `Psyche-嗅尘紫蝶`。
+> 例：会话列表显示 `光みつる`，资料卡上却是 `测试目标A`。
 
 ### 取号命令
 

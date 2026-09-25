@@ -61,7 +61,7 @@ class StubExecutor(Executor):
     def list_sessions(self):
         self.calls.append(("list_sessions",))
         self._maybe_raise("list_sessions")
-        return [SessionInfo(0, "苏霖韵", 2, False),
+        return [SessionInfo(0, "本人", 2, False),
                 SessionInfo(1, "小清澈群", 0, True)]
 
     def open_chat(self, name="", index=0):
@@ -72,12 +72,12 @@ class StubExecutor(Executor):
     def read_recent(self, limit=12):
         self.calls.append(("read_recent", limit))
         self._maybe_raise("read_recent")
-        return [ChatMessage("苏霖韵", "在吗", "other", dir_src="class")]
+        return [ChatMessage("本人", "在吗", "other", dir_src="class")]
 
     def send_text(self, text, *, armed=None):
         self.calls.append(("send_text", text, armed))
         self._maybe_raise("send_text")
-        return SendReceipt(True, route="wmchar", chat_title="苏霖韵")
+        return SendReceipt(True, route="wmchar", chat_title="本人")
 
     def screenshot(self, path=""):
         self.calls.append(("screenshot", path))
@@ -119,9 +119,9 @@ r = dispatch(ex, "list_sessions", {})
 case("list_sessions 信封",
      r["ok"] and r["tool"] == "list_sessions" and r["count"] == 2
      and r["sessions"][1]["is_group"] is True, str(r))
-r = dispatch(ex, "open_chat", {"name": "霖韵"})
+r = dispatch(ex, "open_chat", {"name": "本"})
 case("open_chat 透传 name（index 缺省 = -1 未指定）",
-     r["ok"] and ex.calls[-1] == ("open_chat", "霖韵", -1) and r["opened"] == "霖韵", str(r))
+     r["ok"] and ex.calls[-1] == ("open_chat", "本", -1) and r["opened"] == "本", str(r))
 r = dispatch(ex, "open_chat", {"index": 2})
 case("open_chat 透传 index", ex.calls[-1] == ("open_chat", "", 2), str(ex.calls[-1]))
 r = dispatch(ex, "open_chat", {"index": 0})

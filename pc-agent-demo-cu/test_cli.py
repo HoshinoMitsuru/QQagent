@@ -99,9 +99,9 @@ case("缺参时原语从未被调用", captured == [], str(captured))
 # ============================================================ §2 透传与信封
 print("§2 六原语参数透传与信封形状")
 qq_cu.cmd_tool(FakeArgs(cmd="open", tool="open", mode="hosted",
-                        name="Psyche-嗅尘紫蝶", index=None))
+                        name="测试目标A", index=None))
 case("open 的 name 透传给 dispatch",
-     captured and captured[-1] == ("hosted", "open", {"name": "Psyche-嗅尘紫蝶"}),
+     captured and captured[-1] == ("hosted", "open", {"name": "测试目标A"}),
      str(captured[-1:]))
 
 qq_cu.cmd_tool(FakeArgs(cmd="open", tool="open", mode="hosted",

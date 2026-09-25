@@ -21,7 +21,7 @@ pc-agent-demo*/archive/peek-fixed.txt
 pc-agent-demo*/secrets.local.json
 
 # 配置文件只提供 example 模板（config.json 是本机个性化文件，可能被填入真实
-# Key——2026-09-25 苏霖韵拍板：与 secrets 同策略，仓库里只留 config.example.json）
+# Key——2026-09-25 本人拍板：与 secrets 同策略，仓库里只留 config.example.json）
 pc-agent-demo*/config.json
 
 # PC 端运行状态：按会话持久化的上下文
@@ -50,3 +50,13 @@ pc-agent-demo*/config.backup-*.json
 # .workbuddy/tmp/ 是「一次性排查脚本」的暂存区，不属于项目资产。
 # 与它相对，.workbuddy/memory/ 是要入库的（项目日志与长期笔记）。
 /.workbuddy/tmp/
+
+# ── 敏感信息防再上传（2026-09-25 起生效）──
+# archive/ 只入库脚本（*.py）与 README.md；探针 dump / UIA 抓树 / 聊天记录 / 截图
+# / 自动化日志等运行时数据一律只留本地（含真实昵称、QQ 号、聊天内容）。
+pc-agent-demo*/archive/*
+!pc-agent-demo*/archive/README.md
+!pc-agent-demo*/archive/*.py
+# 敏感词表（真实片段）绝不入库；模板在 tools/sensitive-words.example.txt
+tools/sensitive-words.local.txt
+

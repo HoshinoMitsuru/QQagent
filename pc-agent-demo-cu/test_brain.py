@@ -75,8 +75,8 @@ class StubExecutor(Executor):
 
     def list_sessions(self):
         self.calls.append(("list_sessions",))
-        return [SessionInfo(0, "苏霖韵", 1, False),
-                SessionInfo(1, "我，我们", 0, True)]
+        return [SessionInfo(0, "本人", 1, False),
+                SessionInfo(1, "测试群B", 0, True)]
 
     def open_chat(self, name="", index=0):
         self.calls.append(("open_chat", name, index))
@@ -84,11 +84,11 @@ class StubExecutor(Executor):
 
     def read_recent(self, limit=12):
         self.calls.append(("read_recent", limit))
-        return [ChatMessage("苏霖韵", "在吗", "other", dir_src="class")]
+        return [ChatMessage("本人", "在吗", "other", dir_src="class")]
 
     def send_text(self, text, *, armed=None):
         self.calls.append(("send_text", text, armed))
-        return SendReceipt(True, route="wmchar", chat_title="苏霖韵")
+        return SendReceipt(True, route="wmchar", chat_title="本人")
 
     def screenshot(self, path=""):
         self.calls.append(("screenshot", path))
@@ -97,7 +97,7 @@ class StubExecutor(Executor):
     def health(self):
         self.calls.append(("health",))
         return Health(True, mode="stub", chat_open=True,
-                      extra={"window": {"title": "苏霖韵"}})
+                      extra={"window": {"title": "本人"}})
 
 
 def make_brain(replies: list[dict], allow=None, **kw) -> tuple[Brain, StubExecutor, list]:
@@ -153,7 +153,7 @@ case("结果以 role=tool 回灌且带 tool_call_id",
      tool_msg is not None and json.loads(tool_msg["content"])["count"] == 2,
      str(tool_msg)[:200])
 case("list_sessions 结果被缓存（供白名单翻译）",
-     len(b._last_sessions) == 2 and b._last_sessions[0]["name"] == "苏霖韵", "")
+     len(b._last_sessions) == 2 and b._last_sessions[0]["name"] == "本人", "")
 
 b, ex, payloads = make_brain([
     ai_msg(tool_calls=[tc("a", "list_sessions", {}),
@@ -203,10 +203,10 @@ b, ex, payloads = make_brain([
 ])
 ex.require_confirmation = True
 asked: list[dict] = []
-r = b.run(ex, "给苏霖韵发「你好呀」",
+r = b.run(ex, "给本人发「你好呀」",
           confirm=lambda info: (asked.append(info), True)[1])
 case("确认回调收到了拟发文本",
-     asked and asked[0]["text"] == "你好呀" and asked[0]["chat_title"] == "苏霖韵",
+     asked and asked[0]["text"] == "你好呀" and asked[0]["chat_title"] == "本人",
      str(asked))
 case("人同意后以 armed=True 真发",
      r["ok"] and ("send_text", "你好呀", True) in ex.calls, str(ex.calls))
@@ -241,11 +241,11 @@ case("未传 confirm 回调 = 一律拒绝（fail-closed）",
 # attach 面弹层一直显示「（未知）」—— extra 是中文平铺键，代码只认英文）----
 b4, ex4, _ = make_brain([])
 ex4.health = lambda: Health(True, mode="stub", chat_open=True,
-                            extra={"窗口": "我，我们", "消息列表": True})
+                            extra={"窗口": "测试群B", "消息列表": True})
 case("确认提示标题：attach 面（中文平铺键）取到标题",
-     b4._current_chat_hint(ex4) == "我，我们", "")
+     b4._current_chat_hint(ex4) == "测试群B", "")
 case("确认提示标题：hosted 面（英文 window.title）取到标题",
-     b4._current_chat_hint(StubExecutor()) == "苏霖韵", "")
+     b4._current_chat_hint(StubExecutor()) == "本人", "")
 
 
 class EmptyHealthEx(StubExecutor):
@@ -257,29 +257,29 @@ case("确认提示标题：extra 什么都没有 → 空串（上层显示「未
      b4._current_chat_hint(EmptyHealthEx()) == "", "")
 
 # ============================================================ 白名单
-print("§4 open_chat 白名单闸（实测授权：仅「我，我们」「苏霖韵」）")
-ALLOW = ["我，我们", "苏霖韵"]
+print("§4 open_chat 白名单闸（实测授权：仅「测试群B」「本人」）")
+ALLOW = ["测试群B", "本人"]
 b, ex, payloads = make_brain([
-    ai_msg(tool_calls=[tc("o1", "open_chat", {"name": "嗅尘紫蝶"})]),
+    ai_msg(tool_calls=[tc("o1", "open_chat", {"name": "测试目标A"})]),
     ai_msg(content="被拦了。"),
 ], allow=ALLOW)
-r = b.run(ex, "找嗅尘紫蝶")
+r = b.run(ex, "找测试目标A")
 tool_msg = find_tool_msg(payloads[1]["messages"], "o1")
 case("名单外目标被拦（E-CU-004）且原语没被调",
      json.loads(tool_msg["content"])["error"]["code"] == "E-CU-004"
      and not any(c[0] == "open_chat" for c in ex.calls), str(ex.calls))
 
 b, ex, payloads = make_brain([
-    ai_msg(tool_calls=[tc("o2", "open_chat", {"name": "霖韵"})]),
+    ai_msg(tool_calls=[tc("o2", "open_chat", {"name": "本"})]),
     ai_msg(content="已切过去。"),
 ], allow=ALLOW)
-r = b.run(ex, "找苏霖韵")
+r = b.run(ex, "找本人")
 case("名单内目标（子串）放行",
-     r["ok"] and ("open_chat", "霖韵", -1) in ex.calls, str(ex.calls))
+     r["ok"] and ("open_chat", "本", -1) in ex.calls, str(ex.calls))
 
 b, ex, payloads = make_brain([
     ai_msg(tool_calls=[tc("l1", "list_sessions", {})]),
-    ai_msg(tool_calls=[tc("o3", "open_chat", {"index": 1})]),   # index 1 = 我，我们
+    ai_msg(tool_calls=[tc("o3", "open_chat", {"index": 1})]),   # index 1 = 测试群B
     ai_msg(content="切到群了。"),
 ], allow=ALLOW)
 r = b.run(ex, "去测试群")

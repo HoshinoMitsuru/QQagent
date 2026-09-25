@@ -114,7 +114,7 @@ class FakeQQWindow:
 
     def diagnose_dom(self):
         # ctx 用中文键 —— diagnose_dom 的真实约定
-        return "", {"窗口": "我，我们", "类名": "Chrome_WidgetWin_1",
+        return "", {"窗口": "测试群B", "类名": "Chrome_WidgetWin_1",
                     "消息列表": True, "输入框": True, "窗口可见": False}
 
     def dom_exposed(self):
@@ -122,7 +122,7 @@ class FakeQQWindow:
 
 
 _stub_qqid = types.SimpleNamespace(
-    list_sessions=lambda win: [fake_card(0, "苏霖韵", 2),
+    list_sessions=lambda win: [fake_card(0, "本人", 2),
                                fake_card(1, "小清澈群", 0, group=True)],
     switch_session=lambda card, win: True,
 )
@@ -140,12 +140,12 @@ ca.winmsg = types.SimpleNamespace(is_iconic=lambda h: False,
 cards = ex_attach.list_sessions()
 case("list_sessions 条数一致", len(cards) == 2, str(cards))
 case("字段映射正确",
-     cards[0] == SessionInfo(index=0, name="苏霖韵", unread=2, is_group=False)
+     cards[0] == SessionInfo(index=0, name="本人", unread=2, is_group=False)
      and cards[1].is_group is True, str(cards))
 case("open_chat 按名字子串命中",
-     ex_attach.open_chat("霖韵").get("opened") == "苏霖韵", "")
+     ex_attach.open_chat("本").get("opened") == "本人", "")
 case("open_chat index=0 是合法序号（列表第一条）",
-     ex_attach.open_chat(index=0).get("opened") == "苏霖韵", "")
+     ex_attach.open_chat(index=0).get("opened") == "本人", "")
 case("open_chat 名字无匹配抛 E-CU-005",
      expect_code(lambda: ex_attach.open_chat("不存在的人"), "E-CU-005"), "")
 case("open_chat 无 name 且无 index 抛 E-CU-005",
@@ -159,7 +159,7 @@ def override_ns(base, **kw):
 
 ca.qqid = override_ns(_stub_qqid, switch_session=lambda card, win: False)
 case("切换失败（标题没变）抛 E-FG-004",
-     expect_code(lambda: ex_attach.open_chat("霖韵"), "E-FG-004"), "")
+     expect_code(lambda: ex_attach.open_chat("本"), "E-FG-004"), "")
 ca.qqid = _stub_qqid
 # 附着失败 → diagnose_attach 的精确码上抛（定位已统一走 QQWindow.attach）
 ex_attach._attached = False
@@ -185,16 +185,16 @@ _saved_grab = host_mod.grab
 
 def grab_ok(**kw) -> dict:
     return {"ok": True, "desktop": "QQAgentHidden", "png": "state/shot.png",
-            "cu": {"attached": True, "title": "苏霖韵",
-                   "sessions": [{"index": 0, "name": "苏霖韵",
+            "cu": {"attached": True, "title": "本人",
+                   "sessions": [{"index": 0, "name": "本人",
                                  "unread": 3, "is_group": False}],
-                   "messages": [{"sender": "苏霖韵", "content": "在吗",
+                   "messages": [{"sender": "本人", "content": "在吗",
                                  "direction": "other", "kind": "text",
                                  "ts": "", "dir_src": "class",
                                  "key": "k1", "rect": [1, 2, 3, 4]}],
                    "send": {"ok": True, "route": "wmchar",
-                            "title": "苏霖韵"}},
-            "open_chat": {"ok": True, "target": "苏霖韵",
+                            "title": "本人"}},
+            "open_chat": {"ok": True, "target": "本人",
                           "already_open": False, "clicked": "InvokePattern"},
             "saved": {"ok": True, "file": "state/shot.png"},
             "login_state": {"ok": True, "is_login_page": False,
@@ -206,13 +206,13 @@ def grab_ok(**kw) -> dict:
 host_mod.grab = grab_ok
 hx = create_executor("hosted", {})
 case("hosted list_sessions 映射",
-     hx.list_sessions() == [SessionInfo(0, "苏霖韵", 3, False)], "")
+     hx.list_sessions() == [SessionInfo(0, "本人", 3, False)], "")
 case("hosted open_chat 回传目标",
-     hx.open_chat("霖韵").get("opened") == "苏霖韵", "")
+     hx.open_chat("本").get("opened") == "本人", "")
 msgs = hx.read_recent(12)
 case("hosted read_recent 过滤掉 key/rect 等内部字段",
      len(msgs) == 1 and msgs[0] == ChatMessage(
-         sender="苏霖韵", content="在吗", direction="other",
+         sender="本人", content="在吗", direction="other",
          kind="text", ts="", dir_src="class"), str(msgs))
 case("hosted send_text 回执带路由",
      hx.send_text("好").route == "wmchar", "")

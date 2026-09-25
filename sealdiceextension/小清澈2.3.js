@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         小清澈-接入AI聊天（直连独立版·沉浸式陪伴）
-// @author       bilibili@嗅尘紫蝶
+// @author       bilibili@测试目标A
 // @version      2.3.0
 // @description  直连 DeepSeek/OpenAI 兼容接口的海豹 JS 插件（不依赖任何本地服务器）。支持 .ai 指令、自动唤起、连续对话模式、多人格切换（仅预设）、触发词(keywordPrefix)、图片识别(视觉API直连)、URL 网页读取。沉浸式陪伴：私聊恒免触发词且不拼接@前缀；群聊默认需触发词（并以图片白名单准入，须由已触发的用户发出），master 可用 .ai on 切到免触发词、.ai off 回到触发词机制。注意：与微信小程序共享上下文为服务器版专属能力，本直连版不支持；自定义人格为服务器版专属，本版仅保留预设人格。
 // @timestamp    2026-09-07
@@ -804,7 +804,7 @@
   // ══════════════════════════════════════
   if (seal.ext.find(EXT_NAME)) return;
 
-  const ext = seal.ext.new(EXT_NAME, "嗅尘紫蝶", "2.3.0");
+  const ext = seal.ext.new(EXT_NAME, "测试目标A", "2.3.0");
 
   ext.cmdMap["ai"] = cmdAi;
   ext.cmdMap["aichat"] = cmdAi;

@@ -293,7 +293,7 @@ qq-agent.exe --run-agent --watch 60      # 控制台里也有对应按钮
 
 ```
   [第7轮] ★ 新增 1 条（本轮共读 12 条）
-      【对方】Psyche-嗅尘紫蝶      key=aid:7684140137907339382        在吗
+      【对方】测试目标A      key=aid:7684140137907339382        在吗
 ```
 
 它同时做三件交叉验证：
@@ -558,7 +558,7 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 WindowControl '资料卡' class='Chrome_WidgetWin_1'          ← 顶层窗口，不是主窗口的子节点
   └ … 'Chrome Legacy Window' / RootWebArea
       └ GroupControl 'buddy-profile' aid='mini-buddy-profile'
-          ├ ButtonControl  'Psyche-嗅尘紫蝶的头像'
+          ├ ButtonControl  '测试目标A的头像'
           ├ GroupControl   'buddy-profile__header-name-wrap' → '查看XXX的个人主页'
           ├ GroupControl   'buddy-profile__header-uid'       ← QQ 号在这里
           │   └ TextControl 'QQ 3302676083'                  ← 私聊带前缀
@@ -585,7 +585,7 @@ GroupControl 'buddy-profile__header-sub-wrap'
 （`state/uid-map.json`）。缓存的键是**会话列表上显示的名字**（通常是备注名）。
 
 > 实测：备注名和资料卡上的真实昵称**可以完全不同**。
-> 例：会话列表显示 `光みつる`，资料卡上却是 `Psyche-嗅尘紫蝶`。
+> 例：会话列表显示 `光みつる`，资料卡上却是 `测试目标A`。
 
 ### 取号命令
 

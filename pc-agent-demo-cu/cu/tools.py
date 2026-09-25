@@ -71,7 +71,7 @@ _TOOLSPEC = {
             "type": "object",
             "properties": {
                 "name": {"type": "string",
-                         "description": "目标会话名的子串，如「霖韵」。"
+                         "description": "目标会话名的子串，如「昵称片段」。"
                                         "不确定全名时给子串即可。"},
                 "index": {"type": "integer",
                           "description": "会话序号（list_sessions 给的 index）。"

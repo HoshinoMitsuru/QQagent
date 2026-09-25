@@ -6,7 +6,7 @@
 				"key": "apiKey",
 				"type": "string",
 				"defaultValue": "",
-				"value": "sk-63e985cd4a984b619e2463627f0f0dd0",
+				"value": "",
 				"deprecated": true,
 				"description": ""
 			},

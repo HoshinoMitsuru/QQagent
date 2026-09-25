@@ -1,0 +1,160 @@
+{
+  "_说明": "PC 端 QQ AI 代理（路线A）配置文件。所有字段都有内置默认值，缺项不影响运行。",
+  "_密钥说明": "api_key 留空时，会尝试从 api_key_file 读取（相对路径按本目录解析）；若该文件是 JSON，按 api_key_json_keys 顺序找第一个非空值。secrets.local.json 已被 .gitignore 排除，密钥不会进仓库。",
+  "_警示": "不要把 api_key 直接写在这一行下面的 llm.api_key 里 —— 本仓库会推到公开 Gitee。",
+  "llm": {
+    "api_base": "https://api.deepseek.com",
+    "api_key": "",
+    "api_key_file": "secrets.local.json",
+    "api_key_json_keys": [
+      "llm.api_key",
+      "deepseek.api_key",
+      "openai.api_key",
+      "api_key",
+      "DEEPSEEK_API_KEY"
+    ],
+    "model": "deepseek-flash",
+    "temperature": 1.1,
+    "max_tokens": 800,
+    "timeout_seconds": 60,
+    "system_prompt": "你是『小清澈』，一个温和、真诚、有点黏人的 AI 陪伴者。说话口语化、简短，一次回复不超过三句话。不要用列表和标题，不要像客服一样客套。"
+  },
+  "chat": {
+    "self_nickname": "",
+    "_private_chat_only": "false = 群聊也处理；true = 群聊一律跳过",
+    "private_chat_only": false,
+    "_group_requires_trigger": "群聊里是否额外要求触发词。false = 群聊也自由发言（当前按你的要求放开）",
+    "group_requires_trigger": false,
+    "always_reply": true,
+    "trigger_prefixes": [
+      "小清澈",
+      "清澈"
+    ],
+    "reply_cooldown_seconds": 1.5,
+    "min_llm_interval_seconds": 2.0,
+    "max_history_entries": 40,
+    "send_with_ctrl_enter": false,
+    "poll_interval_seconds": 0.8,
+    "max_reply_chars": 500,
+    "_nontext说明": "图片/语音/文件/动画表情怎么处理。skip = 一律跳过（默认，最省额度）；describe = 拿 QQ 气泡里的占位文本（如 [动画表情]）当正文继续走，让 AI 自己决定回不回。改 describe 前请注意：不显未读数字的会话里，一个表情也会触发一次模型调用。",
+    "nontext_policy": "skip"
+  },
+  "_aggregate说明": "防抖聚合（移植自 小清澈3.0.js）：对方连发多条时合并成一次模型调用。等待 = 基础等待 + 习惯性额外停顿(EMA) + 冷启动惩罚。基础等待两档自适应：同一会话连续 fast_after_single_rounds 轮都只有单条消息 → 降到 fast_wait_ms；一旦出现某轮 ≥2 条（又在连发）→ 回到 base_wait_ms 并重新计数。",
+  "aggregate": {
+    "enabled": true,
+    "base_wait_ms": 5000,
+    "fast_wait_ms": 2000,
+    "fast_after_single_rounds": 3,
+    "cold_start_penalty_ms": 6000,
+    "decay_turns": 4,
+    "cold_start_gap_ms": 60000,
+    "habit_min_interval_ms": 500,
+    "habit_max_interval_ms": 15000,
+    "habit_ema_alpha": 0.3
+  },
+  "_continuous说明": "连续对话模式（移植自 小清澈3.0.js）：AI 在某个会话开口后，该会话在 timeout_seconds 内免触发词；超时自动退出。",
+  "continuous": {
+    "enabled": true,
+    "timeout_seconds": 1800
+  },
+  "_commands说明": "对话内指令（移植自插件 小清澈3.0.js 的 .ai 指令集，当前实现 .ai reset / .ai help）。指令本身绝不转发给 AI、也不写进上下文，只回一句回执。accept_from 里 other=对方、self=你自己手输的；机器人自己发出去的话会被自动排除。",
+  "commands": {
+    "enabled": true,
+    "prefixes": [
+      ".ai",
+      "。ai",
+      "/ai",
+      ".aichat"
+    ],
+    "accept_from": [
+      "other",
+      "self"
+    ],
+    "reply_ack": true,
+    "ack_reset": "小清澈读懂了你的意思，回到了房间，脱衣睡下。",
+    "reset_clears_pending": true,
+    "unknown_hint": "这条指令还没移植到 PC 端，暂时只支持 .ai reset / .ai help。"
+  },
+  "_persist说明": "上下文持久化：按会话（私聊 private:<QQ号> / 群聊 group:<群号>）隔离落盘，重启不丢。state/ 目录已被 .gitignore 排除。",
+  "persist": {
+    "enabled": true,
+    "file": "state/conversations.json",
+    "save_interval_seconds": 3.0,
+    "max_scopes": 50
+  },
+  "_identity说明": "会话主键用 QQ 号（state/uid-map.json 缓存）而不是昵称。首次遇到某个会话需要『打开资料卡取号』，会抢前台一次；之后只读缓存。取号命令：python qqid.py --enroll-all",
+  "identity": {
+    "enabled": true,
+    "store": "state/uid-map.json",
+    "enroll_on_demand": true,
+    "require_qq_uin": false
+  },
+  "_queue说明": "回复排队 + 风控限速。真实约束不是性能而是账号风控：个人号高频发送会被限制。max_replies_per_minute 与 min_interval_seconds 是决定『能服务几个用户』的唯一两个数，调大前请先读 并发能力评估与优化方向.md §9。",
+  "queue": {
+    "enabled": true,
+    "_风控": "两条同时生效，取更严格者：硬间隔 + 60s 滑动窗口。默认 12/分 + 5s ≈ 安全区间中段。",
+    "max_replies_per_minute": 12,
+    "min_interval_seconds": 5.0,
+    "_合并": "排队期间用户又发来补充消息：还要等 > merge_if_wait_over_seconds 就并进他待发的那批上下文（不额外回一次），否则照常另排一次回复。",
+    "merge_if_wait_over_seconds": 5.0,
+    "_成本": "单次『切会话+读+写+发+模型』的经验耗时，用于估算剩余等待。实测 UI≈1.2s、flash≈1.3~1.8s。",
+    "unit_cost_seconds": 3.0,
+    "_硬上限": "静默窗最多顺延这么久。不设的话『每 20 秒来一句』的用户会让这条永远结算不掉（饿死）。",
+    "max_hold_seconds": 30.0,
+    "_抖动": "给到期时间加随机抖动，避免多个会话的窗口同时到期一起涌入 UI 串行队列。",
+    "jitter_seconds": 3.0,
+    "_重试上限": "发送前复核（标题/QQ号/会话签名）连续失败这么多次就放弃并撤单，防止无限重排。",
+    "max_attempts": 3
+  },
+  "_discovery说明": "多会话『发现』（降级方案）。桌面 UI 上每个会话只保留最新一条消息的节选，摘要不足以构造上下文，所以这里只做发现：扫会话列表的未读徽标/摘要指纹 → 占位排队（不碰前台、不读正文）→ 出队时才切过去做一次『上下文总读取』并交给 AI（见 agent.prepare）。",
+  "discovery": {
+    "enabled": true,
+    "_节流": "扫一次会话列表的开销（UIA 遍历）约几十到一两百毫秒，别设得太小。",
+    "scan_interval_seconds": 2.0,
+    "_触发": "trigger_on_unread 是硬证据（红点）；trigger_on_preview_change 兜住「不显未读数字」的会话，但会被我方自己发出的回复误触发——发送后会自动重采指纹来抑制。",
+    "trigger_on_unread": true,
+    "trigger_on_preview_change": true,
+    "_首见": "第一次见到某个会话时，如果它已经带未读徽标也照样触发（未读=对方发来后一直没人看，是新鲜的）。不想让它一上来就清历史未读就设为 false。",
+    "trigger_on_first_sight_unread": true,
+    "_单轮上限": "一次扫描最多占位几个会话，避免一次性把队列灌满、把前台预算打穿。",
+    "max_enqueue_per_scan": 3,
+    "_读取深度": "总读取时读最近多少条消息。首见会话会保留最后 unread 条不被基线吃掉。",
+    "read_limit": 30,
+    "_状态文件": "哪些会话已建基线 + 上次看到的指纹快照。丢了会导致重启后重复建基线（吞掉重启瞬间的未读）。",
+    "state_file": "state/rotation.json"
+  },
+  "teach": {
+    "enabled": true,
+    "names": [
+      "小清澈",
+      "Claritas-小清澈"
+    ],
+    "max_chars": 1000,
+    "honor_own_outgoing": false
+  },
+  "_write_mode说明": "V2 的写入路径。clipboard = V1 原路（抢前台 → 剪贴板 → Ctrl+V，服务用户桌面上的 QQ）；wmchar = 窗口消息直投（服务隐藏桌面上的 QQ）。隐藏桌面上 clipboard 必失效：它的终点是 OS 输入队列，而队列只服务当前 input desktop 的前台窗口。实测 wmchar 在隐藏桌面上第一档（零激活）就落地。",
+  "uia": {
+    "write_mode": "auto",
+    "read_chain": [
+      "uia",
+      "ocr"
+    ],
+    "direction_mode": "auto",
+    "ocr_lang": "chi_sim+eng",
+    "ocr_scale": 2.0,
+    "_restore_foreground": "方案C：true = 写完后把前台窗口还给调用前的那个窗口，降低打扰；false = 关掉（QQ 会继续霸占最上层）",
+    "restore_foreground": true
+  },
+  "_cu说明": "LLM Computer Use 规划层（pc-agent-demo-cu 新增）。base_url/model 独立于 llm 节；api_key 留空 = 复用主 llm 密钥（secrets.local.json）。max_steps 是单任务的工具调用轮数上限，防模型打转烧 token。open_chat_allow 非空 = open_chat 只允许名单内目标（附着主号实测的安全闸，attach 白名单由 test_live_brain.py 注入，这里留空 = 不限制）。",
+  "cu": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key": "",
+    "api_key_file": "",
+    "timeout_seconds": 120.0,
+    "max_steps": 8,
+    "max_tokens": 2048,
+    "system_prompt": "",
+    "open_chat_allow": []
+  }
+}

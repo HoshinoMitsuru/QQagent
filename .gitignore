@@ -20,6 +20,10 @@ pc-agent-demo*/archive/peek-fixed.txt
 # PC 端本地密钥（绝不入库）
 pc-agent-demo*/secrets.local.json
 
+# 配置文件只提供 example 模板（config.json 是本机个性化文件，可能被填入真实
+# Key——2026-09-25 苏霖韵拍板：与 secrets 同策略，仓库里只留 config.example.json）
+pc-agent-demo*/config.json
+
 # PC 端运行状态：按会话持久化的上下文
 pc-agent-demo*/state/
 pc-agent-demo*/*.json.bad

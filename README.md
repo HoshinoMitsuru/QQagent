@@ -6,9 +6,9 @@
 
 | 线 | 是什么 | 跑在哪 | 当前状态 |
 |---|---|---|---|
-| **① 小清澈 JS 插件** | 海豹骰子（SealDice）插件，群聊/私聊里的 AI 陪伴 | 海豹骰子 | `小清澈3.0.js`（v3.0.0），可用 |
-| **② PC 端 QQ AI 代理** | 不碰协议，直接操作本机 QQ 客户端窗口来做 AI 回复 | Windows | 两棵并列目录树，见下 |
-| **③ 冒烟测试** | 插件的 Node 冒烟脚本 | Node | `test/`，可用 |
+| **sealdice JS 插件** | 海豹骰子（SealDice）插件，群聊/私聊里的 AI 陪伴 | 海豹骰子 | `小清澈3.0.js`（v3.0.0），可用 |
+| **PC 端 QQ AI 代理** | 不碰协议，直接操作本机 QQ 客户端窗口来做 AI 回复 | Windows | 三棵并列目录树，见下 |
+| **冒烟测试** | 插件的 Node 冒烟脚本 | Node | `test/`，可用 |
 
 ---
 
@@ -70,27 +70,32 @@ node test/plugin-smoke-test.js       # 插件整体（含图片白名单场景�
 
 ---
 
-## ② PC 端 QQ AI 代理（两条路线）
+## ② PC 端 QQ AI 代理（三条路线）
 
 目标：用「操作本机 QQ 客户端」代替协议接入，绕开 QQ 协议风控。
 不碰协议、不碰硬件模拟，程序做的只是**读控件、写文字、触发发送按钮**。
 
-这条线**并行维护两棵独立的目录树**，因为它们的运行前提完全不同：
+这条线**并行维护三棵独立的目录树**，因为它们的运行前提与定位完全不同：
 
-| | **V1 · 附着式** | **V2 · 独立桌面托管** |
-|---|---|---|
-| 目录 | [`pc-agent-demo-vm/`](pc-agent-demo-vm/) | [`pc-agent-demo-r4/`](pc-agent-demo-r4/) |
-| 运行前提 | 附着到**已经登录好的那个桌面**上的 QQ | 自己建一张**用户看不见的桌面**，把 QQ 启动上去 |
-| 写文本怎么走 | 抢前台 → 剪贴板 → 按键 → 归还前台 | 一次窗口消息（那张桌面上没有前台可抢） |
-| 打扰用户吗 | 会：写入期间 QQ 被置顶、键盘输入被接管 | 不会：QQ 不在用户的桌面上，屏幕上什么都没有 |
-| 适用场景 | **虚拟机 / 专用机** | **用户自己的机器** |
-| 交付 | `dist\qq-agent.exe`（含 `-noadmin` / `-console` 变体） | 同上，`build.bat` 一次构建，`test_exe.py` 52 项验收 |
-| 状态 | 可用，已实机验证（git tag `v1.0-vm-attach`） | 机制层 + 常驻 + 控制台面板 + 打包均已实机验证（tag `v2.0-r4-mechanism`） |
+| | **V1 · 附着式** | **V2 · 独立桌面托管** | **V3 · LLM Computer Use** |
+|---|---|---|---|
+| 目录 | [`pc-agent-demo-vm/`](pc-agent-demo-vm/) | [`pc-agent-demo-r4/`](pc-agent-demo-r4/) | [`pc-agent-demo-cu/`](pc-agent-demo-cu/) |
+| 定位 | 无人值守自动回复 | 同左 + 常驻宿主与控制台 | **给 Agent 应用调用的 QQ 操作工具**（Codex / Claude Code / WorkBuddy 等） |
+| 运行前提 | 附着到**已经登录好的那个桌面**上的 QQ | 自己建一张**用户看不见的桌面**，把 QQ 启动上去 | 双执行面：hosted（R4 隐藏桌面小号，全自主）/ attach（附着主号，每条发送人工确认） |
+| 谁来操作 | 程序（消息驱动：防抖聚合 → 生成 → 发送） | 同左 | **调用方 Agent 决定**：六原语逐个编排，或一句任务委托给内置 Brain |
+| 交付 | `dist\qq-agent.exe`（含 `-noadmin` / `-console` 变体） | 同上，`build.bat` 一次构建，`test_exe.py` 52 项验收 | `dist\qq-cu.exe`（CLI，JSON 信封 + 退出码契约，`build-cu.bat` 构建） |
+| 状态 | 可用，已实机验证（git tag `v1.0-vm-attach`） | 机制层 + 常驻 + 控制台面板 + 打包均已实机验证（tag `v2.0-r4-mechanism`） | F1–F7 完成：双执行面真机验收 + WorkBuddy 框架内实调验证 |
 
 **为什么不是二选一**：V2 解决的是 V1 最大的软肋（唯一会打扰用户的一步），
 但它换来一个新的硬前提 —— 隐藏桌面上的 QQ 没人能手动操作，
 所以「登录」「打开会话」这些原本由用户顺手完成的事必须由程序自己做。
 两条路各有代价，都留着。
+
+**V3 与前两者不是替代关系**：V1/V2 是「消息驱动」的自动回复代理，
+V3 是「任务驱动」的操作工具 —— 它把读写 QQ 的能力做成带安全闸的
+六原语（读会话 / 开会话 / 读消息 / 发送 / 截图 / 体检），交给
+Agent 应用按需调用；安全性靠三层闸（attach 确认锁 fail-closed、
+hosted 目标白名单、步数上限）而不是靠无人值守策略。
 
 ### 先读哪一份
 
@@ -100,6 +105,8 @@ node test/plugin-smoke-test.js       # 插件整体（含图片白名单场景�
 | 想搞懂 V1 的技术难点与创新 | `pc-agent-demo-vm/技术核实文档.md`（含汇报要点速查） |
 | 想搞懂 V2 的机制与踩过的坑 | `pc-agent-demo-r4/README.md`（含「常驻化」一节与坑对照表） |
 | 想看 R4 方案的调研与实测 | `pc-agent-demo-r4/虚拟后台方案调研.md` |
+| 想让自己的 Agent 调用 QQ | `pc-agent-demo-cu/CLI用法.md`（qq-cu.exe 的契约与示例） |
+| 想看 CU 的机制与安全设计 | `pc-agent-demo-cu/README.md` + `cu/` 源码注释 |
 | 想看当时的验证过程与证据 | `pc-agent-demo-*/archive/`（探针脚本 + 原始数据，**归档不删**） |
 
 ---
@@ -118,10 +125,11 @@ node test/plugin-smoke-test.js       # 插件整体（含图片白名单场景�
 ├── review-2.3-*.md               2.3 的代码评审留档
 ├── pc-agent-demo-vm/             PC 端代理 V1（附着式）
 ├── pc-agent-demo-r4/             PC 端代理 V2（独立桌面托管）
+├── pc-agent-demo-cu/             PC 端代理 V3（LLM Computer Use CLI，qq-cu.exe）
 └── .workbuddy/memory/            项目日志与长期笔记（要入库）
 ```
 
-> 两个 `pc-agent-demo-*/` 目录里各有自己的 `README.md`、`EXE使用说明.md` 与
+> 三个 `pc-agent-demo-*/` 目录里各有自己的 `README.md`、`EXE使用说明.md` 与
 > `技术核实文档.md` —— **那一层才是它们的主文档**，这里只做导航。
 
 ---

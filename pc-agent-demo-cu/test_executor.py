@@ -95,16 +95,47 @@ case("拒绝发生在触碰 QQ 之前（_win 仍是 None）", ex._win is None,
 print("§4 attach 面：list_sessions / open_chat 的映射与错误码")
 import cu.attach as ca                        # noqa: E402
 
+
+class FakeQQWindow:
+    """QQWindow 替身：attach() 成功，win/hwnd 直接可用。
+    fail_attach=True 时模拟主窗口附着失败（diagnose_attach 给 E-QQ-003）。"""
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg
+        self.win = object()
+        self.hwnd = 4321
+        self.fail_attach = False
+
+    def attach(self):
+        return not self.fail_attach
+
+    def diagnose_attach(self):
+        return ("E-QQ-003", {"窗口枚举": "stub"})
+
+    def diagnose_dom(self):
+        # ctx 用中文键 —— diagnose_dom 的真实约定
+        return "", {"窗口": "我，我们", "类名": "Chrome_WidgetWin_1",
+                    "消息列表": True, "输入框": True, "窗口可见": False}
+
+    def dom_exposed(self):
+        return True
+
+
 _stub_qqid = types.SimpleNamespace(
-    find_qq_main_window=lambda: ("desc", 4321),
     list_sessions=lambda win: [fake_card(0, "苏霖韵", 2),
                                fake_card(1, "小清澈群", 0, group=True)],
     switch_session=lambda card, win: True,
 )
 _saved_qqid = ca.qqid
 _saved_agent = ca.agent
+_saved_winmsg = ca.winmsg
 ca.qqid = _stub_qqid
-ca.agent = types.SimpleNamespace(control_from_hwnd=lambda hwnd: object())
+ca.agent = types.SimpleNamespace(QQWindow=FakeQQWindow,
+                                 log=lambda *a, **k: None)
+# winmsg 也替掉：_ensure_qq_visible 对替身句柄 4321 必须 no-op，
+# 绝不能拿它对系统里恰好同号的真窗口调 ShowWindow
+ca.winmsg = types.SimpleNamespace(is_iconic=lambda h: False,
+                                  is_visible=lambda h: True)
 
 cards = ex_attach.list_sessions()
 case("list_sessions 条数一致", len(cards) == 2, str(cards))
@@ -129,13 +160,20 @@ def override_ns(base, **kw):
 ca.qqid = override_ns(_stub_qqid, switch_session=lambda card, win: False)
 case("切换失败（标题没变）抛 E-FG-004",
      expect_code(lambda: ex_attach.open_chat("霖韵"), "E-FG-004"), "")
-ca.qqid = override_ns(_stub_qqid, find_qq_main_window=lambda: ("desc", 0))
-case("主窗口找不到抛 E-QQ-003",
+ca.qqid = _stub_qqid
+# 附着失败 → diagnose_attach 的精确码上抛（定位已统一走 QQWindow.attach）
+ex_attach._attached = False
+ex_attach._win.fail_attach = True
+case("主窗口附着失败抛 E-QQ-003",
      expect_code(lambda: ex_attach.list_sessions(), "E-QQ-003"), "")
+ex_attach._win.fail_attach = False
 ca.qqid = override_ns(_stub_qqid, list_sessions=lambda win: [])
 case("会话列表为空抛 E-QQ-007",
      expect_code(lambda: ex_attach.list_sessions(), "E-QQ-007"), "")
-ca.qqid, ca.agent = _saved_qqid, _saved_agent
+ca.qqid = _stub_qqid
+case("health 附着后置 _attached（预检与后续原语共享同一窗口）",
+     (ex_attach.health().chat_open is True) and ex_attach._attached is True, "")
+ca.qqid, ca.agent, ca.winmsg = _saved_qqid, _saved_agent, _saved_winmsg
 
 # ============================================================ hosted 面
 print("§5 hosted 面：子进程结果的解析与错误映射")

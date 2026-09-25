@@ -103,17 +103,24 @@ class AttachExecutor(Executor):
                 time.sleep(1.0)
 
     def _locate(self) -> tuple:
-        """定位 QQ 主窗口控件。已附着时直接用附着的窗口——
-        find_qq_main_window 的「标题=QQ / 宽≥600」过滤在窗口隐藏/最小化时
-        可能空手而归，与 QQWindow.attach 的判据本来就不一致。"""
-        if self._attached:
-            win = self._window()
-            return win.win, win.hwnd
-        desc, hwnd = qqid.find_qq_main_window()
-        if not hwnd:
-            raise ExecutorError("E-QQ-003", "找不到可见的 QQ 主窗口",
-                                {"窗口枚举": desc})
-        return agent.control_from_hwnd(hwnd), hwnd
+        """定位 QQ 主窗口控件 —— 只有一个事实来源：QQWindow.attach()。
+
+        2026-09-25 第三轮真机教训：此前未附着时走 qqid.find_qq_main_window()
+        （判据 title=="QQ" 且宽≥600），与 QQWindow.attach（挑最大的可见
+        Chrome_WidgetWin_1，不管标题）**本来就不一致**，两条路会定位到
+        不同的窗口：
+
+        - 主窗口开着会话时标题是会话名（如「我，我们」）而非 "QQ"，
+          find_qq_main_window 匹配不到它，却可能匹配到别的宽≥600 窗口；
+        - 那个窗口的 UIA 树里没有会话列表 → list_sessions 返回空 →
+          E-QQ-007 假象；「现场」键报的窗口状态也是它的，与附着窗口
+          互相矛盾（真机日志：step1-4 报「非最小化」，step5 却检测到
+          最小化并还原成功，还原后一切正常）。
+
+        所以这里无条件走附着路径：health/read/screenshot 共用同一个
+        附着状态与窗口句柄，不再有第二套定位判据。"""
+        win = self._ensure_attached()
+        return win.win, win.hwnd
 
     def _read_cards(self, win_ctrl) -> tuple:
         try:
@@ -226,12 +233,17 @@ class AttachExecutor(Executor):
         return Shot(ok=True, path=res.get("file") or res.get("path") or p)
 
     def health(self) -> Health:
-        win = self._window()
-        if win.win is None and not win.attach():
-            code, ctx = win.diagnose_attach()
+        # 走 _ensure_attached 而不是自己 win.attach()：
+        # 2026-09-25 第三轮真机教训 —— 原写法附着成功但**不置 self._attached**，
+        # 预检附着了主窗口，step1 的 _locate 却又走 find_qq_main_window
+        # 重新定位到另一个窗口（根因见 _locate 的注释）。
+        # 附着失败不抛（health 是探活原语，返回不 ok 的 Health 即可）。
+        try:
+            win = self._ensure_attached()
+        except ExecutorError as exc:
             return Health(ok=False, mode=self.name, chat_open=False,
-                          code=code or "E-QQ-003", detail="附着 QQ 主窗口失败",
-                          extra=ctx)
+                          code=exc.code, detail=exc.detail,
+                          extra=dict(exc.ctx))
         code, ctx = win.diagnose_dom()
         ok = win.dom_exposed()
         # diagnose_dom 的 ctx 用中文键（消息列表/输入框/窗口可见）——

@@ -54,11 +54,19 @@ DEFAULT_TIMEOUT = 90.0
 
 
 def _load_secrets(cfg: dict) -> dict:
-    """读取 secrets.local.json（路径沿用 llm.api_key_file 约定），读不到返回 {}。"""
+    """读取 secrets.local.json（路径沿用 llm.api_key_file 约定），读不到返回 {}。
+
+    相对路径一律按本项目根目录解析（cu/ 的上级 = agent.py 的 HERE），绝不看 CWD
+    —— 与 agent.resolve_api_key 同一条纪律：从别的目录启动时读不到密钥文件，
+    表现为「同样的配置换个目录结果就不一样」，这类依赖 CWD 的行为必须掐掉。
+    """
     llm = cfg.get("llm") or {}
+    here = os.path.dirname(os.path.abspath(__file__))
     path = (llm.get("api_key_file") or "").strip()
     if not path:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "secrets.local.json")
+        path = os.path.join(here, "..", "secrets.local.json")
+    elif not os.path.isabs(path):
+        path = os.path.join(here, "..", path)
     path = os.path.normpath(path)
     try:
         with open(path, encoding="utf-8") as fh:

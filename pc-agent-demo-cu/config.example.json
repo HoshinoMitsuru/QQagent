@@ -162,11 +162,13 @@
     "open_chat_allow": [],
     "attach_allow": []
   },
-  "_qq_agent说明": "P1 服务端大脑通道（cu/server_brain.py + qq-cu ask）：把「生成回复」交给 ai-web-page 服务端（ECS），大脑完全在服务端。secret 与服务端 QQ_WEBHOOK_SECRET 同值（HMAC-SHA256 签名，头 X-QQ-Signature）；也可放 secrets.local.json 的 qq_agent.secret。qq_number = hosted 小号 QQ 号（ask 命令缺省发送者）。",
+  "_qq_agent说明": "P1/P2 服务端大脑通道（cu/server_brain.py）：把「生成回复」交给 ai-web-page 服务端（ECS），大脑（LLM/人格/记忆/会话历史）完全在服务端。enabled=true 时**双处生效**：① qq-cu ask 子命令；② agent.py 常驻循环（hostd/hostagent 的 generate_reply）整体切换到服务端通道，不再直连 DeepSeek（enabled 缺省 false = 直连兜底不变）。secret 与服务端 QQ_WEBHOOK_SECRET 同值（HMAC-SHA256 签名，头 X-QQ-Signature）；建议放 secrets.local.json 的 qq_agent.secret。qq_number = hosted 小号 QQ 号（ask 缺省发送者；群聊时作服务端建号兜底）。channel = 审计/保险丝用的通道标识（r4）。",
   "qq_agent": {
+    "enabled": false,
     "base_url": "https://aligera.website",
     "secret": "",
     "qq_number": "",
-    "timeout_seconds": 90.0
+    "timeout_seconds": 90.0,
+    "channel": "r4"
   }
 }

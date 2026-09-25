@@ -111,6 +111,15 @@ except ImportError:
 
     EC = _ECShim()
 
+# 服务端大脑通道（P2）：config.qq_agent.enabled=true 时，「生成回复」交给
+# ai-web-page 服务端（POST /api/qq/agent），本进程只负责 QQ 收发。
+# 缺失可降级（server 模式自动禁用，回落直连 LLM），与 error_codes 同一容错风格 ——
+# 这个文件是可选组件，绝不该成为新的启动失败点。
+try:
+    from cu.server_brain import get_reply as _server_get_reply
+except ImportError:
+    _server_get_reply = None
+
 def _resolve_home() -> str:
     """
     数据根目录的解析顺序（顺序不能改，改了打包版会把状态写到临时解压目录里）：
@@ -493,6 +502,20 @@ DEFAULTS = {
         # 于是有人跑隐藏桌面时忘了手改配置，每次发送都撞 E-FG-001。
         # 让程序自己认桌面，比让人记得改配置可靠。
         "write_mode": "auto",
+    },
+    # ------------------------------------------------------------ 服务端大脑（P2）
+    # config.qq_agent.enabled=true 时，generate_reply 不再直连 LLM，
+    # 改为把本轮新消息交给 ai-web-page 服务端（POST /api/qq/agent）生成回复：
+    # 大脑（LLM/人格/记忆/会话历史）完全归属 ECS，本进程退化为 QQ 收发端。
+    # secret 建议放 secrets.local.json 的 qq_agent.secret（与服务端 QQ_WEBHOOK_SECRET 同值）。
+    # 群聊时 qq_number 仅作服务端建号的兜底标识（服务端按 group_id 建群会话）。
+    "qq_agent": {
+        "enabled": False,
+        "base_url": "https://aligera.website",
+        "secret": "",
+        "qq_number": "",
+        "timeout_seconds": 90.0,
+        "channel": "r4",
     },
 }
 
@@ -3960,8 +3983,7 @@ class Agent:
         # ⚠️ 但它是**同步**跑在主循环线程上的：这一步期间既不读消息、也不写心跳。
         # 上限就是 llm.timeout_seconds（默认 60s）。所以这里显式把阶段和上限报给心跳 ——
         # 否则界面会把「模型调用耗时 40s」误报成「进程可能卡住了」。
-        set_phase("调模型", float(self.cfg["llm"].get("timeout_seconds") or 60) + 15,
-                  target=scope)
+        set_phase("调模型", self._gen_phase_budget(), target=scope)
         reply = self.generate_reply(scope)
         if not reply:
             self.queue.drop(scope, aborted=True)
@@ -4491,10 +4513,17 @@ class Agent:
         self._last_gen_fail = ""        # 本次生成失败的原因码（供调用方判断要不要再报一条）
         hist = self.store.history(scope)
         try:
-            reply = self.llm.chat(hist.build_messages())
+            if self._server_enabled():
+                # P2 服务端大脑：本轮消息交给 ECS 生成，本地 History 退化为
+                # teach/reset/防抖的本地账本（不再上行 build_messages）。
+                reply = self._generate_via_server(scope, hist)
+            else:
+                reply = self.llm.chat(hist.build_messages())
         except EC.AppError as exc:
             # 模型侧的错误已经按状态码分类好了（密钥/地址/限流/超时/服务端…），
             # 直接透传，不要再包一层「模型调用失败」把码盖掉。
+            # 服务端通道的错误码（E-LLM-002~007 / E-SRV-001）在 _generate_via_server
+            # 里已对齐同一目录，两条通道共用这一个接住点。
             report(exc.code, exc.detail_text, ctx={**exc.context, "scope": scope})
             self._last_gen_fail = exc.code
             return ""
@@ -4521,6 +4550,106 @@ class Agent:
             self.store.activate_continuous(scope, time.time())
             log("CONT", f"连续对话已激活（{self._cont_timeout():.0f}s 内该会话免触发词）")
         return reply
+
+    # ---------------------------------------------------- 服务端大脑通道（P2）
+    def _server_enabled(self) -> bool:
+        """服务端通道开关：config.qq_agent.enabled 且 cu.server_brain 可导入。"""
+        qa = self.cfg.get("qq_agent") or {}
+        return bool(qa.get("enabled")) and _server_get_reply is not None
+
+    def _gen_phase_budget(self) -> float:
+        """「调模型」相位的心跳上限。取当前通道的超时上界，再加 15s 余量。"""
+        llm_t = float(self.cfg["llm"].get("timeout_seconds") or 60)
+        if self._server_enabled():
+            qa_t = float((self.cfg.get("qq_agent") or {}).get("timeout_seconds") or 90.0)
+            return max(llm_t, qa_t) + 15
+        return llm_t + 15
+
+    @staticmethod
+    def _server_texts(hist) -> list:
+        """提取「本轮待发消息」：最后一条 assistant（含调教条目）之后的全部 user 消息。
+
+        为什么不直接取最后一条：总读取路径（_read_into_history）会把一批消息
+        逐条写进历史，只取最后一条会丢掉前面的。从尾部倒着收集到第一条
+        assistant 为止 —— 上次回复成功后会 push 一条 assistant("auto")，
+        它就是天然的「上轮已处理」边界。上次生成失败的 user 消息留在历史里，
+        下一轮会再次进入 texts（与直连模式 build_messages 的重带语义一致）。
+        """
+        texts = []
+        for it in reversed(hist.to_dict()):
+            if it.get("role") == "assistant":
+                break
+            if it.get("role") == "user" and it.get("content"):
+                texts.append(str(it["content"]))
+        texts.reverse()
+        return texts
+
+    def _generate_via_server(self, scope: str, hist) -> str:
+        """把本轮消息交给 ai-web-page 服务端生成回复。
+
+        scope 形如 "private:{uin}" / "group:{uin}"（见 identity_of）。
+        服务端按 qq_number 建用户、按 scope/group_id 建确定性会话 ID
+        （qq_{number}_{scope} / qq_{group_id}_group），历史完全由服务端持有；
+        本地只在发送成功后 push assistant("auto") 镜像（供 .ai reset / dump 用）。
+
+        失败一律抛 EC.AppError（信封错误码已与服务端同一目录），由
+        generate_reply 的统一接住点处理 —— 错误链路与直连通道完全同构。
+        """
+        qa = self.cfg.get("qq_agent") or {}
+        kind, _, ident = scope.partition(":")
+        is_group = (kind == "group")
+
+        if is_group:
+            # 群会话：服务端按 group_id 建会话；qq_number 用群号兜底建「群用户」
+            # （近似：群成员不做独立映射，P2 先保证群聊能通）。
+            if not ident.isdigit():
+                raise EC.AppError("E-SRV-001",
+                                  f"群会话 {scope} 没解析出群号（qqid 未收录？）",
+                                  {"scope": scope})
+            group_id = ident
+            number = (qa.get("qq_number") or "").strip() or group_id
+        else:
+            # 私聊：对方 QQ 号即服务端身份主键。昵称降级（没取到号）时宁可报错
+            # 作废这一条，也不能拿兜底号发 —— 那会把两个不同的人串进同一份记忆。
+            if not ident.isdigit():
+                raise EC.AppError("E-SRV-001",
+                                  f"会话 {scope} 没解析出对方 QQ 号（qqid 未收录？）",
+                                  {"scope": scope})
+            group_id = ""
+            number = ident
+
+        texts = self._server_texts(hist)
+        if not texts:
+            raise EC.AppError("E-SRV-001",
+                              "上下文里没有待发送的用户消息",
+                              {"scope": scope})
+
+        # 密钥文件路径按 HERE（QQ_AGENT_HOME / exe 目录）解析成绝对路径再交给
+        # server_brain —— 那边自己只会按源码目录解析相对路径，打包场景会读错位置。
+        llm_cfg = dict(self.cfg.get("llm") or {})
+        key_file = (llm_cfg.get("api_key_file") or "").strip()
+        if key_file and not os.path.isabs(key_file):
+            llm_cfg["api_key_file"] = abs_here(key_file)
+        server_cfg = dict(self.cfg)
+        server_cfg["llm"] = llm_cfg
+
+        display = (self._identity.get(scope) or {}).get("display_name", "")
+        envelope = _server_get_reply(
+            server_cfg, texts,
+            qq_number=number,
+            scope="group" if is_group else "private",
+            group_id=group_id,
+            channel=(qa.get("channel") or "r4"),
+            nickname=display)
+        if not envelope.get("ok"):
+            err = envelope.get("error") or {}
+            raise EC.AppError(err.get("code") or "E-SRV-001",
+                              err.get("detail") or "服务端大脑返回失败",
+                              err.get("ctx") or {})
+        log("BRAIN", f"服务端大脑已回复（channel={envelope.get('channel')}，"
+                     f"conv={envelope.get('conversation_id')}，"
+                     f"耗时 {envelope.get('elapsed')}s）")
+        return envelope.get("reply") or ""
 
     # ---------------------------------------------------- 常驻循环
     def run_forever(self) -> int:

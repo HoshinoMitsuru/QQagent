@@ -184,6 +184,21 @@ def cmd_tool(a) -> int:
     return _dispatch(a.mode, tool, args, a.as_json)
 
 
+def _frozen_dispatch() -> int | None:
+    """冻结形态的宿主角色分派（承 app/main.py 同款机制，见 host.child_args）。
+
+    hosted 面每次动作都会 spawn **exe 自己** + `--run-hostagent` 前缀
+    （冻结后 sys.executable 是 exe 自己，不接受 -m）。源码模式跳过。"""
+    if not getattr(sys, "frozen", False):
+        return None
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--run-hostagent":
+        sys.argv = [sys.argv[0]] + argv[1:]
+        from app.hostagent import main as _ha_main
+        return _ha_main()
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="qq-cu",
                                  description="QQ 的 LLM Computer Use 工具"
@@ -208,6 +223,8 @@ def main() -> int:
                         ("shot", "抓当前窗口截图")):
         p = sub.add_parser(name, parents=[common], help=help_)
         p.add_argument("--mode", choices=("attach", "hosted"), default="hosted")
+        if name == "shot":
+            p.add_argument("--path", default="", help="截图落盘路径（缺省进 state/）")
         p.set_defaults(tool=name)
 
     p = sub.add_parser("open", parents=[common], help="打开会话")
@@ -244,4 +261,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _rc = _frozen_dispatch()
+    if _rc is None:
+        _rc = main()
+    raise SystemExit(_rc)

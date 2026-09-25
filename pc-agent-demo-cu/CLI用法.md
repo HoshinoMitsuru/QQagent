@@ -3,12 +3,21 @@
 > 定位（2026-09-25 拍板）：调用方是 **Agent 应用**（Codex / Claude Code / WorkBuddy），
 > 不是人。CU 没有操作面板，只有可被 agent 稳定调用的命令行接口。
 
-## 两种调用形态
+## 两种运行方式
+
+| 方式 | 调用 | 说明 |
+| --- | --- | --- |
+| exe（交付形态，F7） | `dist\qq-cu.exe <子命令>` | 免安装、免 UAC、控制台程序；agent 非提权 shell 可直接拉起 |
+| 源码 | `python qq-cu.py <子命令>` | 开发迭代用 |
+
+exe 的**数据目录**按 `QQ_AGENT_HOME` 环境变量 → exe 所在目录 逐级解析：
+把 `config.json` + `secrets.local.json` 放 exe 旁边，或设 `QQ_AGENT_HOME`
+指向它们所在目录（与源码运行共享状态时就设成源码根）。
 
 | 形态 | 命令 | 适合 |
 | --- | --- | --- |
-| 委托式（内置 Brain） | `qq-cu.py run --task "..."` | 一步下发整个任务，CU 自己走工具循环 |
-| 工具式（调用方编排） | `qq-cu.py health / sessions / open / read / shot / send` | 调用方 agent 自己决定每一步 |
+| 委托式（内置 Brain） | `qq-cu run --task "..."` | 一步下发整个任务，CU 自己走工具循环 |
+| 工具式（调用方编排） | `qq-cu health / sessions / open / read / shot / send` | 调用方 agent 自己决定每一步 |
 
 ## 输出契约
 
@@ -23,14 +32,14 @@
 
 ```powershell
 # 委托式：一步完成任务（hosted 全自主发送）
-python qq-cu.py run --task "给「Psyche-嗅尘紫蝶」发一句『在吗』" --json
+qq-cu.exe run --task "给「Psyche-嗅尘紫蝶」发一句『在吗』" --json
 
 # 工具式：调用方 agent 自己编排
-python qq-cu.py health --json
-python qq-cu.py sessions --json
-python qq-cu.py open --name "Psyche-嗅尘紫蝶" --json
-python qq-cu.py read --limit 10 --json
-python qq-cu.py send --text "你好" --json
+qq-cu.exe health --json
+qq-cu.exe sessions --json
+qq-cu.exe open --name "Psyche-嗅尘紫蝶" --json
+qq-cu.exe read --limit 10 --json
+qq-cu.exe send --text "你好" --json
 ```
 
 ## 安全模型（不随调用方变化）

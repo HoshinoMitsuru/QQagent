@@ -184,6 +184,23 @@ def cmd_tool(a) -> int:
     return _dispatch(a.mode, tool, args, a.as_json)
 
 
+def cmd_ask(a) -> int:
+    """服务端大脑（P1）：文本 → ECS /api/qq/agent → 回复信封。不碰 QQ 执行面。"""
+    from cu.server_brain import get_reply
+    cfg = __import__("agent").load_config()
+    env = get_reply(cfg, list(a.text or []), qq_number=a.qq, scope=a.scope,
+                    group_id=a.group_id, channel=a.channel)
+    if env.get("ok"):
+        envelope = {"ok": True, "tool": "ask", **env}
+        human = [f"[服务端大脑] {env['reply']}",
+                 f"    会话 {env.get('conversation_id')}｜通道 {env.get('channel')}"
+                 f"｜耗时 {env.get('elapsed')}s"]
+    else:
+        envelope = {"ok": False, "tool": "ask", "error": env["error"]}
+        human = None
+    return _emit(envelope, human, a.as_json)
+
+
 def _frozen_dispatch() -> int | None:
     """冻结形态的宿主角色分派（承 app/main.py 同款机制，见 host.child_args）。
 
@@ -244,11 +261,24 @@ def main() -> int:
     p.add_argument("--text", required=True)
     p.set_defaults(tool="send")
 
+    p = sub.add_parser("ask", parents=[common],
+                       help="服务端大脑：文本交给 ai-web-page /api/qq/agent 生成回复"
+                            "（纯 HTTP，不碰 QQ 执行面）")
+    p.add_argument("--text", action="append", required=True,
+                   help="用户消息；可重复传多条构成聚合批（按时间序）")
+    p.add_argument("--qq", default="",
+                   help="发送者 QQ 号（缺省取 config.json 的 qq_agent.qq_number）")
+    p.add_argument("--scope", choices=("private", "group"), default="private")
+    p.add_argument("--group-id", default="")
+    p.add_argument("--channel", choices=("r4", "sealdice"), default="r4")
+
     a = ap.parse_args()
     a.as_json = (not a.human) or a.json   # JSON 是缺省；--json 显式自文档
     try:
         if a.cmd == "run":
             return cmd_run(a)
+        if a.cmd == "ask":
+            return cmd_ask(a)
         return cmd_tool(a)
     except SystemExit:
         raise

@@ -18,6 +18,7 @@ exe 的**数据目录**按 `QQ_AGENT_HOME` 环境变量 → exe 所在目录 逐
 | --- | --- | --- |
 | 委托式（内置 Brain） | `qq-cu run --task "..."` | 一步下发整个任务，CU 自己走工具循环 |
 | 工具式（调用方编排） | `qq-cu health / sessions / open / read / shot / send` | 调用方 agent 自己决定每一步 |
+| 服务端大脑（P1） | `qq-cu ask --text "..."` | 生成回复交给 ai-web-page 服务端（ECS）；纯 HTTP，不碰 QQ 执行面 |
 
 ## 输出契约
 
@@ -38,6 +39,9 @@ qq-cu.exe run --task "给「测试目标A」发一句『在吗』" --json
 qq-cu.exe health --json
 qq-cu.exe sessions --json
 qq-cu.exe open --name "测试目标A" --json
+
+# 服务端大脑（P1）：生成回复交给 ECS；--text 可重复构成聚合批
+qq-cu.exe ask --text "在吗" --qq <小号QQ号> --channel r4 --json
 qq-cu.exe read --limit 10 --json
 qq-cu.exe send --text "你好" --json
 ```

@@ -50,6 +50,14 @@
 - **V1** `pc-agent-demo-vm/`（附着式，服务 VM），代码零改动，tag `v1.0-vm-attach`。
 - **V2** `pc-agent-demo-r4/`（R4 独立桌面托管），tag `v2.0-r4-mechanism`。
   V2 是从 V1 复制出来的，**里面仍有大量 V1 的附着逻辑**（尚未替换，待拍板）。
+- **V3** `pc-agent-demo-cu/`（LLM Computer Use，2026-09-25 立项）。路线 C 混合：
+  语义工具集（6 个 tool calls）为主路径 + 视觉 verifier 兜底；Executor 双执行面抽象
+  （attach 主号人工确认 / hosted 小号全自主）；第一版手动下发任务。
+  默认模型 `deepseek-flash`（V4.1-Flash，自带图像理解+Tool Calls+1M 上下文，
+  已核实官方文档，verifier 免第二路视觉 Key）。
+  分期 F1(基建+基线✅)→F2(Executor双执行面+安全锁✅)→F3(工具化 dispatch✅)
+  →F4(Brain tool calling 循环+实测授权：hosted 小号全自主、attach 主号仅「我，我们/苏霖韵」
+  白名单+逐条确认✅)→F5 Verifier→F6 WebUI→F7 exe 验收。详见 2026-09-25 日志。
 - V2 已实机验证：独立 profile 启动 → 免扫码登录 → **打开一个会话** →
   常驻宿主 `app/hostd.py` 跑 `agent.run_forever()` → **真的发出回复** → 优雅停止；
   控制台「隐藏桌面」面板（`GET /api/host/status|shot.png`、`POST /api/host/start|stop|grab`）

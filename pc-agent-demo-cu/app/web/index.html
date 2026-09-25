@@ -1,0 +1,1695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QQAgent 控制台</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+:root{
+  --bg:#f4f5f7; --panel:#ffffff; --panel-2:#fafbfc; --panel-3:#f1f3f5;
+  --border:#e3e6ea; --border-strong:#d0d5db;
+  --text:#171a1f; --muted:#697077; --faint:#9aa1a9;
+  --accent:#3b6ef5; --accent-soft:#eaefff; --accent-text:#2447bd;
+  --ok:#1f9254; --ok-soft:#e6f6ec;
+  --warn:#a5700a; --warn-soft:#fdf3e0;
+  --err:#c0392b; --err-soft:#fdecea;
+  --r-sm:8px; --r:12px; --r-lg:16px;
+  --mono:ui-monospace,SFMono-Regular,"Cascadia Mono","Consolas","Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+}
+html[data-theme="dark"]{
+  --bg:#101216; --panel:#181b20; --panel-2:#1d2126; --panel-3:#22262c;
+  --border:#2a2f36; --border-strong:#3a4048;
+  --text:#e7eaee; --muted:#9aa2ab; --faint:#6d757e;
+  --accent:#6d8dff; --accent-soft:#1e2740; --accent-text:#a8bcff;
+  --ok:#4ec27e; --ok-soft:#16281d;
+  --warn:#e0a838; --warn-soft:#2a2314;
+  --err:#f0736a; --err-soft:#2c1a19;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--sans);
+  font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{margin:0;font-weight:600}
+a{color:var(--accent)}
+code,.mono{font-family:var(--mono)}
+svg{display:block}
+
+/* ---------- 顶栏 ---------- */
+.topbar{
+  position:sticky; top:0; z-index:40; background:var(--panel);
+  border-bottom:1px solid var(--border); padding:12px 20px;
+  display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand .mark{
+  width:32px;height:32px;border-radius:9px;background:var(--accent);
+  display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+}
+.brand .mark svg{width:18px;height:18px;stroke:#fff}
+.brand .name{font-size:15px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
+.brand .ver{font-size:11px;color:var(--faint);font-family:var(--mono)}
+.pills{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.pill{
+  display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;
+  border:1px solid var(--border);background:var(--panel-2);
+  font-size:11.5px;color:var(--muted);white-space:nowrap;
+}
+.pill svg{width:12px;height:12px}
+.pill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 30%,var(--border));background:var(--ok-soft)}
+.pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 30%,var(--border));background:var(--warn-soft)}
+.pill.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 30%,var(--border));background:var(--err-soft)}
+.top-actions{display:flex;gap:7px;flex-wrap:wrap}
+
+/* ---------- 按钮 ---------- */
+button{
+  font-family:inherit;font-size:13px;border-radius:var(--r-sm);
+  border:1px solid var(--border-strong);background:var(--panel);color:var(--text);
+  padding:7px 13px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;
+  transition:background .12s,border-color .12s,opacity .12s;
+}
+button svg{width:14px;height:14px;flex:0 0 auto}
+button:hover:not(:disabled){background:var(--panel-3);border-color:var(--muted)}
+button:disabled{opacity:.42;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover:not(:disabled){filter:brightness(1.08);background:var(--accent)}
+button.danger{color:var(--err);border-color:color-mix(in srgb,var(--err) 40%,var(--border))}
+button.danger:hover:not(:disabled){background:var(--err-soft)}
+button.ghost{background:transparent;border-color:transparent;color:var(--muted);padding:6px 9px}
+button.ghost:hover:not(:disabled){background:var(--panel-3);color:var(--text)}
+button.sm{padding:5px 10px;font-size:12.5px}
+.icon-btn{padding:6px 8px}
+
+/* ---------- 布局 ---------- */
+.layout{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,440px);
+  gap:16px;padding:16px 20px 40px;max-width:1660px;margin:0 auto;align-items:start;
+}
+@media (max-width:1080px){.layout{grid-template-columns:minmax(0,1fr)}}
+.col{display:flex;flex-direction:column;gap:14px;min-width:0}
+.col-log{position:sticky;top:70px}
+@media (max-width:1080px){.col-log{position:static}}
+
+.card{
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--r);
+  overflow:hidden;
+}
+.card-head{
+  display:flex;align-items:center;gap:9px;padding:13px 16px;
+  border-bottom:1px solid var(--border);background:var(--panel-2);
+}
+.card-head svg{width:15px;height:15px;color:var(--muted)}
+.card-head h2{font-size:14px}
+.card-head .sub{font-size:11.5px;color:var(--faint);margin-left:auto;text-align:right}
+.card-body{padding:15px 16px}
+.card-body.tight{padding:0}
+
+/* ---------- 就绪检查 ---------- */
+.check{display:flex;gap:11px;padding:11px 0;border-bottom:1px dashed var(--border)}
+.check:last-child{border-bottom:0}
+.check .dot{
+  width:20px;height:20px;border-radius:50%;flex:0 0 auto;margin-top:1px;
+  display:flex;align-items:center;justify-content:center;
+}
+.check .dot svg{width:12px;height:12px}
+.dot.ok{background:var(--ok-soft);color:var(--ok)}
+.dot.bad{background:var(--err-soft);color:var(--err)}
+.dot.warn{background:var(--warn-soft);color:var(--warn)}
+.dot.idle{background:var(--panel-3);color:var(--faint)}
+.check .info{flex:1;min-width:0}
+.check .t{font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.check .d{font-size:12px;color:var(--muted);margin-top:2px;word-break:break-all}
+.check .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+
+/* ---------- 通用小件 ---------- */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat{background:var(--panel-3);border-radius:var(--r-sm);padding:9px 11px}
+.stat .k{font-size:11px;color:var(--faint)}
+.stat .v{font-size:14px;font-weight:500;font-family:var(--mono);margin-top:2px;word-break:break-all}
+.notice{
+  border-radius:var(--r);padding:11px 14px;font-size:12.5px;
+  display:flex;gap:10px;align-items:flex-start;
+}
+.notice svg{width:15px;height:15px;flex:0 0 auto;margin-top:2px}
+.notice.warn{background:var(--warn-soft);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 25%,transparent)}
+.notice.err{background:var(--err-soft);color:var(--err);border:1px solid color-mix(in srgb,var(--err) 25%,transparent)}
+.notice.ok{background:var(--ok-soft);color:var(--ok);border:1px solid color-mix(in srgb,var(--ok) 25%,transparent)}
+.notice ul{margin:4px 0 0;padding-left:16px}
+.notice li{margin:2px 0}
+
+/* ---------- 表单 ---------- */
+.group{border-bottom:1px solid var(--border)}
+.group:last-child{border-bottom:0}
+.group-head{
+  display:flex;align-items:center;gap:9px;padding:12px 16px;cursor:pointer;
+  background:var(--panel-2);user-select:none;
+}
+.group-head:hover{background:var(--panel-3)}
+.group-head .chev{width:14px;height:14px;color:var(--faint);transition:transform .15s}
+.group.open .chev{transform:rotate(90deg)}
+.group-head h3{font-size:13px}
+.group-head .desc{font-size:11.5px;color:var(--faint);margin-left:auto;text-align:right;
+  max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:640px){.group-head .desc{display:none}}
+.group-body{padding:6px 16px 16px;display:none}
+.group.open .group-body{display:block}
+.field{display:grid;grid-template-columns:180px minmax(0,1fr);gap:14px;padding:9px 0;align-items:start}
+@media (max-width:760px){.field{grid-template-columns:minmax(0,1fr);gap:5px}}
+.field label{font-size:13px;padding-top:6px;font-weight:500}
+.field .hint{font-size:11.5px;color:var(--faint);margin-top:4px;grid-column:2}
+@media (max-width:760px){.field .hint{grid-column:1}}
+.field.adv{display:none}
+.group.show-adv .field.adv{display:grid}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  width:100%;font-family:inherit;font-size:13px;color:var(--text);
+  background:var(--panel);border:1px solid var(--border-strong);border-radius:var(--r-sm);
+  padding:7px 10px;transition:border-color .12s;
+}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{font-family:var(--mono);font-size:12.5px;line-height:1.55;resize:vertical;min-height:74px}
+.switch{display:inline-flex;align-items:center;gap:9px;padding-top:5px;cursor:pointer;user-select:none}
+.switch input{display:none}
+.switch .track{
+  width:38px;height:21px;border-radius:999px;background:var(--border-strong);
+  position:relative;transition:background .15s;flex:0 0 auto;
+}
+.switch .track::after{
+  content:"";position:absolute;top:2.5px;left:2.5px;width:16px;height:16px;border-radius:50%;
+  background:#fff;transition:transform .15s;
+}
+.switch input:checked + .track{background:var(--accent)}
+.switch input:checked + .track::after{transform:translateX(17px)}
+.switch .lbl{font-size:12.5px;color:var(--muted)}
+.key-row{display:flex;gap:8px;align-items:center}
+.key-row input{flex:1;font-family:var(--mono)}
+.adv-toggle{display:flex;align-items:center;gap:7px;padding:10px 16px;font-size:12.5px;color:var(--muted);cursor:pointer}
+.adv-toggle input{accent-color:var(--accent)}
+.save-bar{
+  display:flex;align-items:center;gap:10px;padding:12px 16px;
+  border-top:1px solid var(--border);background:var(--panel-2);flex-wrap:wrap;
+}
+.save-bar .spacer{flex:1}
+.dirty{font-size:12px;color:var(--warn)}
+
+/* ---------- 任务 ---------- */
+.taskgroup{margin-bottom:14px}
+.taskgroup:last-child{margin-bottom:0}
+.taskgroup > h4{
+  font-size:11.5px;color:var(--faint);text-transform:none;letter-spacing:.4px;
+  margin:0 0 8px;font-weight:500;
+}
+.tasklist{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:9px}
+.task{
+  border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 12px;
+  background:var(--panel-2);display:flex;flex-direction:column;gap:7px;
+}
+.task .t{font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px}
+.task .t svg{width:13px;height:13px;color:var(--muted)}
+.task .d{font-size:11.5px;color:var(--muted);line-height:1.5}
+.task .foot{display:flex;gap:6px;align-items:center;margin-top:auto;flex-wrap:wrap}
+.task.danger{border-color:color-mix(in srgb,var(--err) 30%,var(--border))}
+.task input,.task textarea{font-size:12.5px;padding:5px 8px}
+.task .param{display:flex;flex-direction:column;gap:4px}
+.task .param label{font-size:11px;color:var(--faint)}
+.badge{
+  font-size:10.5px;padding:2px 6px;border-radius:5px;background:var(--panel-3);
+  color:var(--muted);border:1px solid var(--border);
+}
+.badge.run{background:var(--accent-soft);color:var(--accent-text);border-color:transparent}
+.badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.badge.bad{background:var(--err-soft);color:var(--err);border-color:transparent}
+.badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+
+/* ---------- 日志 ---------- */
+.log-card{display:flex;flex-direction:column;max-height:calc(100vh - 96px)}
+@media (max-width:1080px){.log-card{max-height:70vh}}
+.log-tools{
+  display:flex;align-items:center;gap:6px;padding:9px 12px;flex-wrap:wrap;
+  border-bottom:1px solid var(--border);background:var(--panel-2);
+}
+.log-tools .sep{width:1px;height:18px;background:var(--border);margin:0 2px}
+.chip{
+  font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--border);
+  background:var(--panel);color:var(--muted);cursor:pointer;user-select:none;
+  display:inline-flex;align-items:center;gap:4px;
+}
+.chip.on{background:var(--accent-soft);color:var(--accent-text);border-color:transparent}
+.chip .n{font-family:var(--mono);font-size:10px;opacity:.75}
+.log-search{flex:1;min-width:96px}
+.log-search input{font-size:12px;padding:4px 8px}
+#log{
+  margin:0;padding:10px 12px;overflow:auto;flex:1;min-height:220px;
+  font-family:var(--mono);font-size:11.5px;line-height:1.62;
+  background:var(--panel);white-space:pre-wrap;word-break:break-word;
+}
+.ln{display:flex;gap:7px;padding:1px 0;border-radius:3px}
+.ln:hover{background:var(--panel-3)}
+.ln .ts{color:var(--faint);flex:0 0 auto}
+.ln .tg{
+  flex:0 0 auto;min-width:38px;color:var(--muted);font-weight:500;
+}
+.ln .tx{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.ln.error .tx{color:var(--err)}
+.ln.error .tg{color:var(--err)}
+.ln.warn .tx{color:var(--warn)}
+.ln.warn .tg{color:var(--warn)}
+.ln.action .tx{color:var(--accent-text)}
+.ln.action .tg{color:var(--accent)}
+.ln.debug{opacity:.6}
+.ln.src-agent .tg{background:var(--accent-soft);border-radius:3px;padding:0 4px}
+.empty{color:var(--faint);font-size:12px;padding:20px 4px;text-align:center}
+
+/* ---------- 弹窗 / 提示 ---------- */
+.modal-bg{
+  position:fixed;inset:0;background:rgba(8,10,14,.5);z-index:90;
+  display:none;align-items:center;justify-content:center;padding:20px;
+}
+.modal-bg.show{display:flex}
+.modal{
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);
+  max-width:480px;width:100%;overflow:hidden;
+}
+.modal.wide{max-width:920px;max-height:86vh;display:flex;flex-direction:column}
+.modal-head{display:flex;align-items:center;gap:9px;padding:14px 18px;border-bottom:1px solid var(--border)}
+.modal-head h3{font-size:14px}
+.modal-body{padding:16px 18px;font-size:13px;color:var(--muted);overflow:auto}
+.modal.wide .modal-body{flex:1;min-height:0}
+.modal-body strong{color:var(--text)}
+.modal-body .code{
+  font-family:var(--mono);font-size:12px;background:var(--panel-3);border-radius:6px;
+  padding:8px 10px;margin-top:10px;white-space:pre-wrap;word-break:break-all;color:var(--text);
+}
+.modal-foot{display:flex;gap:8px;justify-content:flex-end;padding:13px 18px;
+  border-top:1px solid var(--border);background:var(--panel-2);flex-wrap:wrap}
+.modal-foot .spacer{flex:1}
+
+/* ---------- 诊断报告 ---------- */
+.diag-sum{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.diag-chip{
+  display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;
+  border:1px solid var(--border);font-size:12px;background:var(--panel-2);color:var(--muted);
+}
+.diag-chip b{font-family:var(--mono);font-size:13px}
+.diag-chip.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 30%,var(--border));background:var(--ok-soft)}
+.diag-chip.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 30%,var(--border));background:var(--warn-soft)}
+.diag-chip.fail{color:var(--err);border-color:color-mix(in srgb,var(--err) 30%,var(--border));background:var(--err-soft)}
+.diag-item{
+  border:1px solid var(--border);border-left-width:3px;border-radius:var(--r-sm);
+  padding:10px 12px;margin-bottom:8px;background:var(--panel-2);
+}
+.diag-item.ok{border-left-color:var(--ok)}
+.diag-item.warn{border-left-color:var(--warn)}
+.diag-item.fail{border-left-color:var(--err)}
+.diag-item.skip{border-left-color:var(--border-strong);opacity:.72}
+.diag-item .h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;font-weight:500;color:var(--text)}
+.diag-item .h .st{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.diag-item .d{font-size:12px;color:var(--muted);margin-top:4px;word-break:break-word}
+.diag-item .fx{font-size:12px;color:var(--text);margin-top:6px;
+  background:var(--panel-3);border-radius:6px;padding:6px 9px}
+.diag-item .fx b{color:var(--accent-text);font-weight:500}
+.ecode{
+  font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:5px;
+  background:var(--panel-3);color:var(--muted);border:1px solid var(--border);
+  cursor:pointer;user-select:all;
+}
+.ecode:hover{border-color:var(--accent);color:var(--accent-text)}
+.report-pre{
+  font-family:var(--mono);font-size:11.5px;line-height:1.6;white-space:pre-wrap;
+  word-break:break-word;background:var(--panel-3);border:1px solid var(--border);
+  border-radius:var(--r-sm);padding:12px;max-height:32vh;overflow:auto;
+  color:var(--text);
+}
+.toast .body{min-width:0}
+.toast .body .t{font-weight:500}
+.toast .body .d{font-size:11.5px;color:var(--faint);margin-top:3px;word-break:break-word}
+.toast .body .h{font-size:11.5px;color:var(--muted);margin-top:4px}
+#toasts{position:fixed;right:18px;bottom:18px;z-index:100;display:flex;flex-direction:column;gap:8px}
+.toast{
+  background:var(--panel);border:1px solid var(--border-strong);border-radius:var(--r-sm);
+  padding:10px 14px;font-size:12.5px;max-width:360px;display:flex;gap:9px;align-items:flex-start;
+  animation:slide .18s ease-out;
+}
+@keyframes slide{from{transform:translateY(6px);opacity:0}to{transform:none;opacity:1}}
+.toast svg{width:14px;height:14px;flex:0 0 auto;margin-top:2px}
+.toast.ok{border-color:color-mix(in srgb,var(--ok) 40%,var(--border))}
+.toast.ok svg{color:var(--ok)}
+.toast.err{border-color:color-mix(in srgb,var(--err) 40%,var(--border))}
+.toast.err svg{color:var(--err)}
+.toast.warn svg{color:var(--warn)}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+<h2 class="sr">QQAgent 控制台：管理 QQ 自动化代理的启动、参数与实时日志</h2>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="mark" id="brandMark"></div>
+    <div>
+      <div class="name">QQAgent 控制台</div>
+      <div class="ver" id="verLine">正在读取…</div>
+    </div>
+  </div>
+  <div class="pills" id="pills"></div>
+  <div class="top-actions">
+    <button class="ghost icon-btn" id="btnTheme" title="切换明暗主题"></button>
+    <button class="ghost sm" id="btnDiag" title="跑一遍完整体检并导出报告">诊断报告</button>
+    <button class="ghost sm" id="btnOpenData" title="打开数据目录">数据目录</button>
+    <button class="ghost sm" id="btnElevate" title="以管理员权限重启">提权重启</button>
+    <button class="ghost sm danger" id="btnQuitApp" title="退出本程序">退出程序</button>
+  </div>
+</header>
+
+<div class="layout">
+  <div class="col">
+    <div id="warnings"></div>
+
+    <section class="card">
+      <div class="card-head">
+        <span id="i-qq"></span>
+        <h2>QQ 就绪检查</h2>
+        <div class="sub" id="qqSub"></div>
+      </div>
+      <div class="card-body" id="qqBody"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span id="i-host"></span>
+        <h2>隐藏桌面（独立 profile）</h2>
+        <div class="sub" id="hostSub">QQ 跑在另一张桌面上 —— 不占你的屏幕，也不碰你手上的那个号</div>
+      </div>
+      <div class="card-body" id="hostBody"><div class="empty">正在读取…</div></div>
+    </section>
+
+    <!-- ⚠️ 顺序说明：这张卡**故意排在「隐藏桌面」后面**。
+         它操作的是**你自己桌面上正在用的那个 QQ**，是 V1 的旧路线；
+         而 V2 的主线是上面那张。曾经它排在前面，结果很自然地发生了一次：
+         有人在 V2 的 exe 上点了这里的「开始常驻」，于是程序去操作他桌面上
+         登录着的**主号**（而不是隐藏桌面上的小号），还真的发出了一条回复。
+         卡片的标题和确认框现在都把「操作谁」写在最显眼处。 -->
+    <section class="card">
+      <div class="card-head">
+        <span id="i-run"></span>
+        <h2>常驻运行（操作你桌面上的 QQ）</h2>
+        <div class="sub">自动回复主循环 · V1 路线</div>
+      </div>
+      <div class="card-body" id="runBody"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span id="i-play"></span>
+        <h2>验证与试运行</h2>
+        <div class="sub">从只读到真发，逐步来</div>
+      </div>
+      <div class="card-body" id="taskBody"><div class="empty">正在加载任务…</div></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span id="i-sliders"></span>
+        <h2>参数配置</h2>
+        <div class="sub" id="cfgSub"></div>
+      </div>
+      <div class="card-body tight" id="settingsBody"><div class="empty">正在加载配置…</div></div>
+      <div class="save-bar">
+        <button class="primary" id="btnSave"></button>
+        <button id="btnReload">放弃改动</button>
+        <button class="ghost sm" id="btnReset">恢复默认值</button>
+        <span class="spacer"></span>
+        <span class="dirty" id="dirtyHint"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span id="i-shield"></span>
+        <h2>虚拟机加固与无人值守</h2>
+        <div class="sub">这条路线专门要解决的问题</div>
+      </div>
+      <div class="card-body" id="adminBody"></div>
+    </section>
+  </div>
+
+  <div class="col col-log">
+    <section class="card log-card">
+      <div class="card-head">
+        <span id="i-term"></span>
+        <h2>实时日志</h2>
+        <div class="sub" id="logSub"></div>
+      </div>
+      <div class="log-tools">
+        <span class="chip on" data-level="error"><span class="n" id="c-error">0</span>错误</span>
+        <span class="chip on" data-level="warn"><span class="n" id="c-warn">0</span>警告</span>
+        <span class="chip on" data-level="action"><span class="n" id="c-action">0</span>动作</span>
+        <span class="chip on" data-level="info"><span class="n" id="c-info">0</span>信息</span>
+        <span class="chip" data-level="debug"><span class="n" id="c-debug">0</span>调试</span>
+        <span class="sep"></span>
+        <button class="ghost sm icon-btn" id="btnPause" title="暂停/继续滚动"></button>
+        <button class="ghost sm icon-btn" id="btnClear" title="清空日志"></button>
+        <button class="ghost sm icon-btn" id="btnDownload" title="下载日志"></button>
+        <div class="log-search"><input type="text" id="logFilter" placeholder="过滤关键字…"></div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</div>
+
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <div class="modal-head"><span id="i-warn"></span><h3 id="modalTitle">确认</h3></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <button id="modalCancel">取消</button>
+      <button class="danger" id="modalOk">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="diagBg">
+  <div class="modal wide">
+    <div class="modal-head"><span id="i-diag"></span><h3 id="diagTitle">诊断报告</h3>
+      <span class="sub" id="diagSub" style="margin-left:auto;font-size:11.5px;color:var(--faint)"></span></div>
+    <div class="modal-body" id="diagBody"></div>
+    <div class="modal-foot">
+      <button class="ghost sm" id="diagCopy"></button>
+      <button class="ghost sm" id="diagSave"></button>
+      <span class="spacer"></span>
+      <button id="diagClose">关闭</button>
+      <button class="primary" id="diagRerun"></button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+
+/* ============================================================ 图标 */
+const P = (d, extra) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${d}${extra||""}</svg>`;
+const ICONS = {
+  robot: P('<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4M9 14h.01M15 14h.01"/>'),
+  refresh: P('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
+  play: P('<path d="M7 5l12 7-12 7z"/>'),
+  stop: P('<rect x="6" y="6" width="12" height="12" rx="2"/>'),
+  search: P('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
+  wrench: P('<path d="M15 6a4 4 0 0 0 5 5l-9 9a2.8 2.8 0 0 1-4-4z"/><path d="M15 6l3-3 3 3-3 3"/>'),
+  folder: P('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  shield: P('<path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z"/><path d="M9 12l2 2 4-4"/>'),
+  power: P('<path d="M12 4v8"/><path d="M7.5 7a7 7 0 1 0 9 0"/>'),
+  term: P('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>'),
+  check: P('<path d="M5 13l4 4L19 7"/>'),
+  x: P('<path d="M6 6l12 12M18 6L6 18"/>'),
+  warn: P('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/>'),
+  info: P('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'),
+  key: P('<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M17 6l2 2M15 8l2 2"/>'),
+  eye: P('<path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/>'),
+  eyeOff: P('<path d="M4 4l16 16"/><path d="M9.5 6.4A9 9 0 0 1 12 6c6 0 10 6 10 6a17 17 0 0 1-2.6 3.2M6.5 8.6C4 10.2 2 12 2 12s4 6 10 6c1.2 0 2.3-.2 3.3-.6"/>'),
+  dl: P('<path d="M12 4v11M7.5 11l4.5 4 4.5-4"/><path d="M5 20h14"/>'),
+  trash: P('<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>'),
+  pause: P('<rect x="7" y="6" width="3.5" height="12" rx="1"/><rect x="13.5" y="6" width="3.5" height="12" rx="1"/>'),
+  chev: P('<path d="M9 6l6 6-6 6"/>'),
+  sliders: P('<path d="M4 8h10M18 8h2M4 16h4M12 16h8"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/>'),
+  cpu: P('<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>'),
+  disk: P('<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'),
+  lock: P('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  lockOpen: P('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>'),
+  activity: P('<path d="M3 12h4l2.5-7 4 14L16 12h5"/>'),
+  layers: P('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
+  moon: P('<path d="M20 14a8 8 0 1 1-9-9 7 7 0 0 0 9 9z"/>'),
+  sun: P('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>'),
+  rocket: P('<path d="M12 3c3.5 1.5 5.5 4.5 5.5 8.5 0 2-.7 3.6-2 5H8.5c-1.3-1.4-2-3-2-5C6.5 7.5 8.5 4.5 12 3z"/><circle cx="12" cy="10" r="1.6"/><path d="M9 17l-2 4M15 17l2 4"/>'),
+  clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>'),
+  cap: P('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10h6M7 14h10"/>'),
+  monitor: P('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
+  monitorOff: P('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4M4 3l16 16"/>'),
+  camera: P('<path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.2"/>'),
+  ghost: P('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.3-1.6-2.3 1.6L12 18.4 9.6 20 7.3 18.4z"/><path d="M9.5 10h.01M14.5 10h.01"/>')
+};
+const icon = (n, cls) => `<span class="${cls||""}" style="display:inline-flex">${ICONS[n]||ICONS.info}</span>`;
+
+/* ============================================================ 状态 */
+let STATE = null, TASKS = [], FIELDS = {}, GROUPS = [], VALUES = {};
+let dirty = false, paused = false, filterText = "", bannerShown = false;
+const LEVELS = { error:1, warn:1, action:1, info:1, debug:0 };
+const MAXLINES = 2000;
+let logLines = [];
+
+/* ============================================================ 工具 */
+const $ = s => document.querySelector(s);
+const el = (t, cls, html) => { const e = document.createElement(t); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDur = sec => {
+  if (sec == null) return "—";
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + "s";
+  const m = Math.floor(sec/60), h = Math.floor(m/60);
+  if (h) return `${h}h${m%60}m`;
+  return `${m}m${sec%60}s`;
+};
+
+async function api(path, body) {
+  const opt = { headers: { "X-Token": TOKEN, "Content-Type": "application/json" } };
+  if (body !== undefined) { opt.method = "POST"; opt.body = JSON.stringify(body); }
+  let r;
+  try {
+    r = await fetch(path + (path.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(TOKEN), opt);
+  } catch (e) {
+    // 服务没起来 / 已经退出了 —— 返回结构化错误而不是抛异常。
+    // 让调用方统一按「失败」处理，界面就不会因为一个 rejected promise 变成空白页。
+    return { ok: false, error: "连不上控制台服务（程序是否已经退出？）", offline: true };
+  }
+  let data = {};
+  try { data = await r.json(); } catch (e) { data = { ok:false, error:"响应不是合法 JSON（HTTP " + r.status + "）" }; }
+  if (!r.ok && data.error === undefined) data.error = "HTTP " + r.status;
+  if (r.status === 401) data.error = "令牌无效或已过期 —— 请重新打开控制台地址。";
+  return data;
+}
+
+function offlineBanner(msg) {
+  bannerShown = true;
+  const box = $("#warnings");
+  box.innerHTML = `<div class="notice err">${icon("warn")}
+    <div><strong>${esc(msg)}</strong><br>
+    这个页面需要 QQAgent 控制台在后台运行才会显示实时数据。
+    如果你是在文件系统里直接打开的本页，请改为双击 <code>qq-agent.exe</code>，
+    用它自动打开的地址访问。</div></div>`;
+}
+
+function toast(msg, kind, detail, hint) {
+  const box = $("#toasts");
+  const t = el("div", "toast " + (kind || ""));
+  const ic = kind === "err" ? "warn" : kind === "warn" ? "warn" : "check";
+  t.innerHTML = icon(ic) + `<div class="body"><div class="t">${esc(msg)}</div>`
+    + (hint ? `<div class="h">${esc(hint)}</div>` : "")
+    + (detail ? `<div class="d">${esc(detail)}</div>` : "") + `</div>`;
+  box.appendChild(t);
+  setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; setTimeout(() => t.remove(), 320); },
+             kind === "err" ? 9000 : 4500);
+}
+
+/* 把后端的统一错误信封渲染成一条**能照着做**的提示。
+   只显示一句「执行失败」等于没说 —— 用户下一步只能来问「为什么」。
+   所以这里固定给三样：错误码（可搜索/可复制）、原因、下一步动作。 */
+function errToast(res, prefix) {
+  if (!res) return;
+  if (res.code) {
+    toast(`${prefix ? prefix + "：" : ""}[${res.code}] ${res.error || "失败"}`,
+          res.severity === "warn" ? "warn" : "err",
+          res.detail || "",
+          res.hint || "");
+  } else {
+    toast((prefix ? prefix + "：" : "") + (res.error || "执行失败"), "err",
+          res.detail || "", res.hint || "");
+  }
+}
+
+function codeChip(code) {
+  return code ? `<span class="ecode" title="点击查看这个错误码的说明">${esc(code)}</span>` : "";
+}
+
+/**
+ * 把「这次会回复谁」翻成人话。
+ *
+ * 这条策略出过一次事故：exe 在自己那一层生成了**默认配置**，而默认是
+ * `private_chat_only = false`（群聊也回）。有人在不知道这件事的情况下启动了常驻，
+ * 于是 AI 的回复进了一个群。默认值本身是有意的，但**必须在启动前被看见**。
+ *
+ * ⚠️ 必须放在**模块级**（不能塞在 renderRun 里面）：它同时被点击处理器用，
+ * 而函数声明只在它所在的那个函数体内可见 —— 放错地方就是「点按钮报
+ * ReferenceError」，而 `node --check` 只查语法、查不出这种作用域问题。
+ */
+function policyText(st) {
+  const p = (st && st.reply_policy) || {};
+  if (p.private_chat_only === undefined) return "（读不到，先看「参数配置」卡片）";
+  const kw = (p.trigger_prefixes || []).map(esc).join(" / ") || "（没配触发词）";
+  const how = `<span style="opacity:.85">要收紧：参数配置 → 私聊限定 / 群聊需触发词。</span>`;
+  // 这四种组合要与 agent.py 里的判定逐条对齐：
+  //     need_trigger = (not always_reply) or (is_group and group_requires_trigger)
+  // 别凭印象描述 —— 这是一句安全提示，说错比不说更糟。
+  if (p.private_chat_only) {
+    return `只回<b>私聊</b>；群聊一律不回。${how}`;
+  }
+  if (!p.always_reply) {
+    return `私聊和群聊都<b>需要以触发词开头</b>（${kw}）才会回。`;
+  }
+  if (p.group_requires_trigger) {
+    return `私聊会回；群聊需以 ${kw} 开头（或该会话处于连续对话），否则不回。${how}`;
+  }
+  return `<b style="color:var(--warn)">私聊和群聊都会回，而且群里连触发词都不需要</b>
+          —— 群里任何人说话都可能被回。${how}`;
+}
+
+function confirmDialog({title, body, confirmText, cancelText, danger, infoOnly}) {
+  return new Promise(resolve => {
+    $("#modalTitle").textContent = title;
+    $("#modalBody").innerHTML = body;
+    const ok = $("#modalOk"), cancel = $("#modalCancel");
+    ok.textContent = confirmText || "确认";
+    ok.className = danger ? "danger" : "primary";
+    cancel.style.display = infoOnly ? "none" : "";
+    cancel.textContent = cancelText || "取消";
+    $("#modalBg").classList.add("show");
+    const done = v => { $("#modalBg").classList.remove("show"); ok.onclick = null; cancel.onclick = null; resolve(v); };
+    ok.onclick = () => done(true);
+    cancel.onclick = () => done(false);
+  });
+}
+
+async function run(p, params, label) {
+  const res = await api(p, params);
+  if (res.ok) toast((label || "已执行") + " 已开始", "ok");
+  else errToast(res, label);
+  refresh(true);
+  return res;
+}
+
+/* ============================================================ 日志 */
+function addLine(row) {
+  logLines.push(row);
+  if (logLines.length > MAXLINES) logLines = logLines.slice(-MAXLINES);
+  const n = $("#c-" + row.level); if (n) n.textContent = String(Number(n.textContent) + 1);
+  if (!LEVELS[row.level]) return;
+  if (filterText && !(row.text + " " + row.tag).toLowerCase().includes(filterText)) return;
+  const pre = $("#log");
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;
+  pre.appendChild(renderLine(row));
+  while (pre.childElementCount > MAXLINES) pre.removeChild(pre.firstChild);
+  if (!paused && atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+function renderLine(row) {
+  const d = el("div", "ln " + row.level + (row.source === "agent" ? " src-agent" : ""));
+  d.innerHTML = `<span class="ts">${esc(row.clock)}</span><span class="tg">${esc(row.tag || "")}</span><span class="tx">${esc(row.text)}</span>`;
+  return d;
+}
+
+function redrawLog() {
+  const pre = $("#log");
+  pre.innerHTML = "";
+  const rows = filterText
+    ? logLines.filter(r => LEVELS[r.level] && (r.text + " " + r.tag).toLowerCase().includes(filterText))
+    : logLines.filter(r => LEVELS[r.level]);
+  if (!rows.length) { pre.innerHTML = `<div class="empty">暂无符合筛选条件的日志</div>`; return; }
+  rows.slice(-MAXLINES).forEach(r => pre.appendChild(renderLine(r)));
+  pre.scrollTop = pre.scrollHeight;
+}
+
+/* ============================================================ 渲染：顶栏 */
+function renderPills(s) {
+  const p = [];
+  const qq = s.qq || {};
+  p.push(s.admin
+    ? { c:"ok", i:"shield", t:"管理员" }
+    : { c:"warn", i:"shield", t:"普通权限" });
+  p.push({ c: qq.running ? "ok" : "err", i:"robot", t: qq.running ? "QQ 运行中" : "QQ 未运行" });
+  const probe = qq.probe;
+  if (probe) p.push(probe.ok
+    ? { c:"ok", i:"eye", t:"界面可读" }
+    : { c:"err", i:"eyeOff", t:"读不到界面" });
+  p.push(s.supervisor.resident.running
+    ? { c: s.supervisor.resident.dry_run ? "warn" : "ok", i:"activity",
+        t: s.supervisor.resident.dry_run ? "常驻·只读" : "常驻运行中" }
+    : { c:"", i:"stop", t:"常驻未运行" });
+  p.push({ c: s.desktop === "locked" ? "err" : "ok",
+           i: s.desktop === "locked" ? "lock" : "lockOpen",
+           t: s.desktop === "locked" ? "桌面已锁屏" : "桌面已解锁" });
+  // 隐藏桌面（R4）单独一枚：它跑在**另一张**桌面上，所以上面那枚「桌面已锁屏」
+  // 对它不成立 —— 那正是这条路线存在的理由，值得在顶栏被看见。
+  const hd = s.host || {};
+  if (hd.running) p.push({ c: hd.stale ? "warn" : "ok", i: "ghost",
+                           t: `隐藏桌面${hd.stale ? "·心跳停更" : "运行中"}` });
+  if (qq.cdp && qq.cdp.enabled) p.push({ c: qq.cdp.ok ? "ok" : "warn", i:"layers", t: qq.cdp.ok ? "CDP 可用" : "CDP 未就绪" });
+  const el0 = $("#pills");
+  el0.innerHTML = p.map(x => `<span class="pill ${x.c}">${icon(x.i)}${esc(x.t)}</span>`).join("");
+  $("#logSub").textContent = `订阅连接 ${s.log_subscribers ?? ""}`;
+}
+
+function renderWarnings(s) {
+  const box = $("#warnings");
+  box.innerHTML = "";
+  (s.warnings || []).forEach(w => {
+    const d = el("div", "notice warn", icon("warn") + `<div>${w.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</div>`);
+    box.appendChild(d);
+  });
+}
+
+/* ============================================================ 渲染：QQ 就绪 */
+function step(id, ok, title, desc, acts) {
+  const cls = ok === true ? "ok" : ok === false ? "bad" : "idle";
+  const ic = ok === true ? "check" : ok === false ? "x" : "clock";
+  return `<div class="check"><div class="dot ${cls}">${ICONS[ic]}</div>
+    <div class="info"><div class="t">${esc(title)}</div><div class="d">${desc}</div>
+    ${acts ? `<div class="acts">${acts}</div>` : ""}</div></div>`;
+}
+
+function renderQQ(s) {
+  const qq = s.qq || {}, found = qq.exe || {}, win = qq.windows || {}, probe = qq.probe;
+  $("#qqSub").textContent = `进程 ${(qq.processes || []).length} · 窗口 ${win.window_count || 0}`;
+
+  let html = "";
+  html += step("find", !!found.path, "1 · 定位 QQ 程序",
+    found.path ? `${esc(found.path)}<br><span style="color:var(--faint)">来源：${esc(found.source)}</span>`
+               : "没找到 QQ.exe。请在下方「运行环境」里手动填写完整路径（本机的 D:\\QQ.exe 就属于非标准路径）。",
+    `<button class="sm" data-act="qq-find">${icon("search")}重新查找</button>`);
+
+  html += step("run", qq.running, "2 · QQ 正在运行",
+    qq.running ? `已找到 ${(qq.processes||[]).length} 个 QQ 进程。登录请手动完成 —— 我们不碰登录流程。`
+               : "QQ 没有在运行。点「启动 QQ」会带上无障碍参数拉起它。",
+    `<button class="sm" data-act="qq-launch" ${qq.running ? "disabled" : ""}>${icon("play")}启动 QQ</button>`);
+
+  let probeOk = probe ? probe.ok : null;
+  let probeDesc = "还没有体检。点「体检」看 agent 能不能读到 QQ 的界面。";
+  if (probe) {
+    // 三种情况要分开说，因为它们**处置动作完全不同**：
+    //   可读        —— 什么都不用做
+    //   没打开会话  —— 点一下左侧任意会话即可（不需要重启 QQ！）
+    //   树是空壳    —— 才轮到「重启 QQ 到可读状态」
+    // 以前后两种挤在同一句「读不到」里，人会去白重启一次。
+    if (probe.ok) {
+      probeDesc = `可读。当前会话 <strong>${esc(probe.dialog_title || "?")}</strong>`
+        + `（${probe.is_group ? "群聊" : "私聊"}），会话 ${probe.session_count ?? "?"} 个，`
+        + `消息列表${probe.ml_list_found ? "已定位" : "未定位"}、输入框${probe.editor_found ? "已定位" : "未定位"}。`;
+    } else if (probe.chat_open) {
+      probeDesc = `能读到界面，但 <strong>QQ 停在会话列表页、没打开任何会话</strong>`
+        + ` —— 聊天页的锚点（消息区、输入框）此刻都不存在，常驻会以 `
+        + `<span class="ecode">E-QQ-008</span> 退出。`
+        + `<br><span style="color:var(--faint)">只需要在 QQ 里点开任意一个会话，`
+        + `不用重启 QQ。隐藏桌面形态下宿主会自己完成这一步。</span>`;
+    } else {
+      probeDesc = `读不到：${esc(probe.error || "未知原因")}`
+        + `<br><span style="color:var(--faint)">最常见的两个原因：QQ 没有以无障碍模式启动；`
+        + `或主窗口被最小化/藏在托盘里。</span>`;
+    }
+  }
+  html += step("probe", probeOk, "3 · 界面可读（无障碍树）", probeDesc,
+    `<button class="sm" data-act="qq-probe">${icon("eye")}体检</button>`
+    + `<button class="sm ${probeOk ? "" : "primary"}" data-act="qq-restart">${icon("refresh")}重启 QQ 到可读状态</button>`
+    + `<button class="sm" data-act="qq-wait">${icon("clock")}等待就绪</button>`);
+
+  const job = s.job;
+  if (job && job.status === "running" && job.name === "qq_wait") {
+    html += `<div class="notice ok" style="margin-top:12px">${icon("clock")}
+      <div>正在等待 QQ 就绪，已等 <strong>${fmtDur(job.elapsed)}</strong>。
+      若弹出登录窗口请手动扫码登录。<br><span style="opacity:.8">${esc(job.progress || "")}</span>
+      <div style="margin-top:7px"><button class="sm" data-act="qq-wait-cancel">取消等待</button></div></div></div>`;
+  }
+
+  const cmds = (s.qq.cmdlines || []);
+  $("#qqBody").innerHTML = html;
+}
+
+/* ============================================================ 渲染：常驻 */
+function renderRun(s) {
+  const r = s.supervisor.resident, hb = s.supervisor.heartbeat || {};
+  let html = `<div class="grid2" style="margin-bottom:12px">
+    <div class="stat"><div class="k">状态</div><div class="v" style="font-family:var(--sans)">${
+      r.running ? (r.dry_run ? "运行中（只读，不发送）" : "运行中（会真的发送）") : "未运行"}</div></div>
+    <div class="stat"><div class="k">已运行</div><div class="v">${r.running ? fmtDur(r.elapsed) : "—"}</div></div>
+    <div class="stat"><div class="k">当前会话</div><div class="v" style="font-family:var(--sans)">${esc(hb.title || "—")}</div></div>
+  </div>`;
+  if (hb.present) {
+    html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">当前阶段</div><div class="v" style="font-family:var(--sans);font-size:13px">
+        ${esc(hb.phase || "—")}${hb.phase_seconds != null ? ` <span style="color:var(--faint);font-size:11px">已 ${fmtDur(hb.phase_seconds)}</span>` : ""}</div></div>
+      <div class="stat"><div class="k">当前会话</div><div class="v" style="font-family:var(--sans);font-size:12px">${esc(hb.scope || "—")}</div></div>
+      <div class="stat"><div class="k">上一阶段耗时</div><div class="v" style="font-family:var(--sans);font-size:12px">
+        ${esc(hb.prev_phase || "—")} ${hb.prev_phase_seconds != null ? fmtDur(hb.prev_phase_seconds) : ""}</div></div>
+      <div class="stat"><div class="k">上一轮总耗时</div><div class="v">${hb.last_round_seconds != null ? fmtDur(hb.last_round_seconds) : "—"}</div></div>
+    </div>`;
+    // 各阶段耗时排行：只看「心跳停更」永远看不出慢在哪一步，一张榜一眼就够。
+    const ps = hb.phase_stats || {};
+    const rows = Object.entries(ps)
+      .map(([k, v]) => ({ name: k, total: v[0], n: v[1], worst: v[2] }))
+      .filter(r => r.worst >= 1.5)
+      .sort((a, b) => b.worst - a.worst).slice(0, 4);
+    if (rows.length) {
+      html += `<div class="stat" style="margin-bottom:12px">
+        <div class="k">各阶段耗时（最慢的几步）</div>
+        <div style="margin-top:5px;font-size:12px;font-family:var(--mono);line-height:1.7">
+        ${rows.map(r => `<div>${esc(r.name)}：平均 ${(r.total / Math.max(1, r.n)).toFixed(2)}s
+          ｜最大 ${r.worst}s｜${r.n} 次</div>`).join("")}</div></div>`;
+    }
+    html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">队列长度</div><div class="v">${hb.queue_len ?? 0}</div></div>
+      <div class="stat"><div class="k">防抖缓冲</div><div class="v">${hb.pending ?? 0}</div></div>
+      <div class="stat"><div class="k">扫描次数</div><div class="v">${hb.scans ?? 0}</div></div>
+      <div class="stat"><div class="k">命中 / 入队</div><div class="v">${hb.hits ?? 0} / ${hb.enqueued ?? 0}</div></div>
+    </div>`;
+    // 本轮读取的三段计数：读到的 / 其中新鲜的 / 被准入策略挡掉的。
+    // 「读到了但全被跳过」是最容易被误当成「对方没发消息」的一种故障 ——
+    // 把这三个数摆在界面上，比让人去翻日志强得多。
+    html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">本轮读到消息</div><div class="v">${hb.read ?? 0}</div></div>
+      <div class="stat"><div class="k">其中新增</div><div class="v">${hb.fresh ?? 0}</div></div>
+      <div class="stat"><div class="k">被跳过</div><div class="v">${hb.skipped ?? 0}</div></div>
+      <div class="stat"><div class="k">等待迟到消息结转</div><div class="v">${hb.late_pending ?? 0}</div></div>
+    </div>`;
+    // 「已生成但还没发出去」—— VM 场景下最该盯的一个数。
+    // 它不为 0 就说明已经写好的回复卡在发送环节，挂了越久越可能丢。
+    if ((hb.unsent ?? 0) > 0) {
+      html += `<div class="notice warn">${icon("warn")}<div>
+        有 <b>${hb.unsent}</b> 条回复<b>已经生成好但还没发出去</b>，正在原地重试。
+        ${hb.unsent_detail ? `<br><span style="opacity:.85">${esc(hb.unsent_detail)}</span>` : ""}
+        <br><span style="opacity:.85">这些回复不会丢：它们只等发送链路恢复，重启也会自动继续。
+        如果这个数一直不降，按日志里对应的错误码处理（多半是
+        <span class="ecode">E-SEND-002</span> 或 <span class="ecode">E-FG-001</span>）。</span>
+      </div></div>`;
+    }
+    if ((hb.fresh ?? 0) > 0 && (hb.skipped ?? 0) > 0 && !(hb.queue_len ?? 0)) {
+      html += `<div class="notice warn">${icon("warn")}
+        <div>读到了 <b>${hb.fresh}</b> 条新消息，但<b>全部被跳过</b>，一条都没进入上下文。
+        日志里找 <span class="ecode">E-READ-001</span> 那一行，它会列出每条被跳过时的原因；
+        最常见的是<b>方向判反</b>（对方的消息被认成自己发的）。
+        点「实时读取监视器」可以现场核对每一条的方向判定。</div></div>`;
+    }
+    if (hb.stale) {
+      const where = hb.phase ? `当前阶段是「${esc(hb.phase)}」` : "";
+      html += `<div class="notice warn">${icon("warn")}<div>
+        心跳已停更 ${fmtDur(hb.age)}，超过该阶段的合理上限 ${hb.stale_after_seconds ?? 30}s。${where}
+        ${hb.phase_seconds != null ? `（该阶段已持续 ${fmtDur(hb.phase_seconds)}）` : ""}<br>
+        <span style="opacity:.85">常见原因：模型接口未响应（会一直等到超时）、QQ 窗口被最小化导致
+        UIA 调用阻塞、或虚拟机/vCPU 被抢占。</span></div></div>`;
+    }
+  }
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">`;
+  html += r.running
+    ? `<button class="danger" data-act="agent-stop">${icon("stop")}停止常驻</button>
+       <button data-act="agent-restart">${icon("refresh")}重启常驻</button>`
+    : `<button class="primary" data-act="agent-start">${icon("rocket")}开始常驻（会真的回复）</button>
+       <button data-act="agent-start-dry">${icon("eye")}只读运行（不发送）</button>`;
+  html += `</div>`;
+  if (!r.running) {
+    // 把「操作谁」和「用哪份配置」放在按钮**正下方**：这两件事各出过一次问题
+    // （操作到了主号；exe 的数据目录是它自己那一层、于是读的是另一份配置）。
+    const probe0 = (s.probe) || {};
+    const who = probe0.dialog_title || (s.agent && s.agent.title) || "";
+    const dataDir = (s.paths && s.paths.data_dir) || "?";
+    html += `<div class="notice warn" style="margin-top:12px">${icon("info")}
+      <div>这条路线的操作对象是<b>你自己桌面上正在用的那个 QQ</b>${who ? `：上次读到 <b>${esc(who)}</b>` : "（还没体检过，点上面「体检」可以看清是哪个号）"}。
+      要操作另一个号、且不打扰你，请用上面的<b>隐藏桌面（独立 profile）</b>。</div></div>`;
+    html += `<div class="notice ok" style="margin-top:8px">${icon("info")}
+      <div>建议先用上面的「只读运行」观察一会儿日志，确认读到的消息、方向、昵称都对，再切到会真的发送的常驻。<br>
+      <span style="opacity:.85">本次配置来自：<code>${esc(dataDir)}</code></span></div></div>`;
+  }
+  $("#runBody").innerHTML = html;
+}
+
+/* ============================================================ 渲染：隐藏桌面 */
+let HOST_SHOT_V = 0;      // 截图缓存破坏用的自增值（同一路径换内容，必须变 URL）
+let HOST_SHOT_AT = "";    // 已展示过的那张图的时间戳，变了才换 URL
+
+function renderHost(s) {
+  const h = s.host || {};
+  const g = s.grab_last || null;
+  const box = $("#hostBody");
+  if (!box) return;
+  // 抓图落的是**固定文件名**，浏览器会认路径缓存 —— 不换 v，新图永远不会出现。
+  if (g && g.at && g.at !== HOST_SHOT_AT) { HOST_SHOT_AT = g.at; HOST_SHOT_V++; }
+  const running = !!h.running;
+  $("#hostSub").innerHTML = running
+    ? `宿主运行中 · 桌面 ${esc(h.desktop || "?")}`
+    : "QQ 跑在另一张桌面上，不占你的屏幕";
+
+  // ---- 这张卡片存在的理由先说清楚：它和上面那张「常驻运行」不是同一套东西。
+  // 不说清的话，用户看到两个「常驻」，会以为是同一个开关的两个入口。
+  let html = `<div class="notice ${running ? "ok" : "warn"}" style="margin-bottom:12px">
+    ${icon(running ? "ghost" : "monitor")}
+    <div><b>这是 R4 路线：把 QQ 启动到一张你看不见的桌面上。</b>
+    好处是它不占屏幕、不会误关，而且「前台」在那张桌面上是它自己独占的 ——
+    发消息不需要抢你的前台、也不会把按键漏进别的程序。
+    <br><span style="opacity:.85">它与上面那张「常驻运行」（在自己桌面上跑 agent、需要抢前台）
+    <b>互斥</b>：两者会同时操作同一个 QQ 输入框，所以一次只能开一个。</span></div></div>`;
+
+  // ---- 状态
+  const phase = h.phase || "";
+  const st = !h.heartbeat_present ? { t: "从未启动", c: "" }
+    : running ? { t: "运行中", c: "ok" }
+    : h.stale ? { t: "疑似卡住（心跳停更）", c: "warn" }
+    : { t: "已停止", c: "" };
+  html += `<div class="grid2" style="margin-bottom:12px">
+    <div class="stat"><div class="k">状态</div><div class="v" style="font-family:var(--sans)">
+      <span class="badge ${st.c}">${esc(st.t)}</span></div></div>
+    <div class="stat"><div class="k">阶段</div><div class="v" style="font-family:var(--sans);font-size:13px">
+      ${esc(phase || "—")}</div></div>
+    <div class="stat"><div class="k">已运行</div><div class="v">${h.uptime != null ? fmtDur(h.uptime) : "—"}</div></div>
+    <div class="stat"><div class="k">宿主进程</div><div class="v" style="font-family:var(--mono);font-size:12px">
+      ${h.pid || "—"}${h.pid ? ` <span style="color:var(--faint)">${h.alive ? "活着" : "已不在"}</span>` : ""}</div></div>
+    <div class="stat"><div class="k">桌面</div><div class="v" style="font-family:var(--mono);font-size:12px">
+      ${esc(h.desktop || "—")}</div>
+      ${h.desktop_self && h.desktop_self !== h.desktop
+        ? `<div class="k" style="margin-top:4px;color:var(--warn)">宿主自报 ${esc(h.desktop_self)}（不一致！）</div>` : ""}</div>
+    <div class="stat"><div class="k">心跳</div><div class="v" style="font-family:var(--sans);font-size:13px">
+      ${h.heartbeat_present ? (h.age >= 0 ? `${h.age}s 前` : "—") : "还没写过"}</div></div>
+  </div>`;
+
+  if (running || h.heartbeat_present) {
+    html += `<div class="grid2" style="margin-bottom:12px">
+      <div class="stat"><div class="k">登录状态</div><div class="v" style="font-family:var(--sans);font-size:13px">
+        ${h.logged_in ? "已登录" : "未确认"}${h.nickname ? ` · ${esc(h.nickname)}` : ""}</div></div>
+      <div class="stat"><div class="k">那边的 QQ 进程</div><div class="v">${(h.qq_pids || []).length}</div>
+        <div class="k" style="margin-top:4px;font-family:var(--mono);font-size:11px">${esc((h.qq_pids || []).join(", ") || "—")}</div></div>
+    </div>`;
+  }
+
+  // ---- 异常态：每一条都要说「下一步做什么」，否则等于只报了个情绪
+  if (h.stale) {
+    html += `<div class="notice warn">${icon("warn")}<div>
+      宿主进程还在，但已经 <b>${h.age}s</b> 没更新心跳了（超过 ${h.stale_after_seconds}s 视为停摆）。
+      停在这一阶段：<b>${esc(phase || "未知")}</b>。
+      <br><span style="opacity:.85">常见原因：正卡在一次很慢的模型调用，或那张桌面上的 UI 操作被阻塞。
+      先看右边日志里 ${esc(h.log_path || "hostd.log")} 的最后几行 —— 它会说明卡在哪一步。</span></div></div>`;
+  }
+  if (!running && h.heartbeat_present && h.error) {
+    html += `<div class="notice err">${icon("warn")}<div>
+      上一次运行是这样结束的：<b>${esc(h.error)}</b>
+      ${h.note ? `<br><span style="opacity:.85">${esc(h.note)}</span>` : ""}
+      ${h.rc != null ? `<br><span style="opacity:.85">宿主的退出码 = ${esc(h.rc)}（0=正常，2=启动阶段失败 —— 看上面的「阶段」卡在哪一步）</span>` : ""}</div></div>`;
+  }
+  if (!running && h.heartbeat_present && !h.error) {
+    // 「上一次是**怎么**停的」在正常停止时同样需要答案 ——
+    // 只显示一句「已停止」，人分不清是自己点的、还是它自己退出来的。
+    const why = h.reason || h.note || "";
+    if (why) {
+      html += `<div class="notice ok">${icon("info")}<div>
+        <b>上一次已正常停止</b>（退出码 ${esc(h.rc ?? 0)}）<br>
+        <span style="opacity:.85">${esc(why)}</span>
+        ${h.note && h.reason && h.note !== h.reason ? `<br><span style="opacity:.85">${esc(h.note)}</span>` : ""}
+      </div></div>`;
+    }
+  }
+  if (h.stop_requested) {
+    html += `<div class="notice warn">${icon("clock")}<div>停止哨兵还在，
+      说明上一轮停止没走完。点一次「停止」即可清掉。</div></div>`;
+  }
+
+  // ---- 首次使用必须先扫码：隐藏桌面上没有第二个人能扫，这个前提不给清楚必然卡住
+  if (!h.logged_in && !running) {
+    html += `<div class="notice ok">${icon("info")}<div>
+      <b>第一次用要先把号登进去</b>（隐藏桌面上没人能扫码）。两种办法：
+      <br>① 在命令行跑 <span class="ecode">python -m app.host start --visible</span>
+      —— 这张 QQ 窗口会出现在你眼前，登录完关掉它即可（登录态留在独立 profile 里）；
+      <br>② 或者直接点下面的「启动常驻」，如果这台机器<b>登录过这个号</b>，
+      宿主机自己会把登录页上的「登录」按钮按掉，全程不需要你。</div></div>`;
+  }
+
+  // ---- 按钮
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">`;
+  if (running) {
+    html += `<button class="danger" data-act="host-stop">${icon("stop")}停止（连宿主一起）</button>
+             <button data-act="host-grab">${icon("camera")}抓一张现在的画面</button>`;
+  } else {
+    html += `<button class="primary" data-act="host-start">${icon("rocket")}启动常驻（会真的回复）</button>
+             <button data-act="host-start-dry">${icon("eye")}只读运行（不发送）</button>
+             <button data-act="host-start-idle">${icon("monitor")}只把 QQ 摆上去</button>`;
+  }
+  html += `</div>`;
+
+  // ---- 画面：非活动桌面唯一的可视化通道（PrintWindow）
+  const cap = (g && g.capture) || {};
+  const saved = (g && g.saved) || {};
+  html += `<div class="stat" style="margin-top:14px">
+    <div class="k">那张桌面上现在是什么样</div>`;
+  if (saved.ok && saved.path) {
+    // 后缀要照实显示：打包版没有 Pillow，落的是 .bmp（约 2.5MB）。
+    // 写死「.png」会让人以为文件没生成，去磁盘上找错名字。
+    const fname = String(saved.path).split(/[\\/]/).pop();
+    html += `<div style="margin-top:8px">
+      <img id="hostShot" src="/api/host/shot?t=${encodeURIComponent(TOKEN)}&v=${HOST_SHOT_V}"
+           alt="隐藏桌面画面" style="max-width:100%;border:1px solid var(--border-strong);border-radius:var(--r-sm)">
+      <div style="font-size:11.5px;color:var(--faint);margin-top:6px">
+        抓于 ${esc(g.at || "?")}　${cap.w || "?"}×${cap.h || "?"}　
+        颜色种类 ${cap.distinct_colors ?? "?"}　平均亮度 ${cap.mean_luma ?? "?"}
+        ${cap.nonblack_ratio != null ? `　非黑占比 ${cap.nonblack_ratio}` : ""}
+        <br>${esc(fname)}（${saved.bytes ?? "?"} 字节）
+        ${fname.endsWith(".bmp") ? "　—— 这个版本没有 Pillow，所以存成了 BMP；浏览器照样能看" : ""}
+      </div>`;
+    if (!cap.distinct_colors || cap.distinct_colors <= 1) {
+      html += `<div style="font-size:11.5px;color:var(--warn);margin-top:4px">
+        这张图几乎是全黑 —— 多半是抓早了（窗口还没画出来），或者那张桌面上的窗口被节流了。</div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div style="margin-top:6px;font-size:12px;color:var(--faint)">
+      ${saved.error || g && g.error ? esc(saved.error || g.error) : "还没抓过。点上面的「抓一张现在的画面」。"}
+      <br>隐藏桌面的窗口无法用普通截图（EnumWindows 只看得到自己所在桌面），
+      所以这里走 PrintWindow 让**那张桌面上的进程**自己把画面画出来。</div>`;
+  }
+  const wins = (g && g.windows) || {};
+  const ui = (g && g.uia) || {};
+  if (g && (wins.count || ui.ok)) {
+    html += `<div style="margin-top:8px;font-size:11.5px;font-family:var(--mono);color:var(--faint)">
+      枚举到 QQ 窗口 ${wins.count ?? 0} 个${g.window ? `，主窗口 hwnd=${g.window.hwnd} rect=${JSON.stringify(g.window.rect)}` : ""}
+      ${ui.ok ? `<br>界面：昵称=${esc(ui.nickname || "(无)")} 会话列表=${ui.has_recent_list} 消息区=${ui.has_ml_list} 节点=${ui.nodes_scanned}` : ""}
+    </div>`;
+  }
+  html += `</div>`;
+
+  // ---- 路径（出问题时用户要能自己去看）
+  html += `<div class="field" style="margin-top:12px"><label>相关文件</label><div>
+    <div style="font-size:11.5px;font-family:var(--mono);color:var(--faint);line-height:1.8">
+      ${esc(h.log_path || "")}（${h.log_bytes || 0} 字节）
+      <br>${esc(h.heartbeat_path || "")}
+    </div>
+    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="ghost sm" data-act="open-state">${icon("folder")}打开状态目录</button>
+    </div></div></div>`;
+
+  box.innerHTML = html;
+}
+
+/* ============================================================ 渲染：任务 */
+function renderTasks(s) {
+  const sup = s.supervisor, running = {}, hist = {};
+  (sup.running_tasks || []).forEach(t => running[t.id] = t);
+  const busyHeavy = (sup.running_tasks || []).some(t => {
+    const def = TASKS.find(x => x.id === t.id); return def && !def.concurrent;
+  });
+  const residentOn = sup.resident.running;
+  const groups = {};
+  TASKS.forEach(t => { (groups[t.group] = groups[t.group] || []).push(t); });
+
+  let html = "";
+  Object.keys(groups).forEach(g => {
+    html += `<div class="taskgroup"><h4>${esc(g)}</h4><div class="tasklist">`;
+    groups[g].forEach(t => {
+      const isRun = !!running[t.id];
+      let blocked = "";
+      if (isRun) blocked = "（运行中）";
+      else if (!t.concurrent && busyHeavy) blocked = "";
+      else if (!t.concurrent && residentOn) blocked = "";
+      const badge = isRun ? `<span class="badge run">运行中 ${fmtDur(running[t.id].elapsed)}</span>` : "";
+      html += `<div class="task ${t.dangerous ? "danger" : ""}">
+        <div class="t">${icon(t.dangerous ? "warn" : "task-icon", "")}${esc(t.label)} ${badge}</div>
+        <div class="d">${esc(t.desc)}</div>`;
+      (t.params || []).forEach(p => {
+        html += `<div class="param"><label>${esc(p.label)}</label>` +
+          (p.multiline
+            ? `<textarea data-param="${esc(t.id)}.${esc(p.name)}" placeholder="${esc(p.placeholder)}">${esc(p.default)}</textarea>`
+            : `<input type="text" data-param="${esc(t.id)}.${esc(p.name)}" value="${esc(p.default)}" placeholder="${esc(p.placeholder)}">`) +
+          `</div>`;
+      });
+      html += `<div class="foot">`;
+      if (isRun) {
+        html += `<button class="sm danger" data-act="task-kill" data-id="${esc(t.id)}">${icon("stop")}中止</button>`;
+      } else {
+        const dis = (!t.concurrent && (busyHeavy || residentOn)) ? "disabled" : "";
+        html += `<button class="sm ${t.dangerous ? "danger" : ""}" data-act="task-run" data-id="${esc(t.id)}" ${dis}>${icon("play")}执行</button>`;
+      }
+      if (!t.concurrent && !isRun && residentOn) html += `<span class="badge">需先停止常驻</span>`;
+      html += `</div></div>`;
+    });
+    html += `</div></div>`;
+  });
+
+  const h = sup.task_history || [];
+  if (h.length) {
+    html += `<div class="taskgroup"><h4>最近执行</h4><div class="grid2">`;
+    h.slice(0, 8).forEach(t => {
+      const cls = t.status === "ok" ? "ok" : t.status === "running" ? "run" : "bad";
+      html += `<div class="stat"><div class="k">${esc(t.label)}</div>
+        <div class="v" style="font-family:var(--sans)">
+        <span class="badge ${cls}">${esc(t.status)}</span> ${fmtDur(t.elapsed)}
+        ${t.rc !== null && t.rc !== 0 ? `<span class="badge bad">rc=${t.rc}</span>` : ""}</div></div>`;
+    });
+    html += `</div></div>`;
+  }
+  $("#taskBody").innerHTML = html;
+}
+
+/* ============================================================ 渲染：设置 */
+function renderSettings(data) {
+  FIELDS = {}; data.fields.forEach(f => FIELDS[f.path] = f);
+  GROUPS = data.groups; VALUES = data.values;
+  let html = "";
+  GROUPS.forEach(g => {
+    const fs = data.fields.filter(f => f.group === g.id);
+    if (!fs.length) return;
+    html += `<div class="group" data-group="${esc(g.id)}">
+      <div class="group-head" data-toggle="${esc(g.id)}">
+        <span class="chev">${ICONS.chev}</span><h3>${esc(g.title)}</h3>
+        <span class="desc">${esc(g.desc)}</span></div>
+      <div class="group-body">`;
+    fs.forEach(f => { html += fieldHTML(f, data.values[f.path]); });
+    const adv = fs.filter(f => f.advanced).length;
+    if (adv) html += `<label class="adv-toggle"><input type="checkbox" data-adv="${esc(g.id)}">显示高级项（${adv} 项）</label>`;
+    html += `</div></div>`;
+  });
+  $("#settingsBody").innerHTML = html;
+  $("#cfgSub").innerHTML = data.api_key_present
+    ? `Key 已配置 · 来源 ${esc(data.api_key_source)}`
+    : `<span style="color:var(--warn)">Key 未配置</span>`;
+  // 默认展开前两组，其余折叠，避免一屏全是表单
+  openGroup(GROUPS[0].id); openGroup(GROUPS[1].id);
+  markClean();
+}
+
+function fieldHTML(f, v) {
+  const hint = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
+  let ctl = "";
+  if (f.type === "bool") {
+    ctl = `<label class="switch"><input type="checkbox" data-path="${esc(f.path)}" ${v ? "checked" : ""}>
+      <span class="track"></span><span class="lbl">${v ? "已开启" : "已关闭"}</span></label>`;
+  } else if (f.type === "select") {
+    ctl = `<select data-path="${esc(f.path)}">` + (f.options || []).map(o =>
+      `<option value="${esc(o.value)}" ${String(v) === String(o.value) ? "selected" : ""}>${esc(o.label)}</option>`).join("") + `</select>`;
+  } else if (f.type === "textarea") {
+    ctl = `<textarea data-path="${esc(f.path)}" rows="4">${esc(v)}</textarea>`;
+  } else if (f.type === "tags") {
+    const txt = Array.isArray(v) ? v.join("\n") : String(v || "");
+    ctl = `<textarea data-path="${esc(f.path)}" data-tags="1" rows="3">${esc(txt)}</textarea>`;
+  } else if (f.type === "number") {
+    const st = f.step != null ? ` step="${f.step}"` : ""; 
+    const mn = f.minimum != null ? ` min="${f.minimum}"` : "";
+    const mx = f.maximum != null ? ` max="${f.maximum}"` : "";
+    ctl = `<input type="number" data-path="${esc(f.path)}" value="${esc(v)}"${st}${mn}${mx}>`;
+  } else if (f.type === "password") {
+    ctl = `<div class="key-row"><input type="password" data-path="${esc(f.path)}" data-secret="1"
+      value="${esc(v)}" placeholder="粘贴 API Key"><button class="ghost sm icon-btn" data-eye="1" title="显示/隐藏">${ICONS.eye}</button></div>`;
+  } else {
+    ctl = `<input type="text" data-path="${esc(f.path)}" value="${esc(v)}">`;
+  }
+  return `<div class="field ${f.advanced ? "adv" : ""}">
+    <label>${esc(f.label)}</label><div>${ctl}${hint}</div></div>`;
+}
+
+function openGroup(id) { const g = document.querySelector(`.group[data-group="${id}"]`); if (g) g.classList.add("open"); }
+function markClean() { dirty = false; $("#dirtyHint").textContent = ""; }
+function markDirty() { dirty = true; $("#dirtyHint").textContent = "有未保存的改动"; }
+
+function collectValues() {
+  const out = {};
+  document.querySelectorAll("[data-path]").forEach(node => {
+    const path = node.dataset.path, f = FIELDS[path]; if (!f) return;
+    if (f.type === "bool") out[path] = node.checked;
+    else if (f.type === "number") out[path] = node.value === "" ? null : Number(node.value);
+    else if (f.type === "tags") out[path] = node.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    else out[path] = node.value;
+  });
+  return out;
+}
+
+/* ============================================================ 渲染：加固 */
+function renderAdmin(s) {
+  const auto = (s.qq && s.qq.autostart) || {};
+  const app = s.app || {};
+  $("#adminBody").innerHTML = `
+    <div class="notice ${s.admin ? "ok" : "warn"}" style="margin-bottom:14px">
+      ${icon(s.admin ? "shield" : "warn")}
+      <div>${s.admin ? "已获得管理员权限。" : "当前<b>没有管理员权限</b> —— 下面的加固与自启会失败。点右上角「提权重启」。"}
+      </div>
+    </div>
+    <div class="field"><label>禁用自动锁屏</label><div>
+      <div class="hint" style="margin:0 0 8px">锁屏会让切换会话和发送全部失败，这正是本方案要解决的问题。
+      这个动作会关闭显示器的自动关闭、自动睡眠、自动休眠，并禁用屏保与锁屏界面（部分项需专业版）。</div>
+      <button data-act="harden">${icon("shield")}执行加固</button>
+    </div></div>
+    <div class="field"><label>开机自动启动</label><div>
+      <div class="hint" style="margin:0 0 8px">注册为登录任务并带「最高权限」标记 ——
+      这样开机自启不会弹 UAC。虚拟机上无人值守必需。当前状态：<b>${auto.installed ? "已安装" : "未安装"}</b></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button data-act="autostart-on" ${auto.installed ? "disabled" : ""}>${icon("play")}安装自启</button>
+        <button class="danger" data-act="autostart-off" ${auto.installed ? "" : "disabled"}>${icon("trash")}移除自启</button>
+      </div>
+    </div></div>
+    <div class="field"><label>路径信息</label><div>
+      <div class="grid2">
+        <div class="stat"><div class="k">数据目录</div><div class="v">${esc(s.paths.data_dir)}</div>
+          <div class="k" style="margin-top:5px">${esc(s.paths.data_dir_reason)}</div></div>
+        <div class="stat"><div class="k">运行模式</div><div class="v" style="font-family:var(--sans)">
+          ${s.paths.frozen ? "打包 exe" : "源码"} · ${esc(s.desktop === "locked" ? "锁屏" : "已解锁")}</div></div>
+        ${s.lan_ip ? `<div class="stat"><div class="k">本机局域网地址</div><div class="v">${esc(s.lan_ip)}</div></div>` : ""}
+        ${s.memory && s.memory.total_gb ? `<div class="stat"><div class="k">内存</div><div class="v">${s.memory.avail_gb}/${s.memory.total_gb} GB · 占用 ${s.memory.load_percent}%</div></div>` : ""}
+      </div>
+    </div></div>`;
+}
+
+/* ============================================================ 刷新 */
+async function refresh(withProbe) {
+  const res = await api("/api/state" + (withProbe ? "?probe=1" : ""));
+  if (!res.ok) {
+    // 首屏就失败 = 后端根本没在跑（比如直接打开了这个 html 文件）。
+    // 这种情况要给一条说得清楚的横幅；已经有过状态之后偶发失败，弹个 toast 就够了。
+    if (res.offline || !STATE) offlineBanner(res.error || "连不上控制台服务");
+    else errToast(res, "读取状态");
+    return;
+  }
+  if (bannerShown) { bannerShown = false; $("#warnings").innerHTML = ""; }
+  STATE = res.state;
+  const s = STATE;
+  $("#verLine").textContent = `v${s.version} · 端口 ${location.port} · 令牌 ${s.token_hint}…`;
+  renderPills(s); renderWarnings(s); renderQQ(s); renderRun(s); renderHost(s); renderAdmin(s);
+  if (TASKS.length) renderTasks(s);
+  document.querySelectorAll("[data-act]").forEach(b => {
+    if (b.dataset.act === "agent-start" || b.dataset.act === "agent-start-dry") {
+      b.disabled = s.supervisor.resident.running;
+    }
+  });
+}
+
+async function loadTasks() {
+  const res = await api("/api/tasks");
+  if (res.ok) { TASKS = res.tasks; if (STATE) renderTasks(STATE); }
+  else if (!res.offline) errToast(res, "读取任务清单");
+}
+
+async function loadSettings() {
+  const res = await api("/api/settings");
+  if (res.ok) renderSettings(res.settings);
+  else if (!res.offline) {
+    errToast(res, "读取配置");
+    $("#settingsBody").innerHTML = `<div class="empty">读取配置失败 ${codeChip(res.code)} ${esc(res.error || "")}</div>`;
+  }
+}
+
+/* ============================================================ 诊断报告 */
+function diagRunning() {
+  $("#diagTitle").textContent = "诊断报告";
+  $("#diagSub").textContent = "正在体检…";
+  $("#diagBody").innerHTML = `<div class="empty">正在逐项检查环境…<br>
+    <span style="font-size:11.5px">包含模型连通性测试，可能需要几秒</span></div>`;
+  $("#diagBg").classList.add("show");
+}
+
+function diagRender(res) {
+  const c = res.counts || {};
+  $("#diagSub").textContent = `${res.generated_at} · 耗时 ${res.elapsed}s`;
+  let html = `<div class="diag-sum">
+    <span class="diag-chip ok"><b>${c.ok || 0}</b> 正常</span>
+    <span class="diag-chip warn"><b>${c.warn || 0}</b> 警告</span>
+    <span class="diag-chip fail"><b>${c.fail || 0}</b> 失败</span>
+    <span class="diag-chip"><b>${c.skip || 0}</b> 跳过</span>
+    <span class="diag-chip ${res.healthy ? "ok" : "fail"}">${res.healthy ? "环境健康" : "存在需要处理的问题"}</span>
+  </div>`;
+
+  // 有问题的排前面 —— 报告的价值在于「第一眼就看到要动手的地方」
+  const order = { fail: 0, warn: 1, skip: 2, ok: 3 };
+  const checks = [...(res.checks || [])].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+  const mark = { ok: "[✓]", warn: "[!]", fail: "[X]", skip: "[-]" };
+  checks.forEach(x => {
+    html += `<div class="diag-item ${esc(x.status)}">
+      <div class="h"><span class="st">${mark[x.status] || ""}</span>${esc(x.label)}
+        ${codeChip(x.code)}
+        ${x.severity === "warn" && x.status === "fail" ? `<span class="badge">提示级</span>` : ""}</div>`;
+    if (x.detail) html += `<div class="d">${esc(x.detail)}</div>`;
+    if (x.status !== "ok" && x.hint) html += `<div class="fx"><b>下一步：</b>${esc(x.hint)}</div>`;
+    html += `</div>`;
+  });
+
+  html += `<div style="margin-top:14px">
+    <div style="font-size:12px;color:var(--faint);margin-bottom:6px">
+      可复制文本（贴给别人时带上它，就不用再问环境信息了）</div>
+    <div class="report-pre" id="diagText">${esc(res.report_text || "")}</div></div>`;
+  $("#diagBody").innerHTML = html;
+  $("#diagTitle").textContent = res.healthy ? "诊断报告 · 环境正常" : "诊断报告 · 发现问题";
+}
+
+async function openDiagnose() {
+  diagRunning();
+  const res = await api("/api/diagnose");
+  if (!res.ok || !res.checks) { errToast(res, "体检"); $("#diagBody").innerHTML =
+    `<div class="empty">体检失败 ${codeChip(res.code)} ${esc(res.error || "")}</div>`; return; }
+  diagRender(res);
+}
+
+/* ============================================================ 事件绑定 */
+document.addEventListener("click", async e => {
+  const btn = e.target.closest("[data-act]");
+  if (btn) {
+    const act = btn.dataset.act, id = btn.dataset.id;
+    if (btn.disabled) return;
+    await handleAction(act, btn);
+    return;
+  }
+  const tg = e.target.closest("[data-toggle]");
+  if (tg) { tg.parentElement.classList.toggle("open"); return; }
+
+  const adv = e.target.closest("input[data-adv]");
+  const eye = e.target.closest("[data-eye]");
+  if (eye) {
+    const inp = eye.parentElement.querySelector("input");
+    inp.type = inp.type === "password" ? "text" : "password";
+    eye.innerHTML = inp.type === "password" ? ICONS.eye : ICONS.eyeOff;
+    return;
+  }
+  const chip = e.target.closest(".chip[data-level]");
+  if (chip) {
+    const lv = chip.dataset.level;
+    LEVELS[lv] = LEVELS[lv] ? 0 : 1;
+    chip.classList.toggle("on", !!LEVELS[lv]);
+    redrawLog();
+  }
+});
+
+document.addEventListener("change", e => {
+  const adv = e.target.closest("input[data-adv]");
+  if (adv) {
+    adv.closest(".group").classList.toggle("show-adv", adv.checked);
+    return;
+  }
+  if (e.target.dataset.path) {
+    markDirty();
+    if (e.target.type === "checkbox") {
+      const lbl = e.target.parentElement.querySelector(".lbl");
+      if (lbl) lbl.textContent = e.target.checked ? "已开启" : "已关闭";
+    }
+  }
+});
+document.addEventListener("input", e => { if (e.target.dataset.path) markDirty(); });
+
+async function handleAction(act, btn) {
+  const s = STATE;
+  switch (act) {
+    case "qq-find": toast("正在重新查找 QQ…"); await refresh(true); toast("查找完成", "ok"); break;
+    case "qq-probe": toast("正在体检（约 2 秒）…"); await refresh(true); break;
+    case "qq-launch": await run("/api/qq/launch", {}, "启动 QQ"); break;
+    case "qq-restart": {
+      const ok = await confirmDialog({
+        title: "重启 QQ 到可读状态",
+        body: `这会<b>完全退出</b>当前 QQ（含托盘），然后带上无障碍参数重新启动。<br><br>
+          为什么必须完全退出：启动参数只在 QQ 首次启动时生效，已经在跑的时候再执行一次带参数的命令，
+          只会把窗口唤到前台，参数不会应用。<br><br>
+          登录态会保留，一般不需要重新扫码；但<b>正在输入的文字会丢失</b>。`,
+        confirmText: "重启 QQ", danger: true
+      });
+      if (ok) await run("/api/qq/restart", {}, "重启 QQ");
+      break;
+    }
+    case "qq-wait": await run("/api/qq/wait", { timeout: 180 }, "等待 QQ 就绪"); break;
+    case "qq-wait-cancel": await run("/api/qq/wait/cancel", {}, "取消等待"); break;
+    case "agent-start": {
+      // ⚠️ 这个确认框不是走过场，它补的是一个**真实发生过的事故**：
+      //    在 V2（R4 版）的 exe 上，有人点了这张卡的「开始常驻」——
+      //    这条路线操作的是**本机桌面上登录着的那个 QQ**，也就是他自己的**主号**，
+      //    于是程序读了主号的会话列表，并且真的往一个群里发了一条 AI 回复。
+      //    当时界面上没有任何一处告诉他「你要操作的是哪个号」。
+      //    所以确认框里必须把三件事摆出来：操作对象、数据目录、会发生什么。
+      const s0 = STATE || {};
+      const probe0 = s0.probe || {};
+      const hb0 = s0.agent || {};
+      const who = probe0.dialog_title || hb0.title || "";
+      const dataDir = (s0.paths && s0.paths.data_dir) || "?";
+      const ok = await confirmDialog({
+        title: "确认：操作你桌面上的那个 QQ？",
+        body: `这条路线（V1）附着的是<b>你自己桌面上正在用的 QQ</b>：
+              <code>${esc(s0.qq && s0.qq.main ? `hwnd ${s0.qq.main.hwnd}` : "自动挑最大的可见窗口")}</code><br>
+              ${who ? `上次它读到的会话是 <b>${esc(who)}</b> —— 如果不是你以为的那个号，别继续。`
+                    : `<span style="color:var(--warn)">还没有体检过，不知道会挑到哪个号 —— 建议先点「体检」看一眼。</span>`}
+              <br><br>
+              它会：读会话列表 → 等多条消息合并 → 调模型 → <b>真的把回复发出去</b>。
+              发送期间会抢一次前台，你的键盘输入可能被打断。<br><br>
+              <b>回复范围</b>：${policyText(s0)}<br><br>
+              本次读的是这个数据目录里的配置：<br>
+              <code>${esc(dataDir)}</code><br>
+              （exe 的数据目录是它**自己所在的那一层**，不是源码目录 —— 换过位置就等于换了配置。）
+              <br><br>
+              如果你要的是「不打扰你、操作另一个号」，请用<b>上面那张「隐藏桌面（独立 profile）」卡片</b>。`,
+        confirmText: "我确认，操作的是它", danger: true
+      });
+      if (ok) await run("/api/agent/start", { dry_run: false }, "启动常驻");
+      break;
+    }
+    case "agent-start-dry": await run("/api/agent/start", { dry_run: true }, "只读运行"); break;
+    case "agent-stop": {
+      const ok = await confirmDialog({
+        title: "停止常驻", danger: true, confirmText: "停止",
+        body: "会先放停止哨兵，给主循环最多 12 秒把队列里已经生成好的回复发完，再退出。"
+      });
+      if (ok) await run("/api/agent/stop", {}, "停止常驻");
+      break;
+    }
+    case "agent-restart": await run("/api/agent/restart", {}, "重启常驻"); break;
+
+    /* ---------- 隐藏桌面（R4） ----------
+       启动前一定要说清两件事：它会在你的屏幕上「看不见地」登一个 QQ 号；
+       以及它会**真的发消息**。这两件都是不可逆的副作用，不能靠默认值带过去。 */
+    case "host-start": {
+      const h = s.host || {};
+      const ok = await confirmDialog({
+        title: "在隐藏桌面上启动常驻", confirmText: "启动（会真的发送）", danger: true,
+        body: `会把 QQ 与常驻宿主一起启动到隐藏桌面 <b>${esc(h.desktop || "QQAgentHidden")}</b> 上，
+          用的是<b>独立的 profile 目录</b>，和你自己正在用的那个 QQ 完全隔开。<br><br>
+          它会<b>真的回复并发送消息</b>。桌面上那个 QQ 号就是你的主号 ——
+          建议先用下面的「只读运行」看一会儿日志，确认读到的消息和方向都对。<br><br>
+          <b>前提：</b>这台机器登录过那个号。没登录过的话，隐藏桌面上没人能扫码 ——
+          先用命令行 <span class="ecode">python -m app.host start --visible</span> 登录一次。`
+      });
+      if (ok) await run("/api/host/start", { dry_run: false, wait: 3 }, "启动隐藏桌面常驻");
+      break;
+    }
+    case "host-start-dry":
+      await run("/api/host/start", { dry_run: true, wait: 3 }, "只读运行");
+      break;
+    case "host-start-idle": {
+      const ok = await confirmDialog({
+        title: "只把 QQ 摆到隐藏桌面上", confirmText: "启动",
+        body: `只启动 QQ 与宿主进程，<b>不跑回复循环</b> —— 它不会读也不会发任何消息。<br>
+          适合用来确认「能不能起来、能不能免扫码登录、画面长什么样」。`
+      });
+      if (ok) await run("/api/host/start", { no_agent: true, wait: 3 }, "启动隐藏桌面");
+      break;
+    }
+    case "host-stop": {
+      const h = s.host || {};
+      const ok = await confirmDialog({
+        title: "停止隐藏桌面常驻", danger: true, confirmText: "停止",
+        body: `会先给回复循环最多 20 秒把队列里已经生成好的回复发完，再退宿主进程。<br><br>
+          隐藏桌面上那个 QQ <b>默认会留着</b>（登录态也留着，下次启动直接复用）。
+          想连它一起结束，用命令行
+          <span class="ecode">python -m app.host stop --yes</span>。<br><br>
+          当前阶段：<b>${esc(h.phase || "未知")}</b>　已运行 ${fmtDur(h.uptime)}`
+      });
+      if (ok) await run("/api/host/stop", {}, "停止隐藏桌面常驻");
+      break;
+    }
+    case "host-grab":
+      // 抓图是派一个进程进那张桌面做 PrintWindow，单次几秒 —— 走后台任务。
+      // 完成之前别让按钮重复点：任务状态会从 /api/state 里回来。
+      toast("正在让那张桌面上的进程把画面画出来（约 2~5 秒）…");
+      await run("/api/host/grab", { wait: 1.5 }, "抓取画面");
+      setTimeout(() => refresh(false), 2500);
+      break;
+    case "open-state": await api("/api/system/open", { target: "state" }); break;
+    case "task-run": {
+      const t = TASKS.find(x => x.id === id); if (!t) return;
+      const params = {};
+      (t.params || []).forEach(p => {
+        const node = document.querySelector(`[data-param="${CSS.escape(id)}.${CSS.escape(p.name)}"]`);
+        params[p.name] = node ? node.value : p.default;
+      });
+      if (t.confirm) {
+        const extra = Object.values(params).filter(Boolean).map(v => `<div class="code">${esc(v)}</div>`).join("");
+        const ok = await confirmDialog({ title: t.label, body: t.confirm + extra, danger: t.dangerous, confirmText: "确认执行" });
+        if (!ok) return;
+      }
+      await run("/api/task", { id, params }, t.label);
+      break;
+    }
+    case "task-kill": {
+      const ok = await confirmDialog({ title: "中止任务", danger: true, confirmText: "中止",
+        body: `确认强制结束「${id}」？进程树会被结束，可能留下写到一半的输入框内容。` });
+      if (ok) await run("/api/task/kill", { id }, "中止任务");
+      break;
+    }
+    case "harden": {
+      const ok = await confirmDialog({
+        title: "执行虚拟机加固", confirmText: "执行",
+        body: `会做这些改动（都可以手动改回）：<br>
+          <ul style="padding-left:16px;margin:6px 0"><li>关闭显示器自动关闭</li><li>关闭硬盘自动关闭</li>
+          <li>关闭系统自动睡眠 / 休眠</li><li>关闭屏保</li><li>尝试禁用锁屏界面（仅专业版生效）</li></ul>
+          需要管理员权限。`
+      });
+      if (ok) {
+        const res = await api("/api/admin/harden", {});
+        if (res.ok) toast(`加固完成：${res.ok_count}/${res.total} 项成功`, "ok");
+        else toast(res.error || "加固失败", "err");
+        refresh();
+      }
+      break;
+    }
+    case "autostart-on": {
+      const ok = await confirmDialog({ title: "安装开机自启", confirmText: "安装",
+        body: "会注册一个登录任务（最高权限、不弹 UAC），开机后自动启动本程序控制台。需要管理员权限。" });
+      if (ok) { const r = await api("/api/admin/autostart", { action: "install" }); toast(r.ok ? "自启已安装" : (r.error || "安装失败"), r.ok ? "ok" : "err"); refresh(); }
+      break;
+    }
+    case "autostart-off": {
+      const ok = await confirmDialog({ title: "移除开机自启", danger: true, confirmText: "移除", body: "删除登录任务。" });
+      if (ok) { const r = await api("/api/admin/autostart", { action: "remove" }); toast(r.ok ? "自启已移除" : (r.error || "移除失败"), r.ok ? "ok" : "err"); refresh(); }
+      break;
+    }
+  }
+}
+
+/* ---------- 顶栏与工具按钮 ---------- */
+$("#btnSave").innerHTML = icon("check") + "保存配置";
+$("#btnReload").innerHTML = icon("refresh") + "重新读取";
+$("#btnReset").innerHTML = icon("trash") + "恢复默认值";
+$("#btnSave").addEventListener("click", async () => {
+  const res = await api("/api/settings", { values: collectValues() });
+  if (res.ok) {
+    markClean();
+    toast("配置已保存" + (res.changed.length ? `（${res.changed.length} 项变更）` : ""), "ok");
+    (res.warnings || []).forEach((w, i) => toast(`[${(res.warning_codes || [])[i] || "提示"}] ${w}`, "warn"));
+    loadSettings(); refresh();
+  } else {
+    // 校验错误是 {code, message, hint} 列表：逐条显示，让人一眼看到要改哪一项
+    const errs = res.errors && res.errors.length ? res.errors : [res];
+    errs.forEach(x => toast(`[${x.code || "E-CFG-007"}] ${x.message || x.error || "保存失败"}`,
+                            "err", "", x.hint || ""));
+  }
+});
+$("#btnReload").addEventListener("click", () => { loadSettings(); toast("已重新读取磁盘上的配置"); });
+$("#btnReset").addEventListener("click", async () => {
+  const ok = await confirmDialog({ title: "恢复默认配置", danger: true, confirmText: "恢复",
+    body: "config.json 会被替换成内置默认值（会先自动备份）。API Key 不受影响。" });
+  if (ok) { const r = await api("/api/settings/reset", {}); toast(r.ok ? "已恢复默认值" : "失败", r.ok ? "ok" : "err"); loadSettings(); refresh(); }
+});
+$("#btnOpenData").addEventListener("click", () => api("/api/system/open", { target: "data" }));
+$("#btnElevate").addEventListener("click", async () => {
+  const r = await api("/api/admin/elevate", {});
+  if (r.ok && r.exit) toast("已请求提权，即将出现 UAC 窗口；确认后请重新打开界面", "warn");
+  else if (r.ok) toast("已经是管理员权限", "ok");
+  else toast("提权失败或被拒绝", "err");
+});
+$("#btnQuitApp").addEventListener("click", async () => {
+  const ok = await confirmDialog({
+    title: "退出 QQAgent", danger: true, confirmText: "退出程序",
+    body: "会停止常驻进程并关闭本控制台。托盘图标会消失。之后可以重新双击 exe 启动。"
+  });
+  if (ok) { await api("/api/system/quit", {}); toast("正在退出…"); }
+});
+$("#btnPause").innerHTML = ICONS.pause;
+$("#btnPause").addEventListener("click", () => {
+  paused = !paused;
+  $("#btnPause").innerHTML = paused ? ICONS.play : ICONS.pause;
+  toast(paused ? "已暂停自动滚动" : "已恢复自动滚动");
+});
+$("#btnClear").innerHTML = ICONS.trash;
+$("#btnClear").addEventListener("click", async () => {
+  logLines = []; $("#log").innerHTML = ""; ["error","warn","action","info","debug"].forEach(l => $("#c-"+l).textContent = "0");
+  await api("/api/logs/clear", {});
+});
+$("#btnDownload").innerHTML = ICONS.dl;
+$("#btnDownload").addEventListener("click", () => {
+  const text = logLines.map(r => `[${r.clock}] ${(r.tag||"").padEnd(5)} ${r.text}`).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = "qqagent-log-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".txt";
+  a.click(); URL.revokeObjectURL(a.href);
+});
+$("#logFilter").addEventListener("input", e => { filterText = e.target.value.trim().toLowerCase(); redrawLog(); });
+
+/* ---------- 诊断报告面板 ---------- */
+$("#btnDiag").innerHTML = icon("cap") + "诊断报告";
+$("#diagClose").innerHTML = icon("x") + "关闭";
+$("#diagRerun").innerHTML = icon("refresh") + "重新体检";
+$("#diagCopy").innerHTML = icon("folder") + "复制报告";
+$("#diagSave").innerHTML = icon("dl") + "保存为文件";
+$("#btnDiag").addEventListener("click", openDiagnose);
+$("#diagRerun").addEventListener("click", openDiagnose);
+$("#diagClose").addEventListener("click", () => $("#diagBg").classList.remove("show"));
+$("#diagBg").addEventListener("click", e => { if (e.target.id === "diagBg") $("#diagBg").classList.remove("show"); });
+$("#diagCopy").addEventListener("click", async () => {
+  const node = $("#diagText");
+  if (!node) return;
+  const text = node.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("报告已复制到剪贴板", "ok");
+  } catch (e) {
+    // 非 https / 无剪贴板权限时退回到「选中让用户自己复制」
+    const r = document.createRange(); r.selectNodeContents(node);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    toast("已选中报告文本，请按 Ctrl+C 复制", "warn");
+  }
+});
+$("#diagSave").addEventListener("click", () => {
+  const node = $("#diagText");
+  if (!node) return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([node.textContent], { type: "text/plain" }));
+  a.download = `qqagent-diagnose-${stamp}.txt`;
+  a.click(); URL.revokeObjectURL(a.href);
+});
+/* 点错误码 = 就地看「判据 + 动作」，不用去翻文档 */
+document.addEventListener("click", async e => {
+  const chip = e.target.closest(".ecode");
+  if (!chip) return;
+  const code = chip.textContent.trim();
+  const res = await api("/api/errors");
+  const it = res.ok ? (res.catalog || {})[code] : null;
+  if (!it) { toast(`${code} 没有对应的说明（可能目录没更新）`, "warn"); return; }
+  await confirmDialog({
+    title: `${code} ${it.title}`,
+    body: `<div style="color:var(--muted)">严重级别：${esc(it.severity)}　所属：${esc(it.domain)}</div>
+      <div style="margin-top:10px"><b>可能是：</b><ul style="padding-left:18px;margin:4px 0">`
+      + it.causes.map(c => `<li>${esc(c)}</li>`).join("") + `</ul></div>
+      <div style="margin-top:10px"><b>怎么办：</b><ul style="padding-left:18px;margin:4px 0">`
+      + it.fixes.map(f => `<li>${esc(f)}</li>`).join("") + `</ul></div>`,
+    confirmText: "知道了", infoOnly: true,
+  });
+});
+
+/* ---------- 主题 ---------- */
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem("qqagent-theme", t);
+  $("#btnTheme").innerHTML = t === "dark" ? ICONS.sun : ICONS.moon;
+}
+setTheme(localStorage.getItem("qqagent-theme") ||
+  (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+$("#btnTheme").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+
+/* ---------- 静态图标 ---------- */
+$("#brandMark").innerHTML = ICONS.robot;
+["i-qq:robot","i-run:activity","i-host:ghost","i-play:play","i-sliders:sliders","i-shield:shield",
+ "i-term:term","i-warn:warn","i-diag:cap"].forEach(x => {
+  const [id, name] = x.split(":"); const n = document.getElementById(id); if (n) n.innerHTML = ICONS[name];
+});
+
+/* ---------- SSE ---------- */
+let es = null;
+function connect() {
+  if (es) es.close();
+  es = new EventSource("/api/events?t=" + encodeURIComponent(TOKEN));
+  es.onmessage = ev => {
+    let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (d.type === "log") addLine(d.line);
+    else if (d.type === "state") {
+      STATE = d.state;
+      renderPills(STATE); renderWarnings(STATE); renderRun(STATE); renderHost(STATE); renderAdmin(STATE);
+      const r = STATE.qq && STATE.qq.probe;
+      if (r) renderQQ(STATE);
+      if (TASKS.length) renderTasks(STATE);
+      if (STATE.job) { const j = STATE.job; if (j.status === "running") renderQQ(STATE); }
+    }
+  };
+  es.onerror = () => { es.close(); setTimeout(connect, 2500); };
+}
+
+/* ---------- 启动 ---------- */
+(async function boot() {
+  // 每一步都单独兜住：任何一个接口出问题都不该让整个页面变成空白，
+  // 用户至少要能看到「哪里出问题了」。
+  const step = async (name, fn) => {
+    try { await fn(); }
+    catch (e) { console.error("[boot]", name, e); toast(`初始化 ${name} 失败：${e.message || e}`, "err"); }
+  };
+  await step("事件流", connect);
+  await step("任务清单", loadTasks);
+  await step("配置", loadSettings);
+  await step("状态", () => refresh(true));
+  setInterval(() => { if (!document.hidden) refresh(false); }, 6000);
+})();
+</script>
+</body>
+</html>

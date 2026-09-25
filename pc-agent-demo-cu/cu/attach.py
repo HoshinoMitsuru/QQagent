@@ -47,6 +47,7 @@ _user32 = ctypes.windll.user32
 _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 _user32.ShowWindow.restype = wintypes.BOOL
 _SW_RESTORE = 9
+_SW_SHOW = 5
 
 
 def _dataclass_to_chat(m) -> ChatMessage:
@@ -80,57 +81,68 @@ class AttachExecutor(Executor):
             self._attached = True
         return win
 
-    def _ensure_qq_visible(self, hwnd: int = 0) -> None:
-        """QQ 最小化时自动 SW_RESTORE 还原（2026-09-25 实测驱动）。
+    def _ensure_qq_visible(self, hwnd: int) -> None:
+        """QQ 不在可用状态时自动救回（2026-09-25 真机两轮实测驱动）：
 
-        ## 为什么是「还原」而不是「抢前台」
+        - 最小化（IsIconic）→ SW_RESTORE：最小化时 Chromium 节流 renderer，
+          会话列表读不出、Invoke 静默失效；
+        - 隐藏（IsWindowVisible=False，如被收进托盘）→ SW_SHOW；
+        - 被遮挡**不需要管**：还原后窗口可以躺在别的窗口下面，
+          遮挡态下 Invoke 与读取都可用（probe_minimized 实测结论）。
 
-        实测结论（见 archive/probe_minimized.py / probe_switch_nofg.py）：
-        最小化时 Chromium 节流 renderer，**会话列表读不出、Invoke 静默失效**；
-        但被遮挡（还原后不置顶）时 Invoke 与读取都可用。所以只还原、
-        不调 force_foreground —— 尽量不打扰用户。
-
-        ## 实测现场（2026-09-25）
-
-        主号最小化时 list_sessions 三连 E-QQ-007「会话列表为空」，
-        还原窗口后同一函数立刻读出全部会话。"""
+        全程不调 force_foreground —— 尽量不打扰用户。"""
         if not hwnd:
-            _, hwnd = qqid.find_qq_main_window()
-        if not hwnd or not winmsg.is_iconic(hwnd):
             return
-        _user32.ShowWindow(hwnd, _SW_RESTORE)
-        agent.log("INFO", f"QQ 处于最小化，已还原窗口（hwnd={hwnd}，不抢前台）")
-        time.sleep(1.5)   # 给 renderer 一点时间恢复 a11y 树
+        if winmsg.is_iconic(hwnd):
+            _user32.ShowWindow(hwnd, _SW_RESTORE)
+            agent.log("INFO", f"QQ 处于最小化，已还原窗口（hwnd={hwnd}，不抢前台）")
+            time.sleep(1.5)   # 给 renderer 一点时间恢复 a11y 树
+        elif not winmsg.is_visible(hwnd):
+            if _user32.ShowWindow(hwnd, _SW_SHOW):
+                agent.log("INFO", f"QQ 主窗口处于隐藏状态，已显示（hwnd={hwnd}，不抢前台）")
+                time.sleep(1.0)
 
-    def _cards(self) -> tuple:
-        """会话卡片（qqid.SessionCard），list_sessions / open_chat 共用。
-        最小化导致读空时自动还原窗口重试一次。"""
-        self._ensure_qq_visible()
+    def _locate(self) -> tuple:
+        """定位 QQ 主窗口控件。已附着时直接用附着的窗口——
+        find_qq_main_window 的「标题=QQ / 宽≥600」过滤在窗口隐藏/最小化时
+        可能空手而归，与 QQWindow.attach 的判据本来就不一致。"""
+        if self._attached:
+            win = self._window()
+            return win.win, win.hwnd
         desc, hwnd = qqid.find_qq_main_window()
         if not hwnd:
             raise ExecutorError("E-QQ-003", "找不到可见的 QQ 主窗口",
                                 {"窗口枚举": desc})
+        return agent.control_from_hwnd(hwnd), hwnd
+
+    def _read_cards(self, win_ctrl) -> tuple:
         try:
-            win = agent.control_from_hwnd(hwnd)
-            cards = qqid.list_sessions(win)
+            return qqid.list_sessions(win_ctrl), None
         except Exception as exc:
-            mapped = EC.wrap(exc, "E-CU-001")
-            raise ExecutorError(mapped.code, mapped.detail_text or "读会话列表失败",
-                                {"异常": f"{type(exc).__name__}: {exc}"})
+            agent.log("INFO", f"读会话列表异常：{type(exc).__name__}: {exc}")
+            return [], exc
+
+    def _cards(self) -> tuple:
+        """会话卡片（qqid.SessionCard），list_sessions / open_chat 共用。
+        窗口不可用时自动救回并重试一次。"""
+        win_ctrl, hwnd = self._locate()
+        self._ensure_qq_visible(hwnd)
+        cards, first_exc = self._read_cards(win_ctrl)
         if not cards:
-            # 最小化是 E-QQ-007 的常见隐形根因：还原后再试一次
             self._ensure_qq_visible(hwnd)
-            try:
-                cards = qqid.list_sessions(win)
-            except Exception as exc:
-                cards = []
-                agent.log("INFO", f"还原后重读会话列表仍失败：{type(exc).__name__}: {exc}")
+            cards, first_exc = self._read_cards(win_ctrl)
         if not cards:
+            if first_exc is not None:
+                mapped = EC.wrap(first_exc, "E-CU-001")
+                raise ExecutorError(mapped.code, mapped.detail_text or "读会话列表失败",
+                                    {"异常": f"{type(first_exc).__name__}: {first_exc}"})
             raise ExecutorError("E-QQ-007", "会话列表为空",
-                                {"建议": "确认 QQ 停在「消息」标签页；若窗口最小化，"
-                                         "程序已自动还原过一次，仍读不出请把 QQ 窗口"
-                                         "还原到桌面上再试"})
-        return win, cards
+                                {"建议": "确认 QQ 停在「消息」标签页；程序已自动尝试"
+                                         "还原/显示窗口，仍读不出请手动把 QQ 窗口还原"
+                                         "到桌面上再试",
+                                 "现场": {"最小化": winmsg.is_iconic(hwnd),
+                                          "可见": winmsg.is_visible(hwnd)}})
+        return win_ctrl, cards
 
     # ---------------------------------------------------- 六原语
     def list_sessions(self) -> list[SessionInfo]:

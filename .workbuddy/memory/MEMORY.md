@@ -57,7 +57,8 @@
   已核实官方文档，verifier 免第二路视觉 Key）。
   分期 F1(基建+基线✅)→F2(Executor双执行面+安全锁✅)→F3(工具化 dispatch✅)
   →F4(Brain tool calling 循环+实测授权：hosted 小号全自主、attach 主号仅「我，我们/苏霖韵」
-  白名单+逐条确认✅)→F5 Verifier→F6 WebUI→F7 exe 验收。详见 2026-09-25 日志。
+  白名单+逐条确认✅)→F5(Verifier 视觉校验：截图+deepseek-flash 图像理解三态结论✅)
+  →F6 WebUI→F7 exe 验收。详见 2026-09-25 日志。
 - V2 已实机验证：独立 profile 启动 → 免扫码登录 → **打开一个会话** →
   常驻宿主 `app/hostd.py` 跑 `agent.run_forever()` → **真的发出回复** → 优雅停止；
   控制台「隐藏桌面」面板（`GET /api/host/status|shot.png`、`POST /api/host/start|stop|grab`）

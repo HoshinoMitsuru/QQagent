@@ -102,6 +102,9 @@ class Verifier:
                 shot_path)
 
         # ---- 调视觉模型（复用 Brain 的 HTTP 通道与错误映射）----
+        # ⚠️ thinking 必须显式关：deepseek-flash 思考模式默认开（effort=high），
+        # 开着时结论可能整个落进 reasoning_content 而 content 为空 —— 2026-09-25
+        # 真机实测 verify 拿到空回复就是这个原因。
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": [
@@ -110,10 +113,16 @@ class Verifier:
             ]}],
             "max_tokens": self.max_tokens,
             "stream": False,
+            "thinking": {"type": "disabled"},
         }
         try:
             data = self.brain.post(payload)   # 走 Brain 的统一通道（可被测试替身注入）
-            content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            message = (data.get("choices") or [{}])[0].get("message") or {}
+            content = message.get("content") or ""
+            if not content.strip():
+                # 兜底：万一思考模式没被关掉（第三方中转可能忽略该参数），
+                # 结论可能落在 reasoning_content 里
+                content = message.get("reasoning_content") or ""
         except EC.AppError as exc:
             return VerifyResult(False, "inconclusive",
                                 f"视觉模型调用失败 {exc.code}：{exc.detail_text}", shot_path)

@@ -61,6 +61,11 @@ CU_DEFAULTS: dict = {
     "timeout_seconds": 120.0,
     "max_steps": 8,
     "max_tokens": 2048,
+    # 思考模式（DeepSeek V4.1 默认开启，effort=high）：默认**关闭**——
+    # 规划层的每一步都要快；开着时带 tools 的请求还必须回传 reasoning_content
+    # （不回传会 400）。true=开启（实现回传）；"auto"=不发送该参数（第三方
+    # 中转不认 thinking 字段时用它避免 400）。
+    "thinking": False,
     "system_prompt": "",            # 追加到内置系统提示之后
     # 发送后视觉校验（F5）：send_text 成功后自动截图 + 视觉模型确认气泡出现。
     # 校验是旁证，不推翻 UIA 读回结论；inconclusive 不算失败。
@@ -166,6 +171,11 @@ class Brain:
                 + "、".join(self.allow) + "。名单之外的会话会被拒绝，不要重试。")
         self._poster = poster or self._post
         self._last_sessions: list[dict] = []   # open_chat index → 名字翻译用
+        # 思考模式参数：False→disabled（默认，快且省）；True→enabled；
+        # "auto"→不带该字段（第三方中转不认 thinking 时用）
+        t = cu_cfg.get("thinking")
+        self._thinking_param = (None if t == "auto"
+                                else {"type": "enabled" if t else "disabled"})
         # F5 视觉校验：send_text 成功后自动截图问模型「气泡真的出现了吗」
         self._verifier = None
         if cu_cfg.get("verify_sends"):
@@ -213,6 +223,8 @@ class Brain:
             "max_tokens": self.max_tokens,
             "stream": False,
         }
+        if self._thinking_param is not None:
+            payload["thinking"] = self._thinking_param
         data = self._poster(payload)
         try:
             return data["choices"][0]["message"]
@@ -282,10 +294,15 @@ class Brain:
                     return {"ok": True, "answer": answer, "steps": steps,
                             "usage_steps": step}
 
-                # assistant 消息原样回存（含 tool_calls），协议要求
-                messages.append({"role": "assistant",
+                # assistant 消息原样回存（含 tool_calls），协议要求；
+                # 思考模式开启时还必须回传 reasoning_content（否则 DeepSeek 400）
+                assistant_msg = {"role": "assistant",
                                  "content": msg.get("content") or "",
-                                 "tool_calls": tool_calls})
+                                 "tool_calls": tool_calls}
+                if self._thinking_param == {"type": "enabled"} \
+                        and msg.get("reasoning_content"):
+                    assistant_msg["reasoning_content"] = msg["reasoning_content"]
+                messages.append(assistant_msg)
                 for tc in tool_calls:
                     fn = tc.get("function") or {}
                     name = fn.get("name") or ""

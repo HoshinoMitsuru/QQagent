@@ -39,6 +39,8 @@ hiddenimports = [
     # ---- UIA/COM 运行时 ----
     "comtypes.stream", "comtypes.client", "comtypes.typeinfo",
     "uiautomation", "pyperclip", "requests", "winreg",
+    # host.own_processes 走 psutil 读 PEB 命令行（认领自己的 QQ 实例）
+    "psutil",
     # ---- verifier 依赖：BMP→PNG 转码（qq-agent.spec 排除它，cu 不能排）----
     "PIL", "PIL.Image",
 ]

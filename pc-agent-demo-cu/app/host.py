@@ -68,6 +68,8 @@ import os
 import sys
 import time
 
+import psutil
+
 from . import desktop, paths, platform_win as pw, qqctl
 from .logbus import BUS
 
@@ -241,25 +243,46 @@ def own_processes(profile: str = "") -> list[dict]:
     ## 为什么这是唯一可行的认领方式
 
     壳在用户桌面上，`EnumWindows` 看不到隐藏桌面的窗口，所以**窗口这条路断了**。
-    但进程枚举（`CreateToolhelp32Snapshot` / CIM）是**整机**的，不受桌面限制 ——
+    但进程枚举是**整机**的，不受桌面限制 ——
     于是「命令行里有没有我们那份 --user-data-dir」成了壳唯一拿得到的身份证据。
 
-    ## 代价
+    ## 读取通道为什么是 psutil（2026-09-26 根治，archive/probe_qqx_claim.py 实测）
 
-    `process_command_lines` 走 PowerShell，约 1 秒。**不要放进状态轮询**，
-    它只该在「启动 / 停止 / 体检」这些低频动作里调。
+    旧实现走 PowerShell CIM（`pw.process_command_lines`），实测对 QQ 的
+    **主进程**返回空 CommandLine —— 主进程由此「失明」，stop 杀不干净、
+    状态面板看不见（2026-09-25 真机踩过）。psutil 走 NtQueryInformationProcess
+    读 PEB，同一批进程**全部读得到**（含隐藏桌面 spawn 的主进程），且
+    毫秒级（CIM 约 1 秒）。探针同时证明：QQ 启动器用 `--relaunch` 重启后
+    的真主进程仍带着原始参数（含 --user-data-dir），认领标记一直都在。
 
-    注意子进程也会带上这个路径（QQ 会给渲染进程显式指定同一份 user-data-dir），
-    所以返回的通常不止一个 pid —— 主进程是其中启动最早的那个，
-    `status()` 里用记录里的 pid 做交叉核对。
+    ## 代价与注意
+
+    - 仍是**低频操作**（启动/停止/体检），不要放进状态轮询。
+    - 必须对命中的进程用 `oneshot()` 逐个精读 cmdline：批量
+      `process_iter([...cmdline...])` 偶发对个别进程读空（2026-09-26 探针
+      实测会静默丢掉主进程），逐个读不丢。
+    - 注意子进程也会带上这个路径（QQ 给渲染进程显式指定同一份 user-data-dir），
+      所以返回的通常不止一个 pid —— 主进程是其中启动最早的那个，
+      `status()` 里用记录里的 pid 做交叉核对。
     """
     prof = profile_dir(profile)
     marker = prof.lower().rstrip("\\/")
+    psl_names = {n.lower() for n in PROCESS_NAMES}
     out: list[dict] = []
-    for row in pw.process_command_lines(PROCESS_NAMES):
-        cmd = (row.get("cmdline") or "").lower().replace('"', "").replace("'", "")
-        if marker and marker in cmd:
-            out.append(row)
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            if (p.info["name"] or "").lower() not in psl_names:
+                continue
+            with p.oneshot():
+                segs = p.cmdline()
+            cmd = " ".join(segs)
+            if marker and marker not in cmd.lower():
+                continue
+            out.append({"pid": p.info["pid"], "name": p.info["name"],
+                        "cmdline": cmd, "ppid": p.ppid(),
+                        "create_time": p.create_time()})
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
     return out
 
 

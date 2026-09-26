@@ -80,6 +80,7 @@ hiddenimports = [
     "agent", "qqid", "reply_queue",
     "comtypes.stream", "comtypes.client", "comtypes.typeinfo",
     "winreg", "pyperclip", "requests", "uiautomation",
+    "psutil",                 # host.own_processes 走 psutil 认领自己的 QQ 实例
 ]
 
 for pkg in ("uiautomation", "comtypes"):

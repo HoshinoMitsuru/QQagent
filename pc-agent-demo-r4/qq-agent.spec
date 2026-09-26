@@ -80,6 +80,9 @@ hiddenimports = [
     "agent", "qqid", "reply_queue",
     "comtypes.stream", "comtypes.client", "comtypes.typeinfo",
     "winreg", "pyperclip", "requests", "uiautomation",
+    # QQX 认领根治（2026-09-26 从 CU 同步）：own_processes 走 psutil 读 PEB，
+    # CIM 通道对 QQ 主进程返回空 CommandLine 导致 stop 杀不干净
+    "psutil",
 ]
 
 for pkg in ("uiautomation", "comtypes"):

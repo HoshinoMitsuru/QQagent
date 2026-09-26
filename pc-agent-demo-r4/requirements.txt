@@ -12,6 +12,7 @@ comtypes>=1.2.0           # uiautomation 的 COM 底层依赖
 pyperclip>=1.8.2          # 剪贴板写入，用于把文本粘贴进 QQ 输入框
 requests>=2.31.0          # 调用 OpenAI 兼容的 /chat/completions
 websockets>=12.0          # cdp_probe.py 用：连 QQ 渲染层的 CDP 调试端口（方案 A）
+psutil>=5.9.0             # own_processes 走 PEB 读 cmdline（CIM 对 QQ 主进程返回空，stop 杀不干净）
 
 # ---- 可选：OCR 兜底（UIA 读到空消息时才需要）----
 # 需要额外安装 tesseract-ocr 本体并勾选 chi_sim 中文语言包

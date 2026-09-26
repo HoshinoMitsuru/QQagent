@@ -68,6 +68,8 @@ import os
 import sys
 import time
 
+import psutil
+
 from . import desktop, paths, platform_win as pw, qqctl
 from .logbus import BUS
 
@@ -241,25 +243,47 @@ def own_processes(profile: str = "") -> list[dict]:
     ## 为什么这是唯一可行的认领方式
 
     壳在用户桌面上，`EnumWindows` 看不到隐藏桌面的窗口，所以**窗口这条路断了**。
-    但进程枚举（`CreateToolhelp32Snapshot` / CIM）是**整机**的，不受桌面限制 ——
+    但进程枚举是**整机**的，不受桌面限制 ——
     于是「命令行里有没有我们那份 --user-data-dir」成了壳唯一拿得到的身份证据。
 
-    ## 代价
+    ## 读取通道为什么是 psutil（2026-09-26 根治，从 CU 树同步；探针见
+    pc-agent-demo-cu/archive/probe_qqx_claim.py）
 
-    `process_command_lines` 走 PowerShell，约 1 秒。**不要放进状态轮询**，
-    它只该在「启动 / 停止 / 体检」这些低频动作里调。
+    旧实现走 PowerShell CIM（`pw.process_command_lines`），实测对 QQ 的
+    **主进程**返回空 CommandLine —— 主进程由此「失明」，stop 杀不干净、
+    状态面板看不见（2026-09-25 真机踩过）。psutil 走 NtQueryInformationProcess
+    读 PEB，同一批进程**全部读得到**（含隐藏桌面 spawn 的主进程），且
+    毫秒级（CIM 约 1 秒）。探针同时证明：QQ 启动器用 `--relaunch` 重启后
+    的真主进程仍带着原始参数（含 --user-data-dir），认领标记一直都在。
 
-    注意子进程也会带上这个路径（QQ 会给渲染进程显式指定同一份 user-data-dir），
-    所以返回的通常不止一个 pid —— 主进程是其中启动最早的那个，
-    `status()` 里用记录里的 pid 做交叉核对。
+    ## 代价与注意
+
+    - 仍是**低频操作**（启动/停止/体检），不要放进状态轮询。
+    - 必须对命中的进程用 `oneshot()` 逐个精读 cmdline：批量
+      `process_iter([...cmdline...])` 偶发对个别进程读空（2026-09-26 探针
+      实测会静默丢掉主进程），逐个读不丢。
+    - 注意子进程也会带上这个路径（QQ 给渲染进程显式指定同一份 user-data-dir），
+      所以返回的通常不止一个 pid —— 主进程是其中启动最早的那个，
+      `status()` 里用记录里的 pid 做交叉核对。
     """
     prof = profile_dir(profile)
     marker = prof.lower().rstrip("\\/")
+    psl_names = {n.lower() for n in PROCESS_NAMES}
     out: list[dict] = []
-    for row in pw.process_command_lines(PROCESS_NAMES):
-        cmd = (row.get("cmdline") or "").lower().replace('"', "").replace("'", "")
-        if marker and marker in cmd:
-            out.append(row)
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            if (p.info["name"] or "").lower() not in psl_names:
+                continue
+            with p.oneshot():
+                segs = p.cmdline()
+            cmd = " ".join(segs)
+            if marker and marker not in cmd.lower():
+                continue
+            out.append({"pid": p.info["pid"], "name": p.info["name"],
+                        "cmdline": cmd, "ppid": p.ppid(),
+                        "create_time": p.create_time()})
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
     return out
 
 
@@ -724,6 +748,66 @@ def clear_stop_sentinels(reason: str = "") -> list[str]:
     return cleared
 
 
+def _cleanup_after_stop(profile: str = "", destroy_wait: float = 5.0) -> dict:
+    """
+    宿主退场后的收尾：杀干净我们起的 QQ → 放掉桌面句柄销毁虚拟桌面。
+
+    ## 为什么在 stop_daemon 里做，而不是宿主自己
+
+    宿主可能被强杀（kill_pid tree）——死了的进程做不了任何清理；
+    收尾必须由**活着的控制方**（壳，跑 stop_daemon 的这个进程）执行。
+
+    ## 语义（2026-09-26 用户拍板）
+
+    「R4 进程关闭 = 同时关闭虚拟桌面上的 QQ 和虚拟桌面」。
+    这反转了 desktop.close 原先「不希望关掉控制台顺手带走 QQ」的刻意设计。
+    收尾**尽力而为**：任何一步失败都记进结果，不阻塞 stop 的主结论。
+
+    ## 销毁原理
+
+    桌面对象的引用持有者 = 桌面上的进程线程 + 各进程 OpenDesktop 的句柄。
+    QQ 死透（host.stop 内置等待）→ 宿主已退出（stop_daemon 的前置条件）
+    → 壳再放掉自己保活表里的句柄 → 引用归零，桌面对象销毁，
+    `desktop.exists()` 探测随之失败。壳的 close 返回 False = 本进程没持有
+    句柄（比如壳重启过），不算错误——桌面照样会因引用归零而销毁。
+
+    `destroy_wait` 是销毁验证的最长等待（进程引用释放是异步的）；
+    测试里调小避免真等。
+    """
+    out: dict = {"qq": None, "desktop": None}
+
+    # ① 杀 QQ（认领判据 = 我们的 profile，主号绝不误伤；认领不到 = 本来没有）
+    try:
+        out["qq"] = stop(profile)
+    except Exception as exc:                       # noqa: BLE001
+        out["qq"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    # ② 放掉本进程保活的桌面句柄
+    name = desktop.DEFAULT_NAME
+    try:
+        name = last_record().get("desktop") or desktop.DEFAULT_NAME
+    except Exception:
+        pass
+    try:
+        out["desktop"] = {"name": name, "closed": desktop.close(name)}
+    except Exception as exc:                       # noqa: BLE001
+        out["desktop"] = {"name": name, "closed": False,
+                          "error": f"{type(exc).__name__}: {exc}"}
+        return out
+
+    # ③ 销毁验证（进程引用的释放是异步的，给一点时间）
+    deadline = time.time() + destroy_wait
+    while time.time() < deadline:
+        if not desktop.exists(name):
+            out["desktop"]["destroyed"] = True
+            return out
+        time.sleep(0.4)
+    out["desktop"]["destroyed"] = False
+    out["desktop"]["error"] = ("桌面句柄已放但仍探测到存在 —— 多半还有进程活着"
+                              "引用它（QQ 没死透，见 qq 字段的残留）")
+    return out
+
+
 def stop_daemon(timeout: float = 20.0) -> dict:
     """
     让常驻宿主优雅退出。
@@ -738,10 +822,16 @@ def stop_daemon(timeout: float = 20.0) -> dict:
     所以停止流程是两段：宿主收到 `HOSTD_STOP` 后**自己去写** `STOP_PATH`，
     给 agent 一个优雅收尾的机会（把队列里已经生成的回复发完），
     等不到才由宿主强退。界面上「停止」按的是后者。
+
+    ## 收尾（2026-09-26 起）
+
+    宿主确认退出后执行 `_cleanup_after_stop()`：杀干净 QQ + 销毁虚拟桌面。
+    「宿主本来就没在跑」的分支**同样收尾**——宿主崩溃/被手动杀掉留下的
+    僵尸 QQ 和桌面，恰恰要靠这条路径收走。
     """
     st = daemon_status()
     out = {"ok": False, "pid": st["pid"], "waited": 0.0, "killed": False,
-           "error": ""}
+           "error": "", "cleanup": None}
     if not st["pid"] or not st["alive"]:
         try:
             if os.path.isfile(HOSTD_STOP):
@@ -750,6 +840,8 @@ def stop_daemon(timeout: float = 20.0) -> dict:
             pass
         out["ok"] = True
         out["error"] = "常驻宿主本来就没在跑"
+        # 宿主崩溃/被手动杀掉留下的僵尸 QQ 与桌面：照样收
+        out["cleanup"] = _cleanup_after_stop()
         return out
 
     try:
@@ -782,7 +874,9 @@ def stop_daemon(timeout: float = 20.0) -> dict:
     except Exception:
         pass
     out["final"] = daemon_status()
-    # 收尾时把 agent 的停止哨兵也清掉：下一次启动不该继承这一次的「停止意图」。
+    # 收尾：宿主已确认退场 → 杀干净 QQ + 销毁虚拟桌面（2026-09-26 拍板）
+    out["cleanup"] = _cleanup_after_stop()
+    # 把 agent 的停止哨兵也清掉：下一次启动不该继承这一次的「停止意图」。
     clear_stop_sentinels("上次停止的收尾")
     return out
 

@@ -65,13 +65,19 @@ def _emit(envelope: dict, human: list[str] | None, as_json: bool) -> int:
     return EXIT_OK if envelope.get("ok") else EXIT_ACTION_FAIL
 
 
-def make_executor(mode: str):
-    cfg = __import__("agent").load_config()
-    if mode == "hosted":
-        from cu.hosted import HostedExecutor
-        return HostedExecutor(cfg)
-    from cu.attach import AttachExecutor
-    return AttachExecutor(cfg)
+def make_executor(mode: str, gates: dict | None = None):
+    """构造执行面（统一走 cu.base.create_executor —— A1 拍板：安全闸
+    收在执行面，CLI/MCP/Brain 三条路同一收口）。gates 可覆盖闸名单
+    （run 按模式挑选 open_chat_allow / attach_allow 时用）。"""
+    import agent
+    cfg = agent.load_config()
+    if gates:
+        cfg = dict(cfg)
+        cu = dict(cfg.get("cu") or {})
+        cu.update(gates)
+        cfg["cu"] = cu
+    from cu.base import create_executor
+    return create_executor(mode, cfg)
 
 
 def _dispatch(mode: str, tool: str, args: dict, as_json: bool) -> int:
@@ -105,19 +111,32 @@ def _dispatch(mode: str, tool: str, args: dict, as_json: bool) -> int:
 
 
 def cmd_run(a) -> int:
-    """委托式：Brain 循环。授权表与白名单承自实测拍板（test_live_brain）。"""
-    from test_live_brain import ATTACH_ALLOW, HOSTED_ALLOW
-    from cu.brain import Brain, load_cu_config
-    from cu.tools import dispatch
+    """委托式：Brain 循环。名单唯一来源 = 本地 config.json（C1 拍板：
+    不再从 test_live_brain 导入覆盖——那个 import 在 deb6d0b 之后本来就是
+    坏的，一跑就 ImportError）。名单为空 = fail-closed 拒绝执行。"""
     import agent
+    from cu.brain import Brain, load_cu_config
 
     cfg = agent.load_config()
     cu = load_cu_config(cfg)
     cu["max_steps"] = a.max_steps or int(cu.get("max_steps", 8))
-    if a.mode == "hosted":
-        cu["open_chat_allow"] = HOSTED_ALLOW
-    else:
-        cu["open_chat_allow"] = ATTACH_ALLOW
+
+    # run 按模式挑选名单：hosted 用目标闸 open_chat_allow，attach 用
+    # attach_allow（历史语义），统一映射到 Brain 与执行面闸的同一个键
+    key = "open_chat_allow" if a.mode == "hosted" else "attach_allow"
+    allow = [s for s in (cu.get(key) or []) if isinstance(s, str) and s.strip()]
+    if not allow:
+        return _emit({"ok": False, "tool": "run",
+                      "error": {"code": "E-CU-004",
+                                "detail": f"{a.mode} 面名单为空，拒绝执行"
+                                          "（名单就是授权书，留空 = fail-closed）",
+                                "ctx": {"名单键": f"cu.{key}",
+                                        "修复": f"编辑 config.json 填 cu.{key}，"
+                                                f"或 qq-cu allow add --name 目标名 "
+                                                f"--list "
+                                                f"{'open' if a.mode == 'hosted' else 'attach'}"}}},
+                     None, a.as_json)
+    cu["open_chat_allow"] = allow
 
     brain = Brain(cu, cfg)
     if not brain.api_key:
@@ -126,7 +145,8 @@ def cmd_run(a) -> int:
                                 "ctx": {"cu.api_key": bool(cu.get("api_key"))}}},
                      None, a.as_json)
 
-    ex = make_executor(a.mode)
+    ex = make_executor(a.mode, gates={"open_chat_allow": allow,
+                                      "read_allow": cu.get("read_allow")})
 
     interactive = sys.stdin.isatty()
 
@@ -182,6 +202,78 @@ def cmd_tool(a) -> int:
         if a.path:
             args["path"] = a.path
     return _dispatch(a.mode, tool, args, a.as_json)
+
+
+def cmd_allow(a) -> int:
+    """安全闸白名单管理（C1 拍板：config.json 是唯一事实来源，这里是清晰入口）。
+
+    直接对 agent.CONFIG_PATH 做 JSON 读改写（保留其余键不动）；
+    真名只落本机，该文件不入库（gitignore）。
+    """
+    import agent
+    path = agent.CONFIG_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        cfg = {}
+    except Exception as exc:                       # noqa: BLE001
+        return _emit({"ok": False, "tool": "allow",
+                      "error": {"code": "E-CFG-001",
+                                "detail": f"config.json 解析失败：{exc}",
+                                "ctx": {"文件": path}}}, None, a.as_json)
+
+    key = {"open": "open_chat_allow", "read": "read_allow",
+           "attach": "attach_allow"}[a.which]
+    cu = dict(cfg.get("cu") or {})
+    items = [s for s in (cu.get(key) or []) if isinstance(s, str) and s.strip()]
+
+    if a.action == "list":
+        envelope = {"ok": True, "tool": "allow",
+                    "result": {"list": a.which, "key": f"cu.{key}",
+                               "items": items,
+                               "语义": _ALLOW_SEMANTICS[a.which],
+                               "文件": path}}
+        human = [f"[cu.{key}] {'、'.join(items) if items else '（空）'}",
+                 f"    语义：{_ALLOW_SEMANTICS[a.which]}"]
+        return _emit(envelope, human, a.as_json)
+
+    if not a.name.strip():
+        print(f"add/remove 需要 --name（当前 cu.{key} = {items}）", file=sys.stderr)
+        return EXIT_CONFIG
+    name = a.name.strip()
+    if a.action == "add":
+        if not any(s == name for s in items):
+            items.append(name)
+    else:                                          # remove
+        if name not in items:
+            return _emit({"ok": False, "tool": "allow",
+                          "error": {"code": "E-CU-002",
+                                    "detail": f"「{name}」不在 cu.{key} 里",
+                                    "ctx": {"现有": items}}}, None, a.as_json)
+        items = [s for s in items if s != name]
+
+    cu[key] = items
+    cfg["cu"] = cu
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    envelope = {"ok": True, "tool": "allow",
+                "result": {"action": a.action, "list": a.which,
+                           "key": f"cu.{key}", "items": items,
+                           "语义": _ALLOW_SEMANTICS[a.which], "文件": path}}
+    human = [f"[{a.action}] cu.{key} ← {name}",
+             f"    现为：{'、'.join(items) if items else '（空）'}"]
+    return _emit(envelope, human, a.as_json)
+
+
+#: 各名单的语义速查（list/add 的回显都带上，修改入口要能自解释）
+_ALLOW_SEMANTICS = {
+    "open": "目标闸：两面 open_chat/send_text 仅名单内可做；"
+            "hosted 面留空 = fail-closed（不发不开），attach 面留空 = 放行（确认锁兜底）",
+    "read": "读取闸：read/shot 仅名单内会话可读；留空 = 方便优先（B1，全可读），"
+            "非空 = 安全优先（B2，读不到标题也拒）。list_sessions 永不拦",
+    "attach": "run --mode attach 的 Brain 名单（历史键）：留空 = run attach 拒绝执行",
+}
 
 
 def cmd_ask(a) -> int:
@@ -272,6 +364,16 @@ def main() -> int:
     p.add_argument("--group-id", default="")
     p.add_argument("--channel", choices=("r4", "sealdice"), default="r4")
 
+    p = sub.add_parser("allow", parents=[common],
+                       help="管理安全闸白名单（读改写本地 config.json 的 cu 节）")
+    p.add_argument("action", choices=("list", "add", "remove"))
+    p.add_argument("--list", dest="which", choices=("open", "read", "attach"),
+                   default="open",
+                   help="open=cu.open_chat_allow（目标闸：hosted open/send 必需）"
+                        "；read=cu.read_allow（读取闸：留空=方便优先，非空=安全优先）；"
+                        "attach=cu.attach_allow（run --mode attach 的名单）")
+    p.add_argument("--name", default="", help="要加/删的会话名（list 时忽略）")
+
     a = ap.parse_args()
     a.as_json = (not a.human) or a.json   # JSON 是缺省；--json 显式自文档
     try:
@@ -279,6 +381,8 @@ def main() -> int:
             return cmd_run(a)
         if a.cmd == "ask":
             return cmd_ask(a)
+        if a.cmd == "allow":
+            return cmd_allow(a)
         return cmd_tool(a)
     except SystemExit:
         raise

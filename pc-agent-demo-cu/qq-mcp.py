@@ -88,7 +88,8 @@ def _tooldefs() -> list[dict]:
         },
         {
             "name": "qq_open_chat",
-            "description": "打开指定会话（按名称或列表序号）。发送前必须先 open",
+            "description": "打开指定会话（按名称或列表序号）。发送前必须先 open。"
+                           "受目标闸 cu.open_chat_allow 约束：名单外/无授权书时拒绝（E-CU-004）",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -100,7 +101,9 @@ def _tooldefs() -> list[dict]:
         },
         {
             "name": "qq_read_recent",
-            "description": "读当前会话最近 N 条消息（只读；先 open 再 read）",
+            "description": "读当前会话最近 N 条消息（先 open 再 read）。"
+                           "受读取闸 cu.read_allow 约束：非空=仅名单内会话可读（安全优先）；"
+                           "留空=全可读（方便优先）",
             "inputSchema": {
                 "type": "object",
                 "properties": {"limit": {"type": "integer", "default": 12}, **_MODE_PROP},
@@ -108,7 +111,8 @@ def _tooldefs() -> list[dict]:
         },
         {
             "name": "qq_screenshot",
-            "description": "抓当前 QQ 窗口截图，返回落盘路径",
+            "description": "抓当前 QQ 窗口截图，返回落盘路径。"
+                           "受读取闸 cu.read_allow 约束（同 qq_read_recent）",
             "inputSchema": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "截图落盘路径（缺省进 state/）"},
@@ -118,7 +122,8 @@ def _tooldefs() -> list[dict]:
         {
             "name": "qq_send_text",
             "description": "向当前会话发送文本（先 open）。attach 面 fail-closed："
-                           "非交互终端直接拒绝；hosted 面受目标闸 open_chat_allow 约束",
+                           "非交互终端直接拒绝；hosted 面受目标闸 open_chat_allow 约束"
+                           "（名单外拒绝，名单为空=fail-closed）。名单管理：qq-cu allow",
             "inputSchema": {
                 "type": "object",
                 "properties": {"text": {"type": "string"}, **_MODE_PROP},
@@ -229,19 +234,17 @@ def _build_args(tool: str, a: dict) -> list[str]:
 
 
 def _extract_envelope(stdout: str) -> dict | None:
-    """从子进程 stdout 里找 JSON 信封（取最后一条含 ok 键的完整 JSON 行/块）。"""
-    try:
-        obj = json.loads(stdout)
-        if isinstance(obj, dict) and "ok" in obj:
-            return obj
-    except Exception:
-        pass
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
-        if not line:
-            continue
+    """从子进程 stdout 里找 JSON 信封。
+
+    真实 stdout 可能是「agent 日志行 + 多行缩进 JSON 信封」混合
+    （2026-09-26 实测：E-CFG-005 日志块在信封前面）。所以不能只试
+    整块或单行——从每个 '{' 起点（从后往前）尝试解析到串尾，
+    第一個能解析且含 ok 键的 dict 即信封。"""
+    s = stdout or ""
+    starts = [i for i, ch in enumerate(s) if ch == "{"]
+    for i in reversed(starts):
         try:
-            obj = json.loads(line)
+            obj = json.loads(s[i:])
         except Exception:
             continue
         if isinstance(obj, dict) and "ok" in obj:

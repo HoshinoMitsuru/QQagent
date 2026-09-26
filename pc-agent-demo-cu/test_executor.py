@@ -71,11 +71,15 @@ case("目录自检无问题", EC.audit() == [], str(EC.audit()[:3]))
 # ============================================================ 工厂与契约
 print("§2 工厂：模式分发与非法值拒绝")
 ex_attach = create_executor("attach", {})
-case("attach 模式返回 AttachExecutor", type(ex_attach).__name__ == "AttachExecutor", "")
+case("attach 模式返回 AttachExecutor（闸包装器之内）",
+     type(ex_attach._inner).__name__ == "AttachExecutor", "")
+case("工厂自动包安全闸（A1：执行面硬闸）",
+     type(ex_attach).__name__ == "GatedExecutor", "")
 case("AttachExecutor 是 Executor 子类", isinstance(ex_attach, Executor), "")
 case("attach 面要求人工确认", ex_attach.require_confirmation is True, "")
 ex_hosted = create_executor("hosted", {})
-case("hosted 模式返回 HostedExecutor", type(ex_hosted).__name__ == "HostedExecutor", "")
+case("hosted 模式返回 HostedExecutor（闸包装器之内）",
+     type(ex_hosted._inner).__name__ == "HostedExecutor", "")
 case("hosted 面全自主", ex_hosted.require_confirmation is False, "")
 case("非法模式抛 E-CU-002",
      expect_code(lambda: create_executor("nonsense", {}), "E-CU-002"), "")
@@ -162,17 +166,18 @@ case("切换失败（标题没变）抛 E-FG-004",
      expect_code(lambda: ex_attach.open_chat("本"), "E-FG-004"), "")
 ca.qqid = _stub_qqid
 # 附着失败 → diagnose_attach 的精确码上抛（定位已统一走 QQWindow.attach）
-ex_attach._attached = False
-ex_attach._win.fail_attach = True
+# 注意：_attached/_win 必须穿透到 _inner 上改 —— wrapper 实例属性会遮蔽内层
+ex_attach._inner._attached = False
+ex_attach._inner._win.fail_attach = True
 case("主窗口附着失败抛 E-QQ-003",
      expect_code(lambda: ex_attach.list_sessions(), "E-QQ-003"), "")
-ex_attach._win.fail_attach = False
+ex_attach._inner._win.fail_attach = False
 ca.qqid = override_ns(_stub_qqid, list_sessions=lambda win: [])
 case("会话列表为空抛 E-QQ-007",
      expect_code(lambda: ex_attach.list_sessions(), "E-QQ-007"), "")
 ca.qqid = _stub_qqid
 case("health 附着后置 _attached（预检与后续原语共享同一窗口）",
-     (ex_attach.health().chat_open is True) and ex_attach._attached is True, "")
+     (ex_attach.health().chat_open is True) and ex_attach._inner._attached is True, "")
 ca.qqid, ca.agent, ca.winmsg = _saved_qqid, _saved_agent, _saved_winmsg
 
 # ============================================================ hosted 面
@@ -185,6 +190,8 @@ _saved_grab = host_mod.grab
 
 def grab_ok(**kw) -> dict:
     return {"ok": True, "desktop": "QQAgentHidden", "png": "state/shot.png",
+            # 顶层 title = qw.title_now()（hostagent.py:565，安全闸探测的锚点）
+            "title": "本人",
             "cu": {"attached": True, "title": "本人",
                    "sessions": [{"index": 0, "name": "本人",
                                  "unread": 3, "is_group": False}],
@@ -204,7 +211,9 @@ def grab_ok(**kw) -> dict:
 
 
 host_mod.grab = grab_ok
-hx = create_executor("hosted", {})
+# hosted 面空名单 = fail-closed（A1 闸语义）；本节测的是原语映射，配名单放行
+hx = create_executor("hosted", {"cu": {"open_chat_allow": ["本人"],
+                                       "read_allow": ["本人"]}})
 case("hosted list_sessions 映射",
      hx.list_sessions() == [SessionInfo(0, "本人", 3, False)], "")
 case("hosted open_chat 回传目标",

@@ -257,3 +257,8 @@ class AttachExecutor(Executor):
         return Health(ok=ok, mode=self.name, chat_open=chat_open,
                       code=("" if ok else code), detail=("" if ok else "DOM 未暴露"),
                       extra=ctx)
+
+    def current_chat_title(self) -> str:
+        """当前会话标题：扫聊天页标题控件（与发送读回验证同一锚点）。
+        必须在 UIA 线程上调用（与其它原语同约束）。"""
+        return self._ensure_attached().title_now()

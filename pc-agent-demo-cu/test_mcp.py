@@ -164,6 +164,17 @@ case("多行输出取最后一行信封",
      mcp._extract_envelope('日志行\n{"ok": false, "error": {}}') == {"ok": False, "error": {}}, "")
 case("无信封返回 None",
      mcp._extract_envelope("完全不是 JSON\nTraceback ...") is None, "")
+_multi = '''[13:10:20] INFO  E-CFG-005 配置缺少某些段，已用默认值补齐
+[13:10:20] INFO    详情：没有找到 config.json
+{
+  "ok": false,
+  "tool": "open_chat",
+  "error": {"code": "E-CU-004", "detail": "名单外", "ctx": {"闸": "open_chat"}}
+}'''
+case("日志行 + 多行缩进信封混合（真机形态）",
+     (mcp._extract_envelope(_multi) or {}).get("tool") == "open_chat", "")
+case("信封后有尾随空白",
+     mcp._extract_envelope('{"ok": true}  \n') == {"ok": True}, "")
 
 # ---------------------------------------------------------------------------
 # 4. 真子进程冒烟（协议回路，不碰 QQ）

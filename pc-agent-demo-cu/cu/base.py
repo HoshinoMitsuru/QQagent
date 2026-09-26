@@ -179,10 +179,24 @@ class Executor(ABC):
     def health(self) -> Health:
         """体检：QQ 在不在、树通不通、是否停在可用的聊天页。只读。"""
 
+    def current_chat_title(self) -> str:
+        """当前会话标题（安全闸 send/read 校验用）。
+
+        缺省返回空串（= 闸侧 fail-closed）；两面各自给出真实现：
+        hosted 走宿主回执的顶层 title，attach 扫聊天页标题控件。
+        探测动作失败应上抛 ExecutorError（真根因优先于闸拦截）。"""
+        return ""
+
 
 def create_executor(mode: str, cfg: dict) -> Executor:
-    """按模式构造执行面。**延迟导入**：tests / 只用某一面的调用方
+    """按模式构造执行面并**包上安全闸**（cu/gate.py，A1 拍板：闸收在
+    所有调用路径的必经之地）。闸的名单来自 cfg 的 cu 节（唯一来源 =
+    本地 config.json）。**延迟导入**：tests / 只用某一面的调用方
     不应为另一面付出 agent / uiautomation 的导入开销。
+
+    要绕过闸的受信本地工具（host_setup 等）直接构造具体执行面类，
+    不走本工厂——这是有意的：闸管「agent 可达的路径」，不管人手敲的
+    本地体检工具。
 
     Raises:
         ExecutorError: mode 不合法（E-CU-002）。
@@ -192,6 +206,10 @@ def create_executor(mode: str, cfg: dict) -> Executor:
                             {"合法值": list(MODES)})
     if mode == "attach":
         from cu.attach import AttachExecutor
-        return AttachExecutor(cfg)
-    from cu.hosted import HostedExecutor
-    return HostedExecutor(cfg)
+        inner: Executor = AttachExecutor(cfg)
+    else:
+        from cu.hosted import HostedExecutor
+        inner = HostedExecutor(cfg)
+    from cu.gate import GatedExecutor, gates_from_cfg
+    open_allow, read_allow = gates_from_cfg(cfg)
+    return GatedExecutor(inner, open_allow=open_allow, read_allow=read_allow)

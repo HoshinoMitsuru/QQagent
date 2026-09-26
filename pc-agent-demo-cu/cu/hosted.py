@@ -171,3 +171,10 @@ class HostedExecutor(Executor):
                                               "nickname")},
                              "desktop": out.get("desktop", ""),
                              "window": out.get("window", {})})
+
+    def current_chat_title(self) -> str:
+        """当前会话标题。宿主回执的顶层 title 是 qw.title_now() 扫聊天页
+        标题控件得到的（不是窗口标题）——每次 _run 都会带回，这里派一次
+        仅附着的轻探针（不开会话不发消息）取它。"""
+        out = self._run(uia=False)
+        return (out.get("title") or "").strip()

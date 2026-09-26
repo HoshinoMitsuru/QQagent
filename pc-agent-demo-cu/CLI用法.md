@@ -77,12 +77,28 @@ qq-cu.exe send --text "你好" --json
 
 ## 安全模型（不随调用方变化）
 
+安全闸收在**执行面**（cu/gate.py，A1 拍板）：CLI / MCP / Brain 三条路径同一收口，名单唯一来源 = 本地 config.json（可用 `qq-cu allow` 管理）。
+
+| 闸 | 键 | 留空（默认） | 非空 |
+| --- | --- | --- | --- |
+| 目标闸（open/send） | `cu.open_chat_allow` | hosted：**fail-closed**（不发不开）；attach：放行（确认锁兜底） | 两面 open_chat / send_text 仅名单内（发送前探当前会话标题，探不到也拒） |
+| 读取闸（read/shot） | `cu.read_allow` | **B1 方便优先**：全可读 | **B2 安全优先**：仅名单内会话可读/可截屏；list_sessions 永不拦（只暴露会话名） |
+| 确认锁（发送） | 执行面内建 | attach 面：非交互终端一律拒绝，交互终端逐条 y/n；**无预授权通道** | — |
+| run 入口闸 | 同上名单 | 名单为空 = run 直接拒绝执行（fail-closed） | Brain 预检 + 执行面硬闸双层 |
+
+名单管理（真名只落本机 config.json，不入库）：
+
+```powershell
+qq-cu allow list  --list open          # 看目标闸名单（open/read/attach 三份）
+qq-cu allow add   --name "测试目标A" --list open
+qq-cu allow remove --name "测试群B" --list open
+```
+
 | 执行面 | 发送策略 |
 | --- | --- |
-| `--mode hosted`（默认） | 独立桌面小号，**全自主发送**（用户已授权） |
+| `--mode hosted`（默认） | 独立桌面小号，**全自主发送**（用户已授权），但目标必须在 `open_chat_allow` 名单内 |
 | `--mode attach` | 附着主号，**永远 fail-closed**：非交互终端直接拒绝（E-CU-004 信封），交互终端逐条 y/n。**不提供预授权通道** |
 
-- hosted 面有目标闸（`open_chat_allow`，测试期仅「测试目标A」「测试群B」）
 - `run --mode attach` 在 agent shell（非交互 stdin）里被确认回调拒绝 → 任务失败而不是误发
 
 ## 前置条件

@@ -19,6 +19,35 @@ exe 的**数据目录**按 `QQ_AGENT_HOME` 环境变量 → exe 所在目录 逐
 | 委托式（内置 Brain） | `qq-cu run --task "..."` | 一步下发整个任务，CU 自己走工具循环 |
 | 工具式（调用方编排） | `qq-cu health / sessions / open / read / shot / send` | 调用方 agent 自己决定每一步 |
 | 服务端大脑（P1） | `qq-cu ask --text "..."` | 生成回复交给 ai-web-page 服务端（ECS）；纯 HTTP，不碰 QQ 执行面 |
+| MCP server（P2 薄壳） | `qq-mcp.py`（stdio） | WorkBuddy / Claude Code 等宿主**原生**调用，不用手写命令行 |
+
+## MCP 薄壳（qq-mcp.py）
+
+手写 stdio JSON-RPC 子集（initialize / ping / tools/list / tools/call），
+**零新依赖**。壳只做协议翻译，**绝不碰 UIA**——每次工具调用派一次性
+`<python> qq-cu.py <子命令>` 子进程，UIA 坏状态随子进程退出消失。
+
+宿主 mcp.json 配置示例（command 必须指向**装了本项目依赖**的 python）：
+
+```json
+{
+  "mcpServers": {
+    "qq-cu": {
+      "command": "C:\\...\\python.exe",
+      "args": ["D:\\Psyche\\Sealdice-AIChat\\pc-agent-demo-cu\\qq-mcp.py"],
+      "env": { "QQ_AGENT_HOME": "D:\\Psyche\\Sealdice-AIChat\\pc-agent-demo-cu" }
+    }
+  }
+}
+```
+
+- 8 个工具：`qq_health / qq_list_sessions / qq_open_chat / qq_read_recent /
+  qq_screenshot / qq_send_text / qq_run_task / qq_ask_server`
+- qq-cu 的 JSON 信封**原样透传**（含错误码 E-QQ-*/E-CU-*），失败映射 MCP `isError`
+- 壳自身错误码：E-MCP-001 子进程超时（`QQ_MCP_TIMEOUT_<工具大写名>` 可调）/
+  E-MCP-002 拉起失败 / E-MCP-003 stdout 无信封
+- 想让壳转调 exe：设环境变量 `QQ_CU_EXE` 指向 qq-cu.exe
+- 自检：`python test_mcp.py`（34 项，不碰 QQ）
 
 ## 输出契约
 

@@ -127,14 +127,21 @@ def _resolve_key(cu: dict, cfg: dict) -> tuple[str, str]:
     return agent.resolve_api_key(cfg), "主 llm 密钥（agent.resolve_api_key）"
 
 
-def _raise_for_status(resp) -> None:
-    """按状态码分类抛 AppError —— 与 agent.LLMClient 同一口径。"""
+def _raise_for_status(resp, api_key: str = "") -> None:
+    """按状态码分类抛 AppError —— 与 agent.LLMClient 同一口径。
+
+    api_key 可选：401/403 时现场带上「本次所用密钥的掩码」，让用户能把
+    服务端回显（****xxxx）与实际用的 key 对上号（2026-09-28 与 R4 统一；
+    历史误判：掩码显示与回显尾部对不上，被当成「掩码被用于请求」）。"""
     code = resp.status_code
     if code == 200:
         return
     text = (resp.text or "")[:400]
     if code in (401, 403):
-        raise EC.AppError("E-LLM-004", f"HTTP {code}：密钥无效或无权", {"响应": text})
+        from app.settings import _mask as mask_key
+        raise EC.AppError("E-LLM-004", f"HTTP {code}：密钥无效或无权",
+                          {"响应": text,
+                           "本次所用密钥(掩码)": mask_key(api_key) if api_key else "(空)"})
     if code == 404:
         raise EC.AppError("E-LLM-005", f"HTTP 404：接口地址或模型名不对",
                           {"响应": text})
@@ -202,7 +209,7 @@ class Brain:
         except requests.exceptions.RequestException as exc:
             # 能确定是连接问题的才给 E-LLM-002；其余按未分类兜底
             raise EC.wrap(exc, "E-LLM-012") from exc
-        _raise_for_status(resp)
+        _raise_for_status(resp, self.api_key)
         try:
             return resp.json()
         except ValueError as exc:

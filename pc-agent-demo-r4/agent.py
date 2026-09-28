@@ -1444,6 +1444,13 @@ class LLMClient:
             snippet = resp.text[:300]
             ctx = {"HTTP": resp.status_code, "url": self.url, "model": self.model}
             if resp.status_code in (401, 403):
+                # 2026-09-28：现场带上「本次所用密钥的掩码」——服务端 401 回显
+                # 的是它收到的 key 的尾部（如 ****19d6），用户要能对上「拒的是哪把」。
+                # 历史误判：界面掩码（sk-e••••••••da1b）与回显（****19d6）对不上号，
+                # 被当成「掩码被用于请求」。实际请求链路永远用真 key——掩码里的
+                # • 过不了 latin-1 编码，请求根本发不出去（见 settings._is_mask）。
+                from app.settings import _mask as mask_key
+                ctx["本次所用密钥(掩码)"] = mask_key(self.api_key) if self.api_key else "(空)"
                 raise EC.AppError("E-LLM-004",
                                   f"服务端拒绝了这次鉴权：{snippet}", ctx)
             if resp.status_code == 404:

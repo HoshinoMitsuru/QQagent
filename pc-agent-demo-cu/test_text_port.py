@@ -169,9 +169,15 @@ def test_teach_reorder(cfg: dict) -> None:
 
 # ------------------------------------------------------------------ 3. 持久化
 def test_persist(cfg: dict) -> None:
-    print("\n[3] 上下文持久化（按会话隔离）")
+    print("\n[3] 上下文持久化（目录化：每会话一个档案）")
+    # 2026-09-28 目录化：persist.file 若是 .json 单文件，派生同名目录；
+    # 档案文件名 = scope 里的 Windows 非法字符替换成下划线
+    conv_dir = cfg["persist"]["file"][:-len(".json")]
+    fp_a = os.path.join(conv_dir, "private_小明.json")     # ":" 非法 → "_"
+    fp_b = os.path.join(conv_dir, "group_桌游群.json")
     s1 = A.ConversationStore(cfg)
-    check("文件还不存在时不报错", not os.path.isfile(cfg["persist"]["file"]))
+    check("首次构造即建档目录（且为空）",
+          os.path.isdir(conv_dir) and not os.listdir(conv_dir))
 
     ha = s1.history("private:小明")
     ha.push("user", "你好", source="incoming")
@@ -180,9 +186,12 @@ def test_persist(cfg: dict) -> None:
     s1.activate_continuous("private:小明", time.time())
     s1.save(force=True)
 
-    check("文件已落盘", os.path.isfile(cfg["persist"]["file"]))
-    raw = json.load(open(cfg["persist"]["file"], encoding="utf-8"))
-    check("两个会话各自独立", set(raw["scopes"]) == {"private:小明", "group:桌游群"})
+    check("档案已落盘（每会话一个文件）",
+          os.path.isfile(fp_a) and os.path.isfile(fp_b))
+    raw = json.load(open(fp_a, encoding="utf-8"))
+    check("档案带 _scope 键", raw.get("_scope") == "private:小明")
+    check("两个会话各自独立",
+          json.load(open(fp_b, encoding="utf-8")).get("_scope") == "group:桌游群")
 
     s2 = A.ConversationStore(cfg)
     check("重载后消息条数一致", len(s2.history("private:小明")) == 2)
@@ -196,13 +205,14 @@ def test_persist(cfg: dict) -> None:
     check("forget 能删掉一个会话", s2.forget("group:桌游群"))
     s3 = A.ConversationStore(cfg)
     check("forget 的结果已落盘", "group:桌游群" not in s3._book)
+    check("forget 连档案文件一起删了", not os.path.isfile(fp_b))
 
-    # 损坏文件：不崩、自动备份
-    with open(cfg["persist"]["file"], "w", encoding="utf-8") as f:
+    # 损坏档案：不崩、自动备份
+    with open(fp_a, "w", encoding="utf-8") as f:
         f.write("{ 这不是合法 JSON")
     s4 = A.ConversationStore(cfg)
-    check("损坏文件不致命（从空开始）", len(s4._book) == 0)
-    check("损坏文件已备份", os.path.isfile(cfg["persist"]["file"] + ".bad"))
+    check("损坏档案不致命（从空开始）", len(s4._book) == 0)
+    check("损坏档案已备份", os.path.isfile(fp_a + ".bad"))
 
 
 # ------------------------------------------------------------------ 4. 连续对话

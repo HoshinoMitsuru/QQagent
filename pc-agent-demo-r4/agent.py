@@ -922,99 +922,251 @@ class ConversationStore:
         self.enabled = bool(p.get("enabled", True))
         self.interval = float(p.get("save_interval_seconds") or 3.0)
         self.max_scopes = max(1, int(p.get("max_scopes") or 50))
-        self.path = abs_here(p.get("file") or "state/conversations.json")
+        # 2026-09-28 目录化：每个会话一个 json，统一收在 conversations/ 文件夹
+        # （UI 的「会话记录」列表/删除都以这个文件夹为准；一个文件 = 一个会话档案）。
+        # persist.file 兼容旧配置：值若是 .json 单文件，派生同名目录。
+        legacy = abs_here(p.get("file") or "state/conversations.json")
+        self.dir = legacy[:-len(".json")] if legacy.endswith(".json") else legacy
+        self.legacy_path = legacy if os.path.isfile(legacy) else ""
         self.system_prompt = cfg["llm"].get("system_prompt") or ""
         self.max_entries = int(cfg["chat"].get("max_history_entries") or 40)
         self._book: dict[str, dict] = {}
         self._dirty = False
+        self._dirty_scopes: set[str] = set()
+        # 已经在盘上落过至少一次的 scope。用途见 _reconcile_external_deletes()：
+        # UI 删档案是直接删文件，agent 这边要能区分「从没存过」和「被外部删了」。
+        self._saved_ever: set[str] = set()
+        self._last_reconcile = 0.0
         self._last_save = 0.0
         self.load()
 
     # ---------------------------------------------------- 载入 / 落盘
-    def load(self) -> None:
-        if not self.enabled or not self.path or not os.path.isfile(self.path):
+    @staticmethod
+    def _scope_file(scope: str) -> str:
+        """scope → 会话档案文件名。Windows 非法字符替换成下划线。"""
+        name = scope
+        for ch in '\\/:*?"<>|':
+            name = name.replace(ch, "_")
+        return name + ".json"
+
+    def _migrate_legacy(self) -> None:
+        """旧单文件（state/conversations.json）一次性拆分进目录。
+
+        目录里已有内容时不迁移（防覆盖）；旧文件解析失败就改名 .bad 保留现场。
+        迁移完成后旧文件改名 .migrated-<时间戳>，不再被读。"""
+        if not self.legacy_path or not os.path.isfile(self.legacy_path):
+            return
+        # 防覆盖守卫：目录里已有会话档案时不迁移。
+        # 否则目录化后的新档案会被旧单文件里的陈旧数据覆盖。
+        try:
+            existing = [n for n in os.listdir(self.dir) if n.endswith(".json")]
+        except OSError:
+            existing = []
+        if existing:
+            log("INFO", f"会话目录已有 {len(existing)} 个档案，跳过旧单文件迁移"
+                        f"（旧文件保留在原处：{self.legacy_path}）")
             return
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.legacy_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as exc:
-            bad = self.path + ".bad"
+            bad = self.legacy_path + ".bad"
             try:
-                os.replace(self.path, bad)
-                report("E-PATH-003", "上下文文件损坏，已备份后重建（历史会丢）",
-                       ctx={"损坏文件": self.path,
-                            "备份为": os.path.basename(bad),
-                            "原因": f"{type(exc).__name__}: {exc}"})
-            except Exception as exc2:
-                report("E-PATH-003", "上下文文件损坏且备份失败（历史会丢，且坏文件还在）",
-                       ctx={"文件": self.path,
-                            "损坏原因": f"{type(exc).__name__}: {exc}",
-                            "备份失败": f"{type(exc2).__name__}: {exc2}"})
+                os.replace(self.legacy_path, bad)
+            except Exception:
+                bad = "(改名失败)"
+            report("E-PATH-003", "旧上下文单文件损坏，无法迁移（已改名保留现场）",
+                   ctx={"文件": self.legacy_path, "备份为": bad,
+                        "原因": f"{type(exc).__name__}: {exc}"})
             return
-
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003", ctx={"阶段": "上下文迁移", "目录": self.dir})
+            return
+        moved = 0
         for scope, row in (data.get("scopes") or {}).items():
             if not isinstance(row, dict):
                 continue
+            row = dict(row)
+            row["_scope"] = scope
+            fp = os.path.join(self.dir, self._scope_file(scope))
+            tmp = fp + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(row, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, fp)
+                moved += 1
+            except Exception as exc:
+                report_exc(exc, "E-PATH-003",
+                           ctx={"阶段": "上下文迁移", "文件": fp})
+        try:
+            os.replace(self.legacy_path,
+                       self.legacy_path + f".migrated-{time.strftime('%Y%m%d-%H%M%S')}")
+        except Exception:
+            pass
+        log("INFO", f"旧上下文单文件已迁移为目录：{moved} 个会话 → {self.dir}")
+
+    def load(self) -> None:
+        if not self.enabled or not self.dir:
+            return
+        self._migrate_legacy()
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003", ctx={"阶段": "上下文目录创建", "目录": self.dir})
+            return
+        try:
+            names = sorted(os.listdir(self.dir))
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003", ctx={"阶段": "上下文目录读取", "目录": self.dir})
+            return
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            fp = os.path.join(self.dir, name)
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    row = json.load(f)
+            except Exception as exc:
+                bad = fp + ".bad"
+                try:
+                    os.replace(fp, bad)
+                except Exception:
+                    bad = "(改名失败)"
+                report("E-PATH-003", "会话档案损坏，已备份后跳过（该会话历史会丢）",
+                       ctx={"文件": name, "备份为": os.path.basename(bad),
+                            "原因": f"{type(exc).__name__}: {exc}"})
+                continue
+            if not isinstance(row, dict):
+                continue
+            scope = str(row.get("_scope") or name[:-len(".json")])
             cont = row.get("continuous") or {}
             hist = History.from_dict(row.get("history") or [], self.max_entries, self.system_prompt)
             hist.set_seq(int(row.get("seq") or 0))
-            self._book[str(scope)] = {
+            self._book[scope] = {
                 "history": hist,
                 "cont": {"active": bool(cont.get("active")),
                          "last_at": float(cont.get("last_at") or 0.0)},
                 "used_at": float(row.get("used_at") or 0.0),
             }
+            self._saved_ever.add(scope)
         if self._book:
-            log("INFO", f"已载入 {len(self._book)} 个会话的上下文（{self.path}）")
+            log("INFO", f"已载入 {len(self._book)} 个会话的上下文（{self.dir}）")
+
+    def _reconcile_external_deletes(self, now: float) -> None:
+        """对账：UI 端直接删掉档案文件后，内存里的副本要跟着丢。
+
+        不对账的后果：用户在界面上删了某会话，agent 内存里还留着它，
+        下次 save 会把文件原样写回去 —— 「删了又复活」。
+        判据用 _saved_ever（至少落过一次盘的 scope）：文件没了 = 被外部删除。
+        从没落过盘的新 scope 不受影响。节流 10 秒，避免每次 save 都 listdir。"""
+        if not self._saved_ever or now - self._last_reconcile < 10.0:
+            return
+        self._last_reconcile = now
+        try:
+            files = set(os.listdir(self.dir))
+        except OSError:
+            return
+        gone = [s for s in self._saved_ever
+                if s in self._book and self._scope_file(s) not in files]
+        for scope in gone:
+            del self._book[scope]
+            self._dirty_scopes.discard(scope)
+            self._saved_ever.discard(scope)
+            log("INFO", f"会话档案已被外部删除，内存副本同步移除：{scope}")
 
     def save(self, force: bool = False) -> None:
-        if not self.enabled or not self.path or not self._dirty:
-            return
         now = time.time()
+        self._reconcile_external_deletes(now)
+        if not self.enabled or not self._dirty or not self._dirty_scopes:
+            return
         if not force and now - self._last_save < self.interval:
             return
         self._last_save = now
+        todo = list(self._dirty_scopes)
+        self._dirty_scopes.clear()
         self._dirty = False
-
-        data = {
-            "_说明": "pc-agent-demo 自动生成：按会话隔离的上下文与连续对话状态。"
-                     "删除本文件 = 让所有会话失忆，不影响其它配置。",
-            "_version": 1,
-            "scopes": {},
-        }
-        for scope, row in self._book.items():
-            data["scopes"][scope] = {
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+        except Exception as exc:
+            self._dirty = True
+            self._dirty_scopes.update(todo)
+            report_exc(exc, "E-PATH-003",
+                       ctx={"阶段": "上下文落盘", "目录": self.dir,
+                            "后果": "本次没写成功，会保留脏标记下次重试；运行不受影响"})
+            return
+        failed: list[str] = []
+        for scope in todo:
+            row = self._book.get(scope)
+            if row is None:
+                continue          # 已被 forget：文件在 forget 里删，这里跳过
+            fp = os.path.join(self.dir, self._scope_file(scope))
+            data = {
+                "_scope": scope,
                 "used_at": row["used_at"],
                 "seq": row["history"].seq,
                 "continuous": {"active": row["cont"]["active"],
                                "last_at": row["cont"]["last_at"]},
                 "history": row["history"].to_dict(),
             }
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
-        except Exception as exc:
-            report_exc(exc, "E-PATH-003",
-                       ctx={"阶段": "上下文落盘", "文件": self.path,
-                            "后果": "本次没写成功，会保留脏标记下次重试；运行不受影响"})
+            tmp = fp + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, fp)
+                self._saved_ever.add(scope)
+            except Exception as exc:
+                failed.append(scope)
+                report_exc(exc, "E-PATH-003",
+                           ctx={"阶段": "上下文落盘", "文件": fp,
+                                "后果": "本次没写成功，会保留脏标记下次重试；运行不受影响"})
+        if failed:
             self._dirty = True
+            self._dirty_scopes.update(failed)
 
     # ---------------------------------------------------- 取用
+    def _restore(self, scope: str) -> bool:
+        """被 _prune 淘汰的会话再次出现时，从盘上档案恢复历史。
+
+        没有这一步，book() 会建空行并在下次落盘时用空历史覆盖旧档案。"""
+        fp = os.path.join(self.dir, self._scope_file(scope))
+        if not os.path.isfile(fp):
+            return False
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                row = json.load(f)
+        except Exception:
+            return False
+        if not isinstance(row, dict):
+            return False
+        cont = row.get("continuous") or {}
+        hist = History.from_dict(row.get("history") or [], self.max_entries, self.system_prompt)
+        hist.set_seq(int(row.get("seq") or 0))
+        self._book[scope] = {
+            "history": hist,
+            "cont": {"active": bool(cont.get("active")),
+                     "last_at": float(cont.get("last_at") or 0.0)},
+            "used_at": float(row.get("used_at") or 0.0),
+        }
+        return True
+
     def book(self, scope: str) -> dict:
         row = self._book.get(scope)
         if row is None:
-            row = {
-                "history": History(self.max_entries, self.system_prompt),
-                "cont": {"active": False, "last_at": 0.0},
-                "used_at": time.time(),
-            }
-            self._book[scope] = row
-            self._prune()
+            if self._restore(scope):
+                row = self._book[scope]
+            else:
+                row = {
+                    "history": History(self.max_entries, self.system_prompt),
+                    "cont": {"active": False, "last_at": 0.0},
+                    "used_at": time.time(),
+                }
+                self._book[scope] = row
+                self._prune()
         row["used_at"] = time.time()
         self._dirty = True
+        self._dirty_scopes.add(scope)
         return row
 
     def history(self, scope: str) -> History:
@@ -1028,11 +1180,23 @@ class ConversationStore:
             return False
         del self._book[scope]
         self._dirty = True
+        self._dirty_scopes.discard(scope)
+        self._saved_ever.discard(scope)
         self.save(force=True)
+        fp = os.path.join(self.dir, self._scope_file(scope))
+        try:
+            if os.path.isfile(fp):
+                os.remove(fp)
+        except Exception as exc:
+            report_exc(exc, "E-PATH-003",
+                       ctx={"阶段": "删除会话记录", "文件": fp})
+            return False
         return True
 
     def _prune(self) -> None:
-        # 刚取用的 scope 是 used_at 最大的，天然不会被淘汰
+        # 刚取用的 scope 是 used_at 最大的，天然不会被淘汰。
+        # 淘汰只删内存：档案文件留在目录里（UI「会话记录」可见可删）；
+        # 该会话再次出现时由 _restore() 从盘上恢复，历史不丢。
         while len(self._book) > self.max_scopes:
             victim = min(self._book, key=lambda s: self._book[s]["used_at"])
             log("INFO", f"会话数超上限（{self.max_scopes}），淘汰最久未用的：{victim}")
@@ -1047,12 +1211,14 @@ class ConversationStore:
             return True
         row["cont"].update(active=False, last_at=0.0)   # 超时 → 自动退出
         self._dirty = True
+        self._dirty_scopes.add(scope)
         return False
 
     def activate_continuous(self, scope: str, now: float) -> None:
         row = self.book(scope)
         row["cont"].update(active=True, last_at=float(now))
         self._dirty = True
+        self._dirty_scopes.add(scope)
 
     def refresh_continuous(self, scope: str, now: float) -> bool:
         """已激活则续期，避免「从第一条消息起算固定窗口」聊到一半被强制断开。"""
@@ -1061,6 +1227,7 @@ class ConversationStore:
             return False
         row["cont"]["last_at"] = float(now)
         self._dirty = True
+        self._dirty_scopes.add(scope)
         return True
 
     def deactivate_continuous(self, scope: str) -> None:
@@ -1069,6 +1236,7 @@ class ConversationStore:
             return
         row["cont"].update(active=False, last_at=0.0)
         self._dirty = True
+        self._dirty_scopes.add(scope)
 
 
 # ============================================================ 防抖聚合
@@ -4877,7 +5045,7 @@ def show_state(cfg: dict) -> int:
     print("会话上下文（持久化文件内容）")
     print("=" * 72)
     store = ConversationStore(cfg)
-    print(f"\n文件：{store.path}")
+    print(f"\n目录：{store.dir}（每会话一个档案）")
     print(f"开关：{'开' if store.enabled else '关'}")
     if not store.enabled:
         print("\n[!] persist.enabled=false，不会有任何持久化。")

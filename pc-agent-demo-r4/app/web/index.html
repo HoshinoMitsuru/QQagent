@@ -262,6 +262,14 @@ textarea{font-family:var(--mono);font-size:12.5px;line-height:1.55;resize:vertic
 .ln.src-agent .tg{background:var(--accent-soft);border-radius:3px;padding:0 4px}
 .empty{color:var(--faint);font-size:12px;padding:20px 4px;text-align:center}
 
+/* ---------- 会话记录 ---------- */
+.conv-row{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px dashed var(--border)}
+.conv-row:last-child{border-bottom:0}
+.conv-info{flex:1;min-width:0}
+.conv-name{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conv-meta{font-size:12px;color:var(--faint);margin-top:2px}
+.conv-row.broken .conv-name{color:var(--err)}
+
 /* ---------- 弹窗 / 提示 ---------- */
 .modal-bg{
   position:fixed;inset:0;background:rgba(8,10,14,.5);z-index:90;
@@ -435,6 +443,15 @@ textarea{font-family:var(--mono);font-size:12.5px;line-height:1.55;resize:vertic
       </div>
       <div class="card-body" id="adminBody"></div>
     </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span id="i-conv"></span>
+        <h2>会话记录</h2>
+        <div class="sub" id="convSub">每个会话一个档案，可单独删除</div>
+      </div>
+      <div class="card-body tight" id="convBody"><div class="empty">正在加载会话记录…</div></div>
+    </section>
   </div>
 
   <div class="col col-log">
@@ -531,7 +548,8 @@ const ICONS = {
   monitor: P('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
   monitorOff: P('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4M4 3l16 16"/>'),
   camera: P('<path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.2"/>'),
-  ghost: P('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.3-1.6-2.3 1.6L12 18.4 9.6 20 7.3 18.4z"/><path d="M9.5 10h.01M14.5 10h.01"/>')
+  ghost: P('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.3-1.6-2.3 1.6L12 18.4 9.6 20 7.3 18.4z"/><path d="M9.5 10h.01M14.5 10h.01"/>'),
+  chat: P('<path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4 4V6a1 1 0 0 1 1-1z"/><path d="M8 10h8M8 13h5"/>')
 };
 const icon = (n, cls) => `<span class="${cls||""}" style="display:inline-flex">${ICONS[n]||ICONS.info}</span>`;
 
@@ -1652,7 +1670,7 @@ $("#btnTheme").addEventListener("click", () => setTheme(document.documentElement
 /* ---------- 静态图标 ---------- */
 $("#brandMark").innerHTML = ICONS.robot;
 ["i-qq:robot","i-run:activity","i-host:ghost","i-play:play","i-sliders:sliders","i-shield:shield",
- "i-term:term","i-warn:warn","i-diag:cap"].forEach(x => {
+ "i-term:term","i-warn:warn","i-diag:cap","i-conv:chat"].forEach(x => {
   const [id, name] = x.split(":"); const n = document.getElementById(id); if (n) n.innerHTML = ICONS[name];
 });
 
@@ -1676,6 +1694,66 @@ function connect() {
   es.onerror = () => { es.close(); setTimeout(connect, 2500); };
 }
 
+/* ---------- 会话记录 ---------- */
+async function loadConversations() {
+  const body = $("#convBody");
+  try {
+    const res = await api("/api/conversations");
+    const items = res.items || [];
+    $("#convSub").textContent =
+      `${items.length} 个档案 · ${res.dir || "目录未知"}`;
+    if (!items.length) {
+      body.innerHTML = '<div class="empty">还没有会话档案</div>';
+      return;
+    }
+    body.innerHTML = "";
+    for (const it of items) {
+      const when = it.used_at
+        ? new Date(it.used_at * 1000).toLocaleString() : "—";
+      const row = el("div", "conv-row" + (it.broken ? " broken" : ""));
+      row.innerHTML =
+        `<div class="conv-info">` +
+        `<div class="conv-name">${esc(it.scope)}</div>` +
+        `<div class="conv-meta">` +
+        (it.broken ? "档案损坏（建议删除）"
+                   : `${it.entries} 条上下文`) +
+        (it.continuous ? " · 连续对话中" : "") +
+        ` · 最近使用 ${when}</div></div>`;
+      const btn = el("button", "ghost sm icon-btn");
+      btn.innerHTML = ICONS.trash;
+      btn.title = "删除该会话记录";
+      btn.addEventListener("click", async () => {
+        // 破坏性操作：档案删了就没了（历史上下文不可恢复），必须二次确认
+        const ok = await confirmDialog({
+          title: "删除会话记录？",
+          body: `将删除 <b>${esc(it.scope)}</b> 的对话档案` +
+                `（${it.broken ? "损坏档案" : it.entries + " 条上下文"}）。<br><br>` +
+                `删除后该会话的 AI 上下文清空，<b>不可恢复</b>。` +
+                `若常驻正在运行，它会在下次落盘前自动丢弃内存里的副本。`,
+          confirmText: "确认删除", danger: true
+        });
+        if (!ok) return;
+        try {
+          const r = await api("/api/conversations/delete", { scope: it.scope });
+          if (r.ok) {
+            toast(r.deleted ? `已删除：${it.scope}` : "档案不存在（可能已删过）", "ok");
+            loadConversations();
+          } else {
+            const err = r.error || {};
+            toast(`删除失败 [${err.code || "?"}]：${err.message || "未知错误"}`, "err");
+          }
+        } catch (e) {
+          toast(`删除失败：${e.message || e}`, "err");
+        }
+      });
+      row.appendChild(btn);
+      body.appendChild(row);
+    }
+  } catch (e) {
+    body.innerHTML = `<div class="empty">加载失败：${esc(e.message || e)}</div>`;
+  }
+}
+
 /* ---------- 启动 ---------- */
 (async function boot() {
   // 每一步都单独兜住：任何一个接口出问题都不该让整个页面变成空白，
@@ -1688,7 +1766,10 @@ function connect() {
   await step("任务清单", loadTasks);
   await step("配置", loadSettings);
   await step("状态", () => refresh(true));
+  await step("会话记录", loadConversations);
   setInterval(() => { if (!document.hidden) refresh(false); }, 6000);
+  // 会话档案变化慢（只在有新对话时落盘），30 秒刷一次足够
+  setInterval(() => { if (!document.hidden) loadConversations(); }, 30000);
 })();
 </script>
 </body>

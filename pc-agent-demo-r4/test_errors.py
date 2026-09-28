@@ -1323,27 +1323,49 @@ def t18_mask_never_overwrites_key():
     R.check("空串不算掩码", SET._is_mask("") is False)
 
     # ---- ② 回传掩码时不得改动已存的密钥 ----
-    _json.dump({"llm": {"api_key": real}},
-               open(SET.paths.SECRETS_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    # 2026-09-28 起密钥主存储是 config.json（内联 llm.api_key，该文件已 gitignore）；
+    # secrets.local.json 降级为**只读后备**（resolve 仍兼容旧配置）。
+    # 两条来源都要守住「掩码不覆盖真值」。
+    def _write_cfg_key(value: str) -> None:
+        cfgd = _json.load(open(SET.paths.CONFIG_PATH, encoding="utf-8")) \
+            if os.path.isfile(SET.paths.CONFIG_PATH) else {}
+        cfgd.setdefault("llm", {})["api_key"] = value
+        _json.dump(cfgd, open(SET.paths.CONFIG_PATH, "w", encoding="utf-8"),
+                   ensure_ascii=False)
+
+    _write_cfg_key(real)
     vals = dict(SET.as_ui_payload()["values"])
     R.check("界面拿到的是掩码而不是明文", vals.get("llm.api_key") == mask,
             str(vals.get("llm.api_key"))[:40])
     r = SET.save(vals)            # 模拟「界面上什么都没改，直接点保存」
     R.check("保存成功（掩码不该拦下正常保存）", r.get("ok") is True, str(r)[:200])
-    after = _json.load(open(SET.paths.SECRETS_PATH, encoding="utf-8"))
+    after = _json.load(open(SET.paths.CONFIG_PATH, encoding="utf-8"))
     R.check("**真实密钥没有被掩码覆盖**",
             after.get("llm", {}).get("api_key") == real,
             f"存盘后变成了 {after.get('llm', {}).get('api_key')!r}")
 
-    # ---- ③ 已经被写坏的配置要能被点破（save 时）----
-    _json.dump({"llm": {"api_key": mask}},
+    # ---- ②-b 后备来源（secrets.local.json）同样不得被掩码覆盖 ----
+    _write_cfg_key("")            # 清掉内联，逼 resolve 走后备
+    _json.dump({"llm": {"api_key": real}},
                open(SET.paths.SECRETS_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    vals2 = dict(SET.as_ui_payload()["values"])
+    R.check("后备 secrets 里的密钥也以掩码呈现", vals2.get("llm.api_key") == mask,
+            str(vals2.get("llm.api_key"))[:40])
+    SET.save(vals2)
+    after_sec = _json.load(open(SET.paths.SECRETS_PATH, encoding="utf-8"))
+    R.check("后备密钥没有被掩码覆盖",
+            after_sec.get("llm", {}).get("api_key") == real,
+            f"存盘后变成了 {after_sec.get('llm', {}).get('api_key')!r}")
+    _write_cfg_key(real)          # 恢复主存储，供后面用例使用
+
+    # ---- ③ 已经被写坏的配置要能被点破（save 时）----
+    _write_cfg_key(mask)
     r = SET.save(dict(SET.as_ui_payload()["values"]))
     msgs = [e["message"] for e in r.get("errors", [])]
     R.check("配置里存着掩码时，保存会点破",
             not r.get("ok") and any("不是真密钥" in m and "掩码" in m for m in msgs),
             str(msgs)[:200])
-    R.check("并指明是哪个文件", any("secrets.local.json" in m for m in msgs), str(msgs)[:200])
+    R.check("并指明是哪个文件", any("config.json" in m for m in msgs), str(msgs)[:200])
 
     # ---- ④ 运行时也要点破（而不是报成网络问题）----
     cfg = agent.load_config()

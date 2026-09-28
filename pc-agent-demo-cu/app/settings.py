@@ -50,6 +50,7 @@ GROUPS = [
     {"id": "risk", "title": "风控与排队", "desc": "决定能同时服务几个会话。改大之前先读并发评估文档。"},
     {"id": "discovery", "title": "多会话发现", "desc": "扫会话列表找新消息。这是「降级方案」的核心开关。"},
     {"id": "foreground", "title": "前台与稳定性", "desc": "关于抢前台、OCR 兜底、方向判定的取舍。"},
+    {"id": "server", "title": "服务端大脑", "desc": "把「生成回复」交给 ai-web-page 服务端（ECS），本机只负责 QQ 收发。"},
 ]
 
 FIELDS: list[dict] = [
@@ -70,6 +71,23 @@ FIELDS: list[dict] = [
        "你是『小清澈』，一个温和、真诚、有点黏人的 AI 陪伴者。说话口语化、简短，一次回复不超过三句话。"
        "不要用列表和标题，不要像客服一样客套。",
        "每次请求都会带上。写清楚「说话风格 + 长度约束」比写人设背景更有效。"),
+
+    # -------------------------------------------------- 服务端大脑（CU P2）
+    # 与 agent.DEFAULTS["qq_agent"] 逐键一致；qq_agent.secret 也是 secret 字段，
+    # 2026-09-28 起统一写进 config.json（已 gitignore），接口只回掩码。
+    _f("qq_agent.enabled", "启用服务端大脑", "bool", "server", False,
+       "开启后「生成回复」交给服务端（POST /api/qq/agent），本机不再直连 LLM；"
+       "服务端不可达时自动回落直连，不会停摆。"),
+    _f("qq_agent.base_url", "服务端地址", "text", "server", "https://aligera.website",
+       "ai-web-page 服务端的根地址。"),
+    _f("qq_agent.secret", "通信密钥", "password", "server", "",
+       "与服务端 QQ_WEBHOOK_SECRET 同值，用于 HMAC 签名。", secret=True),
+    _f("qq_agent.qq_number", "本机 QQ 号", "text", "server", "",
+       "私聊建号的兜底标识；群聊由服务端按群号建会话。"),
+    _f("qq_agent.timeout_seconds", "服务端超时", "number", "server", 90.0,
+       "服务端生成回复的等待上限（秒）。"),
+    _f("qq_agent.channel", "渠道标识", "text", "server", "r4",
+       "告诉服务端消息来自哪条链路（r4 = 独立桌面小号）。"),
 
     # -------------------------------------------------- 对话行为
     _f("chat.private_chat_only", "只回私聊", "bool", "behavior", False,
@@ -399,6 +417,15 @@ _LOCAL_DEFAULTS = {
             # 加字段时**两边都要加** —— 漏了就会在测试里报「缺失=['uia.xxx']」，
             # 而症状是「界面上能看到这个配置项、但它的默认值和 agent 实际用的不一样」。
             "write_mode": "auto"},
+    # P2 服务端大脑：与 agent.DEFAULTS["qq_agent"] 保持逐键一致（test_ui 比对闸）
+    "qq_agent": {
+        "enabled": False,
+        "base_url": "https://aligera.website",
+        "secret": "",
+        "qq_number": "",
+        "timeout_seconds": 90.0,
+        "channel": "r4",
+    },
 }
 
 
@@ -651,10 +678,18 @@ def save(payload: dict) -> dict:
     # ---- config.json：从磁盘现读，只覆盖我们管的路径，注释键和被 agent 独享的键都留着
     cfg = _read_json(paths.CONFIG_PATH)
     changed: list[str] = []
+    # secret=True 的字段（llm.api_key 等）2026-09-28 起也**写进 config.json**：
+    # 该文件被 .gitignore 忽略（pc-agent-demo*/config.json），单文件收拢后
+    # 不再有「config 与 secrets 两处都可能有 key」的索引混乱。
+    # secrets.local.json 降级为**只读后备**（resolve_api_key 仍兼容旧配置）。
     for f in FIELDS:
-        if f["secret"] or f["path"] not in payload:
+        if f["path"] not in payload:
             continue
         new_val = _coerce(f, payload[f["path"]])
+        # secret 字段掩码防线（2026-09-28 迁入统一循环时必须保留）：
+        # 前端把掩码原样回传 = 用户没改这把 key，跳过，绝不把掩码写进 config.json
+        if f.get("secret") and isinstance(new_val, str) and _is_mask(new_val):
+            continue
         old_val = _get_path(load_merged(), f["path"], f["default"])
         if new_val != old_val:
             _set_path(cfg, f["path"], new_val)
@@ -663,19 +698,6 @@ def save(payload: dict) -> dict:
         _atomic_write_json(paths.CONFIG_PATH, cfg)
     except Exception as exc:
         return E.from_exception(exc, "E-CFG-006", {"文件": paths.CONFIG_PATH})
-
-    # ---- secrets.local.json：只动 llm.api_key
-    new_key = str(payload.get("llm.api_key") or "").strip()
-    if new_key and not _is_mask(new_key):
-        try:
-            ensure_secrets_file()
-            sec = _read_json(paths.SECRETS_PATH)
-            if (sec.get("llm") or {}).get("api_key") != new_key:
-                sec.setdefault("llm", {})["api_key"] = new_key
-                _atomic_write_json(paths.SECRETS_PATH, sec)
-                changed.append("llm.api_key")
-        except Exception as exc:
-            return E.from_exception(exc, "E-CFG-006", {"文件": paths.SECRETS_PATH})
 
     # ---- app-settings.json
     app_path = os.path.join(paths.DATA_DIR, "app-settings.json")

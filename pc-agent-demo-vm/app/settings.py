@@ -628,10 +628,18 @@ def save(payload: dict) -> dict:
     # ---- config.json：从磁盘现读，只覆盖我们管的路径，注释键和被 agent 独享的键都留着
     cfg = _read_json(paths.CONFIG_PATH)
     changed: list[str] = []
+    # secret=True 的字段（llm.api_key 等）2026-09-28 起也**写进 config.json**：
+    # 该文件被 .gitignore 忽略（pc-agent-demo*/config.json），单文件收拢后
+    # 不再有「config 与 secrets 两处都可能有 key」的索引混乱。
+    # secrets.local.json 降级为**只读后备**（resolve_api_key 仍兼容旧配置）。
     for f in FIELDS:
-        if f["secret"] or f["path"] not in payload:
+        if f["path"] not in payload:
             continue
         new_val = _coerce(f, payload[f["path"]])
+        # secret 字段掩码防线（2026-09-28 迁入统一循环时必须保留）：
+        # 前端把掩码原样回传 = 用户没改这把 key，跳过，绝不把掩码写进 config.json
+        if f.get("secret") and isinstance(new_val, str) and _is_mask(new_val):
+            continue
         old_val = _get_path(load_merged(), f["path"], f["default"])
         if new_val != old_val:
             _set_path(cfg, f["path"], new_val)
@@ -640,19 +648,6 @@ def save(payload: dict) -> dict:
         _atomic_write_json(paths.CONFIG_PATH, cfg)
     except Exception as exc:
         return E.from_exception(exc, "E-CFG-006", {"文件": paths.CONFIG_PATH})
-
-    # ---- secrets.local.json：只动 llm.api_key
-    new_key = str(payload.get("llm.api_key") or "").strip()
-    if new_key and not _is_mask(new_key):
-        try:
-            ensure_secrets_file()
-            sec = _read_json(paths.SECRETS_PATH)
-            if (sec.get("llm") or {}).get("api_key") != new_key:
-                sec.setdefault("llm", {})["api_key"] = new_key
-                _atomic_write_json(paths.SECRETS_PATH, sec)
-                changed.append("llm.api_key")
-        except Exception as exc:
-            return E.from_exception(exc, "E-CFG-006", {"文件": paths.SECRETS_PATH})
 
     # ---- app-settings.json
     app_path = os.path.join(paths.DATA_DIR, "app-settings.json")

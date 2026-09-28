@@ -240,18 +240,28 @@ def t3_settings_roundtrip():
 
 
 def t4_secret_isolation():
-    log("\n[4] 密钥只进 secrets.local.json")
+    """2026-09-28 起密钥收拢进 config.json（该文件被 .gitignore 覆盖，
+    仓库里只留 config.example.json）；secrets.local.json 降级为只读后备。
+    安全不变量改为两条：①接口/状态只回掩码；②config.json 必须被 gitignore。"""
+    log("\n[4] 密钥收拢进 config.json 且该文件被 gitignore")
     cfg = json.load(open(P.CONFIG_PATH, encoding="utf-8"))
-    R.check("config.json 里没有明文 Key",
-            "sk-test-roundtrip" not in json.dumps(cfg), "config.json 里发现了明文密钥！")
+    R.check("config.json 里存了新 Key（主存储）",
+            cfg.get("llm", {}).get("api_key") == "sk-test-roundtrip-1234567890")
+    # 唯一存储：不该再往 secrets.local.json 写新 Key（那里只保留旧配置的后备值）
     sec = json.load(open(P.SECRETS_PATH, encoding="utf-8"))
-    R.check("secrets.local.json 里存了新 Key",
-            sec.get("llm", {}).get("api_key") == "sk-test-roundtrip-1234567890")
+    R.check("secrets.local.json 不再接收新 Key（后备不变）",
+            sec.get("llm", {}).get("api_key") != "sk-test-roundtrip-1234567890")
     st, d = http("/api/state")
     R.check("state 里不出现明文 Key",
             "sk-test-roundtrip" not in json.dumps(d["state"]), "接口把密钥泄露出去了！")
     R.check("state 只报来源", d["state"]["llm"]["key_present"] and
-            "secrets" in d["state"]["llm"]["key_source"])
+            "config.json" in d["state"]["llm"]["key_source"])
+    # 收拢后的安全闸：允许存 Key 的前提是文件绝不入库
+    here = os.path.dirname(os.path.abspath(__file__))
+    gi_path = os.path.join(os.path.dirname(here), ".gitignore")
+    gi = open(gi_path, encoding="utf-8").read() if os.path.isfile(gi_path) else ""
+    R.check("config.json 被 .gitignore 覆盖（pc-agent-demo*/config.json）",
+            "pc-agent-demo*/config.json" in gi, f"{gi_path} 里没有对应条目")
 
 
 def t5_validation():

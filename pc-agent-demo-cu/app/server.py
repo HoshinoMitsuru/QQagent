@@ -262,6 +262,71 @@ def _shot_path() -> str:
     return p
 
 
+# ---------------------------------------------------- 会话记录（档案目录）
+#
+# 会话档案的「唯一事实来源是文件系统」：agent 进程把它写在
+# state/conversations/ 下（每会话一个 json），壳这边的列表/删除都直接
+# 操作文件，不走 agent 进程。agent 端在 save() 里周期性对账
+# （_reconcile_external_deletes）：文件被删 → 内存副本同步丢弃，
+# 不会出现「用户删了、下次落盘又复活」。
+
+def _conversations_dir() -> str:
+    """会话档案目录。解析逻辑与 agent.ConversationStore 保持一致：
+    config.persist.file（默认 state/conversations.json）按数据目录解析，
+    目录名 = 去掉 .json 后缀。两边必须同步修改。"""
+    try:
+        file = str((settings.load_merged().get("persist") or {}).get("file")
+                   or "state/conversations.json").strip()
+    except Exception:
+        file = "state/conversations.json"
+    if not file:
+        file = "state/conversations.json"
+    if not os.path.isabs(file):
+        file = os.path.join(paths.DATA_DIR, file)
+    return file[:-len(".json")] if file.endswith(".json") else file
+
+
+def _conv_file_name(scope: str) -> str:
+    """scope → 档案文件名。与 agent.ConversationStore._scope_file 同一实现，
+    改一处必须同步另一处（agent 侧有 test_conversations.py 闸门）。"""
+    name = str(scope or "")
+    for ch in '\\/:*?"<>|':
+        name = name.replace(ch, "_")
+    return name + ".json"
+
+
+def list_conversations() -> dict:
+    """读会话档案目录，给界面列表用。坏文件标 broken（界面上可删）。"""
+    cdir = _conversations_dir()
+    try:
+        names = sorted(os.listdir(cdir))
+    except OSError:
+        names = []
+    items = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        row = {"file": name, "scope": name[:-len(".json")],
+               "entries": 0, "used_at": 0.0, "continuous": False,
+               "broken": False}
+        try:
+            with open(os.path.join(cdir, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                row["scope"] = str(data.get("_scope") or row["scope"])
+                hist = data.get("history")
+                row["entries"] = len(hist) if isinstance(hist, list) else 0
+                row["used_at"] = float(data.get("used_at") or 0.0)
+                cont = data.get("continuous")
+                row["continuous"] = bool(cont.get("active")) \
+                    if isinstance(cont, dict) else False
+        except Exception:
+            row["broken"] = True
+        items.append(row)
+    items.sort(key=lambda r: -r["used_at"])
+    return {"dir": cdir, "items": items}
+
+
 # ============================================================ 请求处理
 class Handler(BaseHTTPRequestHandler):
     server_version = "QQAgent"
@@ -484,6 +549,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "catalog": E.EC.CATALOG,
                                "domains": E.EC.DOMAINS,
                                "summary": E.catalog_summary()})
+        if route == "/api/conversations":
+            # 会话档案列表（直接读 state/conversations/，见 list_conversations）
+            return self._json({"ok": True, **list_conversations()})
         return self._json(E.envelope("E-WEB-003", f"未知接口 {route}"), 404)
 
     # ---------------------------------------------------- POST
@@ -718,6 +786,35 @@ class Handler(BaseHTTPRequestHandler):
             BUS.clear()
             BUS.emit("日志已清空", tag="UI", source="ui")
             return self._json({"ok": True})
+
+        if route == "/api/conversations/delete":
+            # 删除一个会话档案。直接删文件（文件系统是唯一事实来源）；
+            # 若 agent 常驻正在跑，它会在下一次 save 时对账发现文件没了，
+            # 自动丢弃内存副本 —— 界面上不用（也没法）通知 agent 进程。
+            scope = str((data or {}).get("scope") or "").strip()
+            if not scope:
+                return self._json(E.envelope(
+                    "E-WEB-004", "缺少 scope 参数",
+                    {"字段": "scope（会话名，来自 /api/conversations 列表）"}))
+            cdir = os.path.abspath(_conversations_dir())
+            fp = os.path.abspath(os.path.join(cdir, _conv_file_name(scope)))
+            # 防路径穿越：文件名由 _conv_file_name 消过毒，这里再核一道
+            # 「归一化后仍在会话目录里」，双保险。
+            if os.path.dirname(fp) != cdir:
+                return self._json(E.envelope(
+                    "E-WEB-004", "scope 含非法路径字符",
+                    {"scope": scope}))
+            if not os.path.isfile(fp):
+                return self._json({"ok": True, "deleted": False,
+                                   "note": "档案不存在（可能已删过）"})
+            try:
+                os.remove(fp)
+            except OSError as exc:
+                return self._json(E.envelope(
+                    "E-WEB-005", f"删除失败：{exc}",
+                    {"文件": fp}))
+            BUS.emit(f"已删除会话档案：{scope}", tag="UI", source="ui")
+            return self._json({"ok": True, "deleted": True, "scope": scope})
 
         return self._json(E.envelope("E-WEB-003", f"未知接口 {route}"), 404)
 

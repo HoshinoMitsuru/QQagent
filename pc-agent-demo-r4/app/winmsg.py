@@ -52,6 +52,11 @@ HANDLE = wintypes.HANDLE
 WM_CHAR = 0x0102
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
+#: 鼠标消息（用在 UIA 两条点击路都断掉时的兜底，见 click_at）
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+MK_LBUTTON = 0x0001
 SMTO_ABORTIFHUNG = 0x0002
 SEND_TIMEOUT_MS = 3000
 MAPVK_VK_TO_VSC = 0
@@ -88,6 +93,10 @@ _user32.SendMessageTimeoutW.argtypes = [
 _user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
 _user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
 _user32.MapVirtualKeyW.restype = ctypes.c_uint
+_user32.ScreenToClient.argtypes = [HWND, ctypes.POINTER(wintypes.POINT)]
+_user32.ScreenToClient.restype = BOOL
+_user32.ClientToScreen.argtypes = [HWND, ctypes.POINTER(wintypes.POINT)]
+_user32.ClientToScreen.restype = BOOL
 _user32.VkKeyScanW.argtypes = [ctypes.c_wchar]
 _user32.VkKeyScanW.restype = ctypes.c_short
 _user32.GetWindowDC.argtypes = [HWND]
@@ -296,6 +305,163 @@ def find_child(hwnd: int, cls_name: str, *, visible_only: bool = True) -> list[i
 
     _user32.EnumChildWindows(hwnd, _ENUM_PROC(_cb), 0)
     return out
+
+
+#: DPI 感知是否已经在本进程里开过（重复调用没有副作用，只是省一次 syscall）
+_DPI_DONE = False
+
+#: 回读用的常量：PROCESS_DPI_AWARENESS
+_DPI_LEVELS = {0: "unaware", 1: "system", 2: "per-monitor"}
+
+
+def dpi_awareness_now() -> str:
+    """回读**本进程当前**的 DPI 感知等级。
+
+    这是唯一可信的判据。设置类 API（SetProcessDpiAwareness / SetProcessDPIAware）
+    只在「第一次」有意义：之后再调会返回 E_ACCESSDENIED，而**失败恰恰说明早设过了**。
+    所以绝不能拿它们的返回值当结论 —— 必须回读。实测本机落在 `per-monitor`。
+    """
+    try:
+        val = ctypes.c_int(-1)
+        hr = ctypes.WinDLL("shcore", use_last_error=True).GetProcessDpiAwareness(
+            None, ctypes.byref(val))
+        if hr != 0:
+            return f"回读失败(hr={hr})"
+        return _DPI_LEVELS.get(val.value, f"未知({val.value})")
+    except Exception as exc:
+        return f"回读失败：{type(exc).__name__}: {exc}"
+
+
+def enable_dpi_awareness() -> dict:
+    """
+    让本进程按**物理像素**理解坐标（优先 PER_MONITOR_AWARE_V2）。
+
+    ## 为什么必须做这件事（2026-10-10 真机实测踩出来的）
+
+    本机显示缩放 150%（144 DPI）。进程若保持 DPI-**unaware**，Windows 会把
+    所有坐标**虚拟化**成逻辑像素：我们读到的 `GetWindowRect` 是 640x424，
+    而 UIA 的 `BoundingRectangle` **永远是物理像素**（同一窗口 960x636 基准）——
+    两套坐标差 1.5 倍，谁也发现不了，因为各自内部都自洽。实测后果两个，都致命：
+
+      · `PrintWindow` 按**逻辑尺寸**建位图 → 抓出来是 640x424，而窗口实际
+        960x636。尺寸不对，图就是废的（二维码/登录页截屏都白搭）。
+      · 窗口消息点击按物理坐标算客户区偏移 → **点到别的地方去**。
+        2026-10-10 真机验证：修好之后，UIA 给的物理屏幕坐标换算成客户区坐标
+        与手算完全吻合（会话条目中心 screen=(831,566) → client=(271,282)，
+        窗口原点 (560,284)），点下去界面**真的**切了过去。
+      · 顺带一提，把两套 rect 混在一起比较（比如「按钮是不是在窗口内」）→ 判据全错。
+
+    ## ⚠️ 一个**已经更正过**的误判（别再犯）
+
+    当时把「抓图全黑」也算在 DPI 头上，**这是错的**。真因是那台残留 QQ 的
+    渲染进程已经死了（`PrintWindow` 返回 0），DPI 只让位图尺寸不对而已。
+    同一台机器、同一张隐藏桌面上，一个**健康**的 QQ 抓出来完全正常：
+    实测 `1471x991`、颜色 99 种、非黑占比 0.997、落盘 104 KB。
+    所以「图全黑」要先看 `printwindow_ret` / `blank`，别急着怪坐标系。
+
+    ## 为什么不让所有进程都调
+
+    壳（UI）进程**不该**调：DPI-aware 之后 tkinter/托盘界面会显得偏小，
+    而那是用户直接看着的东西，不该为内部实现买单。
+    只有**进隐藏桌面干活的进程**（hostagent / hostd / qq-cu）才需要物理像素。
+
+    返回 `{"ok", "how", "now", "attempts"}`。`ok` 以**回读值**为准，不信任设置调用。
+    """
+    global _DPI_DONE
+    if _DPI_DONE:
+        return {"ok": True, "already": True, "how": "已设置过", "now": dpi_awareness_now()}
+    attempts: list = []
+
+    def try_shcore() -> bool:
+        try:
+            hr = ctypes.WinDLL("shcore", use_last_error=True).SetProcessDpiAwareness(2)
+            attempts.append(f"shcore.SetProcessDpiAwareness(2) → hr={hr}")
+            return hr == 0
+        except Exception as exc:
+            attempts.append(f"shcore 不可用：{type(exc).__name__}: {exc}")
+            return False
+
+    def try_user32() -> bool:
+        try:
+            ok = bool(ctypes.WinDLL("user32", use_last_error=True).SetProcessDPIAware())
+            attempts.append(f"user32.SetProcessDPIAware → {ok}")
+            return ok
+        except Exception as exc:
+            attempts.append(f"user32 也不可用：{type(exc).__name__}: {exc}")
+            return False
+
+    try_shcore()
+    now = dpi_awareness_now()
+    if now not in ("per-monitor", "system"):
+        # shcore 这条路没成（老系统 / 返回了别的错误码）才走 user32。
+        # 之所以先回读再决定，是因为「hr != 0」里最常见的一种恰恰是
+        # E_ACCESSDENIED —— 那表示**早就设过了**，再调 user32 是白费。
+        try_user32()
+        now = dpi_awareness_now()
+    # 「不是 unaware」就算成功：system(1) 在单显示器机器上同样是物理像素，
+    # 也是可接受的降级；只有还停在 unaware(0) 才真的没成功。
+    good = now in ("per-monitor", "system")
+    _DPI_DONE = good
+    return {"ok": good, "how": "；".join(attempts), "now": now, "attempts": attempts}
+
+
+def click_at(hwnd: int, x: int, y: int, *, settle: float = 0.05) -> dict:
+    """
+    按**屏幕坐标** (x, y) 往目标窗口点一下（窗口消息，不需要前台、不动真鼠标）。
+
+    ## 为什么需要第三条点击路径
+
+    UIA 给的两条路在真机上会双双失效：
+
+      · `InvokePattern` —— 元素不实现它（实测 QQ 登录页的按钮外层是 GroupControl）
+      · `LegacyIAccessible.DoDefaultAction` —— 抛 `COMError(-2146233079)`
+
+    窗口消息这条路不要求元素支持任何 Pattern，只要**坐标对**就行 ——
+    与写入路径上「WM_CHAR 免前台」是同一个原理（见模块开头）。
+
+    ## 投给谁
+
+    Chromium 把鼠标输入交给 **renderer 子窗口**（`Chrome_RenderWidgetHostHWND`），
+    与键盘同源（理由见 find_child）。所以优先投给那一层；找不到才退回顶层窗口 ——
+    顶层窗口在没焦点时会丢消息，这是**已知**的降级，结果里会标出来。
+
+    ## 成功判据
+
+    与 send_text 一样：这里的 `ok` 只表示「消息投出去了」，**不代表点中了**。
+    真正的判据必须由调用方回读界面（比如「登录按钮还在不在」）。
+    """
+    r = wintypes.RECT()
+    if not _user32.GetWindowRect(HWND(hwnd), ctypes.byref(r)):
+        return {"ok": False, "error": "取不到目标窗口的位置"}
+
+    targets = find_child(hwnd, "Chrome_RenderWidgetHostHWND", visible_only=False)
+    target = targets[0] if targets else hwnd
+    via = "Chrome_RenderWidgetHostHWND" if targets else "顶层窗口（降级：没焦点会丢）"
+
+    pt = wintypes.POINT(int(x), int(y))
+    if not _user32.ScreenToClient(HWND(target), ctypes.byref(pt)):
+        return {"ok": False, "error": "屏幕坐标换算客户区坐标失败", "target": target}
+    cx, cy = int(pt.x), int(pt.y)
+    lp = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
+
+    res = ctypes.c_size_t(0)
+
+    def post(msg, wp) -> int:
+        rv = _user32.SendMessageTimeoutW(HWND(target), msg, wp, lp,
+                                         SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS,
+                                         ctypes.byref(res))
+        return int(rv)
+
+    t0 = time.time()
+    returns = [post(WM_MOUSEMOVE, 0), post(WM_LBUTTONDOWN, MK_LBUTTON)]
+    if settle:
+        time.sleep(settle)          # 按下与抬起之间留一点间隔：Chromium 要能看到完整序列
+    returns.append(post(WM_LBUTTONUP, 0))
+    return {
+        "ok": True, "sent_to": via, "target": target,
+        "screen": [int(x), int(y)], "client": [cx, cy],
+        "returns": returns, "elapsed": round(time.time() - t0, 4),
+    }
 
 
 def child_classes(hwnd: int, limit: int = 40) -> list[dict]:
@@ -638,6 +804,13 @@ def capture(hwnd: int) -> dict:
         raw = buf.raw
         info["buf"] = raw
         info.update(_blackness_stats(raw, w, h))
+        # ⚠️ `printwindow_ret` 与「图里有没有内容」是两件事，必须分开报：
+        #   · ret == 0  → 调用本身失败（窗口没有可渲染的内容，渲染进程已退等）
+        #   · 纯色图     → 调用"成功"但画面是空的
+        # 2026-10-10 真机踩过：一台渲染进程已死的残留 QQ，ret=0 且图纯黑，
+        # 而当时只看得见「颜色种类=1 平均亮度=0」，于是被误判成坐标系问题。
+        # 现在把「纯色」显式标出来，调用方不必再去猜那三个统计量的含义。
+        info["blank"] = bool(info.get("distinct_colors", 1) <= 1)
         info["ok"] = True
         return info
     except Exception as exc:

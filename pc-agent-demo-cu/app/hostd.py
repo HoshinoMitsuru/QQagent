@@ -65,7 +65,7 @@ if _HERE not in sys.path:
 # `app.paths` 在导入期就把 QQ_AGENT_HOME 定死并写进 os.environ，
 # 而 agent.py 在**它自己**的导入期才去读 QQ_AGENT_HOME / _HEARTBEAT / _STOP。
 # 顺序反了，agent 就会把上下文和心跳写到别处去。
-from app import desktop, host, paths  # noqa: E402
+from app import desktop, host, paths, winmsg  # noqa: E402
 
 os.environ["QQ_AGENT_HEARTBEAT"] = paths.HEARTBEAT_PATH
 os.environ["QQ_AGENT_STOP"] = paths.STOP_PATH
@@ -347,9 +347,18 @@ def _ensure_login(timeout: float, desktop_name: str) -> tuple[bool, str]:
             if clicks >= 4:
                 last_note = "已经点了 4 次登录按钮仍没进主界面"
         elif lg.get("error"):
-            # 登录按钮找不到是**正常**的（窗口可能还是登录页的骨架 / 已经登录了），
-            # 只在连续多轮没结论时才值得报出来。
-            note = f"这一轮没看到登录按钮：{lg['error']}"
+            # ⚠️ 这两种 error 的排查方向**完全不同**，以前都写成「没看到登录按钮」，
+            # 于是真实情况（按钮找到了、只是点不动）被这句话盖掉了，排查方向直接跑偏：
+            #   · 「没找到按钮」= 不在登录页 / 界面结构变了
+            #   · 「找到但点不动」= 三条点击路径都断了（现场看 click_attempts）
+            if "没找到" in lg["error"]:
+                note = f"这一轮没看到登录按钮：{lg['error']}"
+            else:
+                note = f"找到登录按钮但没点动：{lg['error']}"
+                if lg.get("click_attempts"):
+                    note += f"　尝试记录={lg['click_attempts']}"
+                if lg.get("button_candidates"):
+                    note += (f"　候选={[c['desc'].get('class') for c in lg['button_candidates']]}")
             if note != last_note:
                 last_note = note
                 log("WARN", f"{note}（继续等）")
@@ -524,6 +533,13 @@ def main() -> int:
     rc = 0
     reason = ""
     try:
+        # 0. 先把 DPI 感知定下来（在任何窗口操作之前）。
+        #    宿主主线程接下来要把它交给 agent 跑一整天，而 agent 全程要用
+        #    win32 坐标 + UIA 坐标两套东西 —— 不统一到物理像素就会差一个缩放比
+        #    （实测本机 150%：逻辑 1707x1067 vs 物理 2560x1600）。
+        dpi = winmsg.enable_dpi_awareness()
+        log("HOST", f"DPI 感知：{dpi.get('now')}" + ("" if dpi.get("ok") else "（⚠️ 没设上，坐标会差一个缩放比）"))
+
         # 1. 自报桌面 —— 「lpDesktop 真的生效」的唯一可信证据。
         #    命令行里写的是**请求**，桌面归属由内核在创建进程时决定，两者不一致的情况真的存在。
         self_desktop = desktop.current_name()

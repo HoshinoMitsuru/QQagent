@@ -137,7 +137,8 @@ FIELDS: list[dict] = [
     _f("continuous.enabled", "启用连续对话", "bool", "rhythm", True,
        "AI 在某个会话开口后，一段时间内该会话免触发词。"),
     _f("continuous.timeout_seconds", "连续对话时长（秒）", "number", "rhythm", 1800,
-       "30 分钟没有来回就退出连续状态。", step=60, minimum=30, maximum=86400),
+       "多久没有来回就退出连续状态。**填 0 = 常开**（一直保持，不自动退出）。",
+       step=60, minimum=0, maximum=86400),
 
     # -------------------------------------------------- 对话内指令
     _f("commands.enabled", "启用对话内指令", "bool", "commands", True,

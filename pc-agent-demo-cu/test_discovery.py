@@ -213,7 +213,9 @@ def main() -> int:
     print("\n" + "=" * 78)
     print(f"结果：{OK} 通过 / {FAIL} 失败")
     print("=" * 78)
-    return 0 if FAIL else 1
+    # ⚠️ 退出码写反过：原来 0 失败会 return 1（0 失败时返回 1），
+    # 让自动化脚本把「全绿」判成失败。
+    return 1 if FAIL else 0
 
 
 def test_discover_triggers(tmpdir: str) -> None:

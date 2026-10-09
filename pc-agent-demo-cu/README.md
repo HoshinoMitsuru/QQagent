@@ -1388,6 +1388,10 @@ python -X utf8 archive/cdp_probe.py --type "测试"   # 3) 实测写入（绝不
 - 活跃期内**免触发词**（群聊场景有用；配 `group_requires_trigger: true` 时才体现）
 - 每次持续互动会**续期**（刷新 `lastAt`），不会聊到一半被固定窗口强制断开
 - 超过 `timeout_seconds`（默认 1800s）没动静 → **自动退出**，回到需要触发词的状态
+- `timeout_seconds = 0`（或负数）= **常开**：激活后一直保持，只有 `.ai reset` 或把
+  `continuous.enabled` 关掉才退出。适合「打开对话功能后就不想再管」的用法。
+  （`0` 必须真的落进配置 —— 历史上几处取值点用 `or 1800` 兜底，会把 0 当假值丢掉，
+  已统一收进 `agent.cont_window()`。）
 
 ### 3. 上下文持久化 `persist`
 

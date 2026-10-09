@@ -52,7 +52,7 @@
     "habit_max_interval_ms": 15000,
     "habit_ema_alpha": 0.3
   },
-  "_continuous说明": "连续对话模式（移植自 小清澈3.0.js）：AI 在某个会话开口后，该会话在 timeout_seconds 内免触发词；超时自动退出。",
+  "_continuous说明": "连续对话模式（移植自 小清澈3.0.js）：AI 在某个会话开口后，该会话在 timeout_seconds 内免触发词；超时自动退出。timeout_seconds = 0（或负数）= 常开：激活后一直保持，只有 .ai reset 或关掉 enabled 才退出。",
   "continuous": {
     "enabled": true,
     "timeout_seconds": 1800

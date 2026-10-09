@@ -317,6 +317,32 @@ def abs_here(path: str) -> str:
     return p if os.path.isabs(p) else os.path.normpath(os.path.join(HERE, p))
 
 
+# ---------------------------------------------------------------- 连续对话窗口
+def cont_window(ccfg: dict) -> float:
+    """连续对话的免触发窗口（秒）。
+
+    `0`（或负数）= **常开**：激活后一直保持，只有显式 `.ai reset` / 关掉总开关
+    才退出。所以这里**不能**用 `or 1800` 兜底 —— `or` 会把合法的 0 当成
+    "没配"丢掉，于是"常开"永远配不出来（这是个已经踩过的坑）。
+    """
+    raw = (ccfg or {}).get("timeout_seconds")
+    if raw is None:
+        return 1800.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 1800.0
+
+
+def cont_expired(window: float, last_at: float, now: float) -> bool:
+    """窗口是否已过期。`window <= 0`（常开）恒返回 False。
+
+    判据写成「window > 0 才可能过期」，是为了让 0/负数天然落进常开分支，
+    避免各处取值点各写一遍 `<=` / `>` 时符号写反。
+    """
+    return bool(window and window > 0 and now - last_at > window)
+
+
 def process_path(pid: int) -> str:
     if not pid:
         return ""
@@ -402,6 +428,8 @@ DEFAULTS = {
     # -------------------------------------------------------------- 连续对话模式
     # 移植自 小清澈3.0.js 的 continuous 状态机：AI 在某个会话开口后，
     # 该会话在 timeout 秒内免触发词；超时自动退出。
+    # `timeout_seconds = 0`（或负数）= **常开**：一旦激活就一直保持，不再自动退出
+    # （2026-10-10 新增的语义，供「对话功能保持常开」这种用法）。
     "continuous": {
         "enabled": True,
         "timeout_seconds": 1800,
@@ -1230,12 +1258,15 @@ class ConversationStore:
         row = self._book.get(scope)
         if not row or not row["cont"]["active"]:
             return False
-        if now - row["cont"]["last_at"] <= timeout:
-            return True
-        row["cont"].update(active=False, last_at=0.0)   # 超时 → 自动退出
-        self._dirty = True
-        self._dirty_scopes.add(scope)
-        return False
+        # timeout <= 0 = **常开**（永不超时）：激活之后就一直是连续状态，
+        # 只有显式 deactivate（`.ai reset` / 关掉开关）才退出。
+        # 判据收在 cont_expired() 里，避免 0/负数被当成"立刻过期"。
+        if cont_expired(timeout, row["cont"]["last_at"], now):
+            row["cont"].update(active=False, last_at=0.0)   # 超时 → 自动退出
+            self._dirty = True
+            self._dirty_scopes.add(scope)
+            return False
+        return True
 
     def activate_continuous(self, scope: str, now: float) -> None:
         row = self.book(scope)
@@ -3458,7 +3489,8 @@ class Agent:
         self.scope = scope
 
     def _cont_timeout(self) -> float:
-        return float(self.cfg["continuous"].get("timeout_seconds") or 1800)
+        # 0 / 负数 = 常开（见 cont_window 注释），所以不能再 `or 1800` 兜底。
+        return cont_window(self.cfg["continuous"])
 
     def _continuous_now(self, scope: str) -> bool:
         if not self.cfg["continuous"].get("enabled"):
@@ -4767,7 +4799,9 @@ class Agent:
         # 开口即激活连续对话（插件的 activateContinuous）
         if self.cfg["continuous"].get("enabled"):
             self.store.activate_continuous(scope, time.time())
-            log("CONT", f"连续对话已激活（{self._cont_timeout():.0f}s 内该会话免触发词）")
+            _cw = self._cont_timeout()
+            _how = "常开，不自动退出" if _cw <= 0 else f"{_cw:.0f}s 内该会话免触发词"
+            log("CONT", f"连续对话已激活（{_how}）")
         return reply
 
     # ---------------------------------------------------- 服务端大脑通道（P2）
@@ -5141,8 +5175,9 @@ def selftest(cfg: dict) -> int:
           f"，连续 {int(a.get('fast_after_single_rounds') or 0)} 轮单条后降到 "
           f"{float(a.get('fast_wait_ms') or 0) / 1000:.1f}s"
           f"，冷启动惩罚 {float(a.get('cold_start_penalty_ms') or 0) / 1000:.1f}s）")
+    _cw = cont_window(ct)
     print(f"    连续对话   : {'开' if ct.get('enabled') else '关'}"
-          f"（超时自动退出 {float(ct.get('timeout_seconds') or 0):.0f}s）")
+          + ("（**常开**，不自动退出）" if _cw <= 0 else f"（超时自动退出 {_cw:.0f}s）"))
     print(f"    上下文持久 : {'开' if ps.get('enabled') else '关'} → {abs_here(ps.get('file') or '')}")
     store = ConversationStore(cfg)
     if store.enabled:
@@ -5228,10 +5263,11 @@ def show_state(cfg: dict) -> int:
         print("\n(空) 还没有任何会话被记录。")
         return 0
     now = time.time()
+    _cw = cont_window(cfg["continuous"])
     for scope in names:
         row = store._book[scope]
         cont = row["cont"]
-        alive = cont["active"] and (now - cont["last_at"] <= float(cfg["continuous"].get("timeout_seconds") or 1800))
+        alive = cont["active"] and not cont_expired(_cw, cont["last_at"], now)
         print(f"\n── {scope}")
         print(f"   消息 {len(row['history'])} 条（seq={row['history'].seq}）"
               f"，连续对话={'激活' if alive else '未激活'}"

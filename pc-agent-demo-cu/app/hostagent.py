@@ -252,6 +252,97 @@ def _find_by(hwnd: int, *, cls_has: str = "", name_eq: str = "") -> object:
     return None
 
 
+def _collect_by(hwnd: int, *, cls_has: str = "", name_eq: str = "",
+                limit: int = 40) -> list:
+    """收集窗口树里**所有**匹配的节点（`_find_by` 只返回第一个）。
+
+    ⚠️ 名字刻意不叫 `_find_all_by` —— 那个名字在本模块里**已经被占用**了
+    （一个只看 `cls_has`、命中即不下探的旧版本，给聊天页锚点用）。
+    Python 里后定义的同名函数会静默覆盖前面的，这种冲突不会报错、
+    只会在调用时以「参数不对」的形式炸出来，所以从一开始就分开命名。
+
+    ## 为什么必须要有它（这是一个真机事故的根因）
+
+    QQ 登录页上，真正的按钮外面包了一层容器，类名是 `login-btn-wrap` ——
+    **它含有 `login-btn` 这个子串**。`_find_by(cls_has="login-btn")` 先访问父节点、
+    命中即返回，于是永远拿到那个容器（GroupControl）。容器没有默认动作，
+    `DoDefaultAction` 必抛 COMError，表现出来就是「程序不去按登录键、卡在登录页」。
+    要挑出真正的按钮，前提是**先能看见全部候选**。
+    """
+    auto = _auto()
+    win = auto.ControlFromHandle(hwnd)
+    out: list = []
+    stack = [(win, 0)]
+    n = 0
+    while stack and n < 8000 and len(out) < limit:
+        ctrl, d = stack.pop()
+        if d > 26:
+            continue
+        n += 1
+        try:
+            cls = ctrl.ClassName or ""
+            nm = (ctrl.Name or "").strip()
+            hit = (cls_has and cls_has in cls) or (name_eq and nm == name_eq)
+        except Exception:
+            hit = False
+        if hit:
+            out.append(ctrl)
+        # ⚠️ 命中之后**还要继续往下**：真正的按钮正是容器的子节点（wrap > btn）。
+        try:
+            for ch in ctrl.GetChildren():
+                stack.append((ch, d + 1))
+        except Exception:
+            pass
+    return out
+
+
+def _find_login_button(hwnd: int) -> tuple:
+    """挑出「真正的登录按钮」，而不是它外面的容器。
+
+    排序优先级（先满足者胜，从「最像真按钮」往下排）：
+
+      1. 类名**按空格切分后**有一项**恰好**等于 `login-btn`（不是 `login-btn-wrap`）
+      2. 「像个能点的控件」：有 LegacyIAccessible 且类型不是 GroupControl
+      3. 支持 `InvokePattern`
+      4. 支持 `LegacyIAccessiblePattern`
+
+    ⚠️ 第 1 条必须**按 token 比**，不能拿整串 `ClassName` 去 `== "login-btn"`：
+    真按钮的 ClassName 实测是 `q-button q-button--primary q-button--middle login-btn`
+    一整串，整串比较的结果是「谁都不精确命中」，于是胜负全落到后面的条件上 ——
+    真机上就会挑到容器（出现过，由 test_login.py §3b 钉住）。
+
+    把 `clickable` 排在 `invoke` 前面也是有意的：容器完全可能实现 Invoke，
+    但点它没用；「有 Legacy 且不是 GroupControl」才更像一个真的能按的按钮。
+
+    返回 `(ctrl, 候选现场)`；一个都没有时 `(None, [])`。
+
+    候选现场要一路带进结果 JSON —— 登录页只在无人值守的时候存在，
+    事后复盘只能靠这份现场回答「它当时到底看到了什么」。
+    """
+    cands = _collect_by(hwnd, cls_has=LOGIN_BTN_CLASS)
+    for c in _collect_by(hwnd, name_eq="登录"):
+        if not any(c is x for x in cands):
+            cands.append(c)
+    if not cands:
+        return None, []
+    scored = []
+    for c in cands:
+        d = _describe(c)
+        try:
+            pats = _patterns_available(c)
+        except Exception:
+            pats = {}
+        tokens = str(d.get("class") or "").split()
+        exact = 1 if LOGIN_BTN_CLASS in tokens else 0
+        invoke = 1 if pats.get("invoke") else 0
+        # 「像按钮」= 有 Legacy 且不是 GroupControl（容器类型没有默认动作）
+        clickable = 1 if (pats.get("legacy") and d.get("type") != "GroupControl") else 0
+        legacy = 1 if pats.get("legacy") else 0
+        scored.append(((exact, clickable, invoke, legacy), c, d, pats))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1], [{"desc": s[2], "patterns": s[3]} for s in scored]
+
+
 def _describe(ctrl) -> dict:
     try:
         r = ctrl.BoundingRectangle
@@ -437,11 +528,14 @@ def login_state(hwnd: int) -> dict:
     out: dict = {"ok": False, "is_login_page": False, "logged_in": False,
                  "nickname": "", "button": None, "uia": {}, "error": ""}
     try:
-        btn = _find_by(hwnd, cls_has=LOGIN_BTN_CLASS)
-        if btn is None:
-            btn = _find_by(hwnd, name_eq="登录")
+        # 定位必须用 _find_login_button（而不是 _find_by）：登录页上
+        # `login-btn` 是**子串**匹配的陷阱，外层容器 login-btn-wrap 也含这个子串，
+        # _find_by 会命中容器。判据与点击必须用**同一个**元素，否则两处会打架。
+        btn, cands = _find_login_button(hwnd)
         out["is_login_page"] = btn is not None
         out["button"] = _describe(btn) if btn is not None else None
+        if cands:
+            out["button_candidates"] = cands
 
         uia = probe_uia(hwnd)
         out["uia"] = uia
@@ -470,19 +564,25 @@ def do_login(hwnd: int, *, dry_run: bool = False,
 
     ## 顺序
 
-      1. 抓 `IsInvokePatternAvailable` / `IsLegacyIAccessiblePatternAvailable`（只读）
-      2. `dry_run=True` 就在这里返回 —— 先说清楚能不能点，再决定点不点
-      3. 先勾「自动登录」（勾上之后下次冷启动能自己登录，不用再点）
-      4. `Invoke()` 登录按钮；`Invoke` 不可用则退 `LegacyIAccessible.DoDefaultAction()`
+      1. 定位**真正的**登录按钮（`_find_login_button`，避开 `login-btn-wrap` 容器）
+      2. 抓 `IsInvokePatternAvailable` / `IsLegacyIAccessiblePatternAvailable`（只读）
+      3. `dry_run=True` 就在这里返回 —— 先说清楚能不能点，再决定点不点
+      4. 先勾「自动登录」（勾上之后下次冷启动能自己登录，不用再点）
+      5. 按「登录」，三条路依次试，前一条断了就走下一条：
+         ① `InvokePattern.Invoke()`
+         ② `LegacyIAccessible.DoDefaultAction()`
+         ③ 窗口消息点击 `winmsg.click_at()`（不要求元素支持任何 Pattern）
 
     ⚠️ 调用方要清楚一件事：**同一个 QQ 号在两处登录会互相挤下线**。
     所以点这个按钮之前，桌面上那个同号实例应该先退出。
     """
     out: dict = {"ok": False, "dry_run": bool(dry_run), "error": ""}
     try:
-        btn = _find_by(hwnd, cls_has=LOGIN_BTN_CLASS)
-        if btn is None:
-            btn = _find_by(hwnd, name_eq="登录")
+        # 用 _find_login_button 而不是 _find_by：见该函数的说明
+        # （login-btn 是子串匹配的陷阱，会命中 login-btn-wrap 容器）
+        btn, cands = _find_login_button(hwnd)
+        if cands:
+            out["button_candidates"] = cands
         if btn is None:
             out["error"] = ("E-QQ-004 没找到「登录」按钮。可能这个 QQ 不是登录页"
                             "（已经登录了？），或界面结构变了。")
@@ -510,23 +610,53 @@ def do_login(hwnd: int, *, dry_run: bool = False,
                 out["auto_login_error"] = f"{type(exc).__name__}: {exc}"
 
         # --- 按「登录」---
+        # 三条路依次试，前一条断了就走下一条：
+        #   ① InvokePattern —— 最干净，但很多元素不实现
+        #   ② LegacyIAccessible.DoDefaultAction —— 备用
+        #   ③ 窗口消息点击 —— UIA 两条都断时唯一的希望
+        # 真机实测（2026-10-10）：QQ 登录页的按钮外层是 `login-btn-wrap`
+        # （GroupControl），既没有 Invoke，DoDefaultAction 也抛 COMError(-2146233079)。
+        # 窗口消息不要求元素支持任何 Pattern，只要坐标对 —— 所以它能兜住这种情况。
+        out["click_attempts"] = []
+        clicked = ""
         pats = out["patterns"]
         if pats.get("invoke"):
             try:
                 btn.GetPattern(_auto().PatternId.InvokePattern).Invoke()
-                out["clicked_via"] = "InvokePattern"
+                clicked = "InvokePattern"
             except Exception as exc:
-                out["error"] = f"Invoke 失败：{type(exc).__name__}: {exc}"
-        elif pats.get("legacy"):
+                out["click_attempts"].append(
+                    f"InvokePattern: {type(exc).__name__}: {exc}")
+        if not clicked and pats.get("legacy"):
             try:
                 btn.GetLegacyIAccessiblePattern().DoDefaultAction()
-                out["clicked_via"] = "LegacyIAccessible.DoDefaultAction"
+                clicked = "LegacyIAccessible.DoDefaultAction"
             except Exception as exc:
-                out["error"] = f"DoDefaultAction 失败：{type(exc).__name__}: {exc}"
-        else:
-            out["error"] = ("E-QQ-004 这个按钮既不支持 Invoke 也不支持 "
-                            "LegacyIAccessible —— 两条点击路径都断了")
-        out["ok"] = not out["error"]
+                out["click_attempts"].append(
+                    f"DoDefaultAction: {type(exc).__name__}: {exc}")
+        if not clicked:
+            rect = (out.get("button") or {}).get("rect") or []
+            if len(rect) == 4:
+                cx = (int(rect[0]) + int(rect[2])) // 2
+                cy = (int(rect[1]) + int(rect[3])) // 2
+                cl = winmsg.click_at(hwnd, cx, cy)
+                out["click_at"] = cl
+                if cl.get("ok"):
+                    clicked = "WM_LBUTTON(窗口消息)"
+                else:
+                    out["click_attempts"].append(f"click_at: {cl.get('error')}")
+            else:
+                out["click_attempts"].append("click_at: 拿不到按钮矩形，无法换算坐标")
+
+        if clicked:
+            out["clicked_via"] = clicked
+            out["ok"] = True
+            return out
+        # ⚠️ 注意：Invoke 报错时元素**可能已经点中了**（登录页正在被销毁，
+        # Chromium 的 provider 在调用途中失效）。所以这里只是「调用没成功」，
+        # 真正的判据在下一轮界面（_ensure_login 全程以此为准）。
+        out["error"] = ("E-QQ-004 找到「登录」按钮但三条点击路径都没走通："
+                        + "；".join(out["click_attempts"]))
         return out
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -631,6 +761,16 @@ def main() -> int:
     res: dict = {"ok": False, "error": "", "traceback": "",
                  "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     try:
+        # ⚠️ 必须在碰任何窗口之前把 DPI 感知定下来。
+        # 不做这一步时，本进程的 win32 坐标是**系统虚拟化**过的逻辑像素
+        # （实测本机 150% 缩放：物理 2560x1600 → 读到 1707x1067），
+        # 而 UIA 的 BoundingRectangle 永远返回物理像素 —— 两套坐标差 1.5 倍，
+        # 表现为「按 UIA 矩形算出来的点击位置跑到别处去」和「抓图尺寸是 640x424
+        # 而窗口实际 960x636」。
+        # （注：曾经把「抓图全黑」也归因到这里，**是错的** —— 那是渲染进程死了，
+        #  见 winmsg.enable_dpi_awareness 里那段更正。）
+        res["dpi"] = winmsg.enable_dpi_awareness()
+
         # 1. 自报桌面 —— 这是「lpDesktop 真的生效」的唯一可信证据
         res["desktop"] = desktop.current_name()
         res["pid"] = os.getpid()
@@ -654,6 +794,15 @@ def main() -> int:
         if a.png:
             cap = winmsg.capture(main["hwnd"])
             res["capture"] = {k: v for k, v in cap.items() if k != "buf"}
+            if cap.get("blank"):
+                # 单色图 = 没抓到内容（真实界面不可能只有一种颜色）。
+                # 说清楚「这不是坐标系问题」，免得下一个人沿着 DPI 那条路白查一遍
+                # （2026-10-10 真踩过）。
+                res["capture_note"] = (
+                    "抓到的是一张单色图（只有 1 种颜色，PrintWindow 没取到内容，"
+                    f"printwindow_ret={cap.get('printwindow_ret')}）——"
+                    "多半是这个窗口已经没有可渲染的内容（渲染进程退出/窗口正在销毁），"
+                    "不是坐标算错了。")
             if cap.get("ok"):
                 saved = winmsg.grab_any(main["hwnd"], a.png)
                 res["saved"] = saved

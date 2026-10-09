@@ -25,6 +25,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -232,6 +233,66 @@ def test_continuous(cfg: dict) -> None:
           not s._book["private:小明"]["cont"]["active"])
     check("未激活时 refresh 不起作用",
           s.refresh_continuous("private:小明", now) is False)
+
+
+# ---------------------------------------------------------- 4b. 连续对话常开
+def test_continuous_forever(cfg: dict) -> None:
+    """
+    `timeout_seconds = 0`（或负数）= **常开**：一旦激活就一直保持，
+    只有显式 `.ai reset` / 关掉总开关才退出。用途是「打开对话功能后就不想再管」。
+
+    ## 为什么这一节必须存在（这是个已经踩过的坑）
+
+    仓库里既有惯例是「取不到就用 `or <缺省>` 兜底」。而 `0` 在 Python 里是**假值**，
+    于是 `cfg["continuous"].get("timeout_seconds") or 1800` 会把用户**认真填的 0**
+    悄悄改回 1800 —— 配置看上去生效了，行为却完全没有。这类"假承诺"不会报错，
+    只在真机上表现为「设了常开，30 分钟后它自己退出了」。
+
+    所以两层都要钉：
+      · 纯函数层 —— `cont_window()` 不许吞 0，`cont_expired()` 不许把 0 当"立刻过期"
+      · 状态机层 —— 0 / 负数在 `is_continuous()` 里真的永不超时
+    """
+    print("\n[4b] 连续对话「常开」（timeout_seconds = 0 / 负数）")
+
+    # --- 纯函数层 ---
+    check("cont_window(0) == 0（不被 `or 1800` 吞掉）",
+          A.cont_window({"timeout_seconds": 0}) == 0.0)
+    check("cont_window(-1) == -1（负数原样透传）",
+          A.cont_window({"timeout_seconds": -1}) == -1.0)
+    check("cont_window(600) == 600", A.cont_window({"timeout_seconds": 600}) == 600.0)
+    check("cont_window({}) 回落 1800", A.cont_window({}) == 1800.0)
+    check("cont_window(None) 回落 1800", A.cont_window({"timeout_seconds": None}) == 1800.0)
+    check("cont_window('abc') 回落 1800（坏配置不炸）",
+          A.cont_window({"timeout_seconds": "abc"}) == 1800.0)
+
+    check("cont_expired(0, ...) 恒不过期", A.cont_expired(0, 0.0, 10 ** 9) is False)
+    check("cont_expired(-5, ...) 恒不过期", A.cont_expired(-5.0, 0.0, 10 ** 9) is False)
+    check("cont_expired(600, last=0, now=600) 未到期",
+          A.cont_expired(600.0, 0.0, 600.0) is False)
+    check("cont_expired(600, last=0, now=601) 到期",
+          A.cont_expired(600.0, 0.0, 601.0) is True)
+
+    # --- 状态机层 ---
+    s = A.ConversationStore(cfg)
+    now = time.time()
+    s.activate_continuous("private:小明", now)
+    check("常开：一亿秒之后仍然是连续状态",
+          s.is_continuous("private:小明", now + 10 ** 9, 0.0) is True)
+    check("常开：没有被自动 deactivate",
+          s._book["private:小明"]["cont"]["active"] is True)
+    check("常开：负数同样不超时",
+          s.is_continuous("private:小明", now + 10 ** 9, -1.0) is True)
+
+    # --- 配置层最后一个会吞 0 的点 ---
+    # `_cont_timeout()` 是主循环真正用的那个取值点，必须单独钉：
+    # 它以前写作 `... .get("timeout_seconds") or 1800`，0 到不了状态机。
+    fake = types.SimpleNamespace(cfg={"continuous": {"enabled": True,
+                                                     "timeout_seconds": 0}})
+    check("_cont_timeout() 读出 0（不许回落成 1800）",
+          A.Agent._cont_timeout(fake) == 0.0, f"got={A.Agent._cont_timeout(fake)!r}")
+    fake2 = types.SimpleNamespace(cfg={"continuous": {"enabled": True}})
+    check("_cont_timeout() 未配时回落 1800", A.Agent._cont_timeout(fake2) == 1800.0)
+
 
 
 # ------------------------------------------------------------------ 5. 端到端 dry-run
@@ -504,6 +565,7 @@ def main() -> int:
         test_teach_reorder(cfg)
         test_persist(cfg)
         test_continuous(cfg)
+        test_continuous_forever(cfg)
         test_end_to_end(cfg)
         test_command_parse(cfg)
         test_command_reset(cfg, tmpdir)

@@ -295,9 +295,106 @@ def _conv_file_name(scope: str) -> str:
     return name + ".json"
 
 
+# ---------------- 长期记忆（只读统计 + 连带删除）----------------
+# 壳进程**不能 import agent**（理由见 settings.agent_defaults：uiautomation 的 COM
+# 单例会被建在错误的公寓上）。所以这里自己读 state/memory/ 下的 json ——
+# 档案格式是公开的（agent.LongTermMemory._blank 里的那几个键），
+# 两边改动要同步；test_memory.py 会同时核对两边的字段名。
+
+def _memory_dir() -> str:
+    """长期记忆目录。解析逻辑与 agent.LongTermMemory.__init__ 保持一致。"""
+    try:
+        d = str((settings.load_merged().get("memory") or {}).get("dir")
+                or "state/memory").strip()
+    except Exception:
+        d = "state/memory"
+    if not d:
+        d = "state/memory"
+    return d if os.path.isabs(d) else os.path.join(paths.DATA_DIR, d)
+
+
+def _memory_file_name(scope: str) -> str:
+    """记忆档案与对应会话档案**同名**（agent 侧 scope_slug 是唯一实现）。
+
+    同名不是巧合：界面删会话时要能把两份一起找出来，共用规则才不会漏。
+    """
+    return _conv_file_name(scope)
+
+
+def _tok(text: str) -> int:
+    """与 agent.token_estimate 同一口径（CJK 每字 1，其余每 4 字符 1）。
+    只是给界面显示水位，不参与任何判断，所以容得下这点重复。"""
+    cjk = other = 0
+    for ch in text or "":
+        if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
+            cjk += 1
+        else:
+            other += 1
+    return cjk + (other + 3) // 4
+
+
+def memory_stats(scope: str, mdir: str = "") -> dict:
+    """某个会话的长期记忆概览。没有档案时 exists=False（界面上显示「—」）。"""
+    mdir = mdir or _memory_dir()
+    row = {"exists": False, "events": 0, "tokens": 0,
+           "has_digest": False, "last_archive_date": "", "journal_days": 0}
+    fp = os.path.join(mdir, _memory_file_name(scope))
+    if os.path.isfile(fp):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                events = [e for e in (data.get("events") or []) if isinstance(e, dict)]
+                dig = data.get("digest") if isinstance(data.get("digest"), dict) else {}
+                dig_text = str(dig.get("text") or "")
+                row.update(
+                    exists=True,
+                    events=len(events),
+                    tokens=_tok(dig_text) + sum(
+                        _tok(str(e.get("text") or "")) + 8 for e in events),
+                    has_digest=bool(dig_text.strip()),
+                    last_archive_date=str(data.get("last_archive_date") or ""))
+        except Exception:
+            row["broken"] = True
+    # 还没归档的当日流水：界面上要能看出「有内容但还没压成记忆」
+    jd = os.path.join(mdir, "journal", _memory_file_name(scope)[:-len(".json")])
+    try:
+        row["journal_days"] = len([n for n in os.listdir(jd) if n.endswith(".jsonl")])
+    except OSError:
+        pass
+    return row
+
+
+def _delete_memory(scope: str) -> dict:
+    """连带删掉长期记忆档案 + 未归档流水。返回 {deleted, files, error}。"""
+    mdir = _memory_dir()
+    files = 0
+    fp = os.path.join(mdir, _memory_file_name(scope))
+    if os.path.isfile(fp):
+        try:
+            os.remove(fp)
+            files += 1
+        except OSError as exc:
+            return {"deleted": False, "files": files, "error": f"{fp}：{exc}"}
+    jd = os.path.join(mdir, "journal", _memory_file_name(scope)[:-len(".json")])
+    if os.path.isdir(jd):
+        for name in os.listdir(jd):
+            try:
+                os.remove(os.path.join(jd, name))
+                files += 1
+            except OSError:
+                pass
+        try:
+            os.rmdir(jd)
+        except OSError:
+            pass
+    return {"deleted": True, "files": files, "error": ""}
+
+
 def list_conversations() -> dict:
     """读会话档案目录，给界面列表用。坏文件标 broken（界面上可删）。"""
     cdir = _conversations_dir()
+    mdir = _memory_dir()
     try:
         names = sorted(os.listdir(cdir))
     except OSError:
@@ -322,9 +419,10 @@ def list_conversations() -> dict:
                     if isinstance(cont, dict) else False
         except Exception:
             row["broken"] = True
+        row["memory"] = memory_stats(row["scope"], mdir)
         items.append(row)
     items.sort(key=lambda r: -r["used_at"])
-    return {"dir": cdir, "items": items}
+    return {"dir": cdir, "memory_dir": mdir, "items": items}
 
 
 # ============================================================ 请求处理
@@ -805,16 +903,39 @@ class Handler(BaseHTTPRequestHandler):
                     "E-WEB-004", "scope 含非法路径字符",
                     {"scope": scope}))
             if not os.path.isfile(fp):
+                # 会话档案可能已经删过，但长期记忆还在（上次删除时还没这功能）。
+                # 不能直接返回「不存在」就完事 —— 否则记忆会永远删不掉。
+                mem = _delete_memory(scope)
                 return self._json({"ok": True, "deleted": False,
-                                   "note": "档案不存在（可能已删过）"})
+                                   "memory": mem,
+                                   "note": "档案不存在（可能已删过）"
+                                           + ("；已顺带清掉长期记忆"
+                                              if mem.get("files") else "")})
             try:
                 os.remove(fp)
             except OSError as exc:
                 return self._json(E.envelope(
                     "E-WEB-005", f"删除失败：{exc}",
                     {"文件": fp}))
-            BUS.emit(f"已删除会话档案：{scope}", tag="UI", source="ui")
-            return self._json({"ok": True, "deleted": True, "scope": scope})
+            # 长期记忆是**连带**删的：只删上下文而不删记忆，用户下次说话
+            # 它照样能召回往事，看起来就是「删了没生效」。
+            mem = _delete_memory(scope)
+            BUS.emit(f"已删除会话档案：{scope}"
+                     + (f"（连同长期记忆 {mem['files']} 个文件）" if mem.get("files") else ""),
+                     tag="UI", source="ui")
+            if mem.get("error"):
+                # 档案删掉了、记忆没删掉：这是**部分成功**，必须显式报出来，
+                # 不能让界面显示成一切正常（E-WEB-006）。
+                env = E.envelope("E-WEB-006",
+                                 f"长期记忆删除失败：{mem['error']}",
+                                 {"scope": scope, "记忆目录": _memory_dir()})
+                BUS.emit(f"会话档案已删，但长期记忆删除失败：{mem['error']}"
+                         f"（{env['hint']}）", tag="ERR", source="ui")
+                return self._json({"ok": True, "deleted": True, "scope": scope,
+                                   "memory": mem, "warning": env["detail"],
+                                   "code": "E-WEB-006", "hint": env["hint"]})
+            return self._json({"ok": True, "deleted": True, "scope": scope,
+                               "memory": mem})
 
         return self._json(E.envelope("E-WEB-003", f"未知接口 {route}"), 404)
 

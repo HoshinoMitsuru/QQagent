@@ -1567,7 +1567,7 @@ $("#btnSave").addEventListener("click", async () => {
 $("#btnReload").addEventListener("click", () => { loadSettings(); toast("已重新读取磁盘上的配置"); });
 $("#btnReset").addEventListener("click", async () => {
   const ok = await confirmDialog({ title: "恢复默认配置", danger: true, confirmText: "恢复",
-    body: "config.json 会被替换成内置默认值（会先自动备份）。API Key 不受影响。" });
+    body: "config.json 会被替换成内置默认值（会先自动备份）。API Key 会保留。" });
   if (ok) { const r = await api("/api/settings/reset", {}); toast(r.ok ? "已恢复默认值" : "失败", r.ok ? "ok" : "err"); loadSettings(); refresh(); }
 });
 $("#btnOpenData").addEventListener("click", () => api("/api/system/open", { target: "data" }));

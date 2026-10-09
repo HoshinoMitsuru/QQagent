@@ -96,8 +96,11 @@ def main():
         print(f'[check-sensitive] 命中 {len(rows)} 处疑似敏感信息，提交被阻止：')
         for f, ln, masked in rows:
             print(f'  {f}:{ln}  {masked}')
-        print('处理：真实值移入 gitignored 本地文件（config.json / secrets.local.json），'
-              '代码与文档用占位符；误报则从本地词表移除该词。')
+        print('处理：真实值移入 gitignored 本地文件，代码与文档用占位符 ——')
+        print('      密钥类 → config.json / secrets.local.json（各树 README「密钥怎么放」）；')
+        print('      真名 / 昵称 / 备注名 / 群名类 → .workbuddy/memory-local/（对照表在该目录，已 gitignore）；')
+        print('      QQ 号 → 换成假号段 100000001…100000006（映射见同一份对照表），注释里也一样。')
+        print('      误报：把该词从 tools/sensitive-words.local.txt 删掉或前面加 #。')
         return 1
     print('[check-sensitive] 通过')
     return 0

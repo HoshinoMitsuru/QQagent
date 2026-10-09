@@ -15,7 +15,7 @@ agent.py 原来的会话主键是**昵称**（`private:<昵称>`）。昵称可�
 | UIA 通用属性（AriaRole / PositionInSet / SizeOfSet / Level） | ❌ | Chromium 对 group 角色一律填 `group` 与 0，无任何业务信息 |
 | 全 UIA 树（192 节点）扫 AutomationId | ❌ | 只有 5 个：RenderWidget / RootWebArea / drag-area / app / loading |
 | 全树扫「5~12 位数字」文本 | ❌ | 0 个 |
-| **资料卡（独立顶层窗口 `资料卡` / class=`buddy-profile`）** | ✅ | `buddy-profile__header-uid` → TextControl `'QQ 3302676083'` |
+| **资料卡（独立顶层窗口 `资料卡` / class=`buddy-profile`）** | ✅ | `buddy-profile__header-uid` → TextControl `'QQ 100000001'` |
 | CDP（`--remote-debugging-port=9222`） | ⏳ 未开启 | 端口未监听；需重启 QQ 加参数 |
 
 **结论：拿 QQ 号的唯一现成通路是「打开资料卡」。**
@@ -72,7 +72,7 @@ CLS_CARD_VALUE = "buddy-profile__details-item-value"
 CLS_CARD_REMARK_BTN = "remark__content"
 
 CARD_WINDOW_TITLE = "资料卡"
-# 'QQ 3302676083' / '群号 123456' / 纯数字
+# 'QQ 100000001' / '群号 123456' / 纯数字
 RE_UID_TEXT = re.compile(r"(?:QQ|群|群号|QQ号)\s*[:：]?\s*(\d{5,12})")
 RE_BARE_NUM = re.compile(r"^(\d{5,12})$")
 # 未读徽标：'3条未读' / '99+条未读'
@@ -105,7 +105,7 @@ class SessionCard:
     """
     index: int
     display_name: str
-    preview_texts: tuple = ()  # 预览文本（已剔掉时间 token），如 ('光みつる：', '在吗')
+    preview_texts: tuple = ()  # 预览文本（已剔掉时间 token），如 ('测试备注C：', '在吗')
     ts: str = ""               # 时间戳 token，仅用于日志展示，**不参与指纹**
     selected: bool = False
     rect: tuple = (0, 0, 0, 0)
@@ -330,7 +330,7 @@ def list_sessions(win) -> list[SessionCard]:
               ├ item__avatar
               └ item__info
                   ├ avatar                      (GroupControl，无文本)
-                  ├ TextControl   '光みつる'      ← 显示名
+                  ├ TextControl   '测试备注C'      ← 显示名
                   ├ secondary-info              ← **空的**，没有文本子节点
                   ├ summary-main                → '13:40' '测试'
                   └ GroupControl name='1条未读'   ← 有未读时才出现
@@ -457,7 +457,7 @@ def read_card(card_win) -> Optional[UidInfo]:
           ├ GroupControl   'buddy-profile__header-name-wrap'
           │   └ ButtonControl '查看XXX的个人主页'
           ├ GroupControl   'buddy-profile__header-uid'      ← 这里
-          │   └ TextControl 'QQ 3302676083'
+          │   └ TextControl 'QQ 100000001'
           └ ... 备注 / 签名 / 所在地
     """
     ctrl = A.auto.ControlFromHandle(card_win["hwnd"])
@@ -474,8 +474,8 @@ def read_card(card_win) -> Optional[UidInfo]:
     member_count = 0
 
     # 1) QQ 号 / 群号
-    #    - 私聊卡片：TextControl 'QQ 3302676083'（带前缀）
-    #    - 群聊卡片：TextControl '1098451742' + ' (7人)'（**裸数字**，两个独立节点）
+    #    - 私聊卡片：TextControl 'QQ 100000001'（带前缀）
+    #    - 群聊卡片：TextControl '100000002' + ' (7人)'（**裸数字**，两个独立节点）
     #    所以既要从拼接串里找前缀，也要逐个文本找纯数字。
     uid_node = None
     for node, _d in A.iter_bfs(root, 12, limit=2000):

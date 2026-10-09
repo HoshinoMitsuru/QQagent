@@ -1,7 +1,7 @@
 {
   "_说明": "PC 端 QQ AI 代理（路线A）配置文件。所有字段都有内置默认值，缺项不影响运行。",
-  "_密钥说明": "api_key 留空时，会尝试从 api_key_file 读取（相对路径按本目录解析）；若该文件是 JSON，按 api_key_json_keys 顺序找第一个非空值。secrets.local.json 已被 .gitignore 排除，密钥不会进仓库。",
-  "_警示": "不要把 api_key 直接写在这一行下面的 llm.api_key 里 —— 本仓库会推到公开 Gitee。",
+  "_密钥说明": "2026-09-28 起密钥就只有这一处：本文件的 llm.api_key（唯一主存储）。界面里填的 Key 直接写进本文件。本文件已被 .gitignore 排除（pc-agent-demo*/config.json），不会进仓库；仓库里保留的是 config.example.json 这个模板。llm.api_key 留空时会回退到 api_key_file（默认 secrets.local.json，旧配置的只读后备），按 api_key_json_keys 顺序找第一个非空值。",
+  "_警示": "本文件含密钥，必须保持被 .gitignore 覆盖。提交前用 git check-ignore -v config.json 确认，并跑一遍 tools/check_sensitive.py。",
 
   "llm": {
     "api_base": "https://api.deepseek.com",
@@ -70,6 +70,21 @@
     "file": "state/conversations.json",
     "save_interval_seconds": 3.0,
     "max_scopes": 50
+  },
+
+  "_memory说明": "长期记忆：上下文只留最近 chat.max_history_entries 条，更早的会被裁掉；这里把『值得长期记住的东西』按天压成摘要另存一份。跨零点自动归档（或在启动时补算漏掉的日期），生成回复时按当前话题召回 top-k 条。只产摘要在 state/memory/ 下，同样被 .gitignore 排除。",
+  "memory": {
+    "enabled": true,
+    "dir": "state/memory",
+    "_容量": "token 口径。超过时把最老的一批事件『先并入画像、再删除』（压缩而非丢弃），并报一次 E-MEM-002。",
+    "capacity_tokens": 10000,
+    "_画像": "滚动画像（这个人是谁、偏好、重要事件）。每次生成回复都会带上，所以它直接等于每条回复的固定成本。",
+    "digest_max_tokens": 1500,
+    "recall_max_items": 5,
+    "archive_hour": 0,
+    "catch_up_on_start": true,
+    "summarize": true,
+    "model": ""
   },
 
   "_identity说明": "会话主键用 QQ 号（state/uid-map.json 缓存）而不是昵称。首次遇到某个会话需要『打开资料卡取号』，会抢前台一次；之后只读缓存。取号命令：python qqid.py --enroll-all",

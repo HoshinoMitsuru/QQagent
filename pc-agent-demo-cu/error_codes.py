@@ -369,10 +369,10 @@ _add(
 
     # ============================================================ 模型接入
     _e("E-LLM-001", "error", "没有可用的 API Key",
-       ["config.json 的 llm.api_key 为空，且 secrets.local.json 里也没有",
+       ["config.json 的 llm.api_key 为空，且 api_key_file（后备）指向的文件里也没有",
         "api_key_file 指向的文件不存在"],
        ["在界面「模型接入 → API Key」里填一次，保存",
-        "Key 只会写进 secrets.local.json（不进仓库、不进截图）"]),
+        "Key 只会写进 config.json（该文件已被 .gitignore 排除，不会进仓库、不会进截图）"]),
     _e("E-LLM-002", "error", "连不上模型接口",
        ["网络不通 / DNS 解析失败",
         "公司或虚拟机网络需要代理",

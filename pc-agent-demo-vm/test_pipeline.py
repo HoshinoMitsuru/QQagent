@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import time
 
@@ -69,6 +70,11 @@ def main() -> int:
     cfg.setdefault("discovery", {})["state_file"] = "state/_pipeline_rotation_test.json"
     ROT_TEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "state", "_pipeline_rotation_test.json")
+    # 长期记忆同样隔离：History.push 会往 memory.dir 写当日流水，
+    # 走默认目录就会把彩排里造出来的假对话混进真实记忆里。
+    cfg.setdefault("memory", {})["dir"] = "state/_pipeline_memory"
+    MEM_TEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "state", "_pipeline_memory")
 
     if os.path.exists(TEST_STATE):
         os.remove(TEST_STATE)
@@ -202,6 +208,9 @@ def main() -> int:
             if os.path.exists(p):
                 os.remove(p)
                 print(f"\n[i] 已清理测试状态文件 {os.path.basename(p)}")
+        if os.path.isdir(MEM_TEST):
+            shutil.rmtree(MEM_TEST, ignore_errors=True)
+            print(f"\n[i] 已清理测试记忆目录 {os.path.basename(MEM_TEST)}")
 
     print("\n" + "=" * 74)
     print(f"结果：{OK} 通过 / {FAIL} 失败")

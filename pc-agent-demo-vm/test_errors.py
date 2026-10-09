@@ -1298,7 +1298,9 @@ def t18_mask_never_overwrites_key():
 
         ① `_is_mask()` 的判据错（只认「全是 •」），而 `_mask()` 生成的是
            `sk-1••••••••ghij`（首尾各留 4 位）→ 掩码被判成「用户真的填了 key」
-        ② 于是保存设置时把掩码写进 secrets.local.json → **真实密钥被覆盖**（数据丢失）
+        ② 于是保存设置时把掩码写进密钥文件 → **真实密钥被覆盖**（数据丢失）
+           （当时那个文件是 secrets.local.json；2026-09-28 起密钥统一进 config.json，
+            同样的防线原样保留 —— 见下面 ② 与 ②-b 两条来源都守着这件事）
         ③ 之后调用模型用这个假密钥 → `UnicodeEncodeError: latin-1 position 11-18`
            （`Bearer ` 占 7 字符，正好对上那 8 个 •）
         ④ 而我的兜底把这个编码错误报成「E-LLM-002 连不上模型接口」→ **假诊断**
@@ -1398,7 +1400,7 @@ def t19_forget_is_thorough():
     现场事故：用户在界面上清了上下文、重启进程，但 22:31 的回复仍然在聊清除前
     22:16 的马克思话题。查下来有两条通道：
 
-        ① `forget` 只认**会话键**（`private:3302676083`），而界面写的是
+        ① `forget` 只认**会话键**（`private:100000001`），而界面写的是
            「会话名或片段」→ 用户输入昵称**什么都清不掉**，却以为清掉了
         ② 基于旧上下文生成、还没发出的回复存在 `pending-replies.json` 里，
            `forget` 不管它 → 进程重启时恢复并**照原样发出去**
@@ -1594,12 +1596,12 @@ def t20_livelock_and_false_alarm():
     a2 = agent.Agent(agent.load_config(), dry_run=True)
     m_self = agent.Message(sender="Susurrus-本人", content="我刚发的话",
                            direction="me", key="aid:1", dir_src="class")
-    _w, why_self = a2._admit(m_self, "group:963650468")
+    _w, why_self = a2._admit(m_self, "group:100000003")
     R.check("有 class 证据的『me』→ 原因标记为「自己发的消息」",
             why_self.startswith(agent.SKIP_SELF), why_self[:80])
     m_guess = agent.Message(sender="某人", content="可能是对方的话",
                             direction="me", key="aid:2", dir_src="position")
-    _w2, why_guess = a2._admit(m_guess, "group:963650468")
+    _w2, why_guess = a2._admit(m_guess, "group:100000003")
     R.check("靠位置猜出来的『me』→ 仍然标为可疑（保留报警能力）",
             "方向判定为" in why_guess and agent.SKIP_SELF not in why_guess, why_guess[:80])
     m_nick = agent.Message(sender="我", content="x", direction="me", key="aid:3", dir_src="nick")

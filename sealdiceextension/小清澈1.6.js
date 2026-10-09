@@ -396,7 +396,7 @@ ext.onNotCommandReceived = function (ctx, msg) {
             // CQ码格式：提取被@的QQ号，判断是否为小清澈或自己
             const atQq = cqAtMatch[1];
             // 请根据实际情况修改小清澈的QQ号
-            const claritasQq = "3567509079"; 
+            const claritasQq = "100000004"; 
             isAtSelf = (atQq === claritasQq) || (atQq === userId);
         } else if (textAtMatch) {
             // 纯文本格式：保持原有昵称匹配逻辑

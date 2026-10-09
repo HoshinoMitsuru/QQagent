@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-settings.py —— 配置的三文件模型
+settings.py —— 配置的文件模型
 
-刻意拆成三个文件，各管一件事，谁都不越界：
+故意拆成三个文件，各管一件事，谁都不越界：
 
-    config.json        agent.py 的全部行为参数（结构必须和 agent.DEFAULTS 对齐）
-    secrets.local.json API key。单独放，因为它不该进仓库、也不该出现在截图里
+    config.json        agent.py 的全部行为参数 + **API Key（唯一主存储）**
+    secrets.local.json 旧配置的 Key 文件，**只读后备**（resolve_api_key 仍读它，本模块不再写）
     app-settings.json  exe 壳自己的设置（QQ 路径、端口、自启…）。agent.py 根本不读它
 
-为什么 key 不写进 config.json：那个文件的历史约定就是「可以公开」，
-真把 key 写进去，迟早被谁复制粘贴出去。UI 里输入 key 只会落到 secrets.local.json。
+2026-09-28 起密钥收拢进 config.json：拆成两处会让「这把 key 到底在哪」变成每次都要想一遍的
+索引问题，而 resolve_api_key 又同时认两处、谁覆盖谁全靠读代码。收拢后只有一个答案。
+代价是「config 里明文躺着 key」，所以安全不变量换成两条，两条都必须成立：
+
+    ① config.json 必须被 .gitignore 覆盖（本仓库会推到公开 Gitee）
+    ② 接口 / 状态只回掩码，绝不吐明文
 
 保存时用「读原文件 → 只覆盖我们管的那些路径 → 写回」的策略，而不是整体重写：
 config.json 里那些 `_说明` 注释是给人看的，整体重写会把它们全部抹掉。
@@ -17,6 +21,7 @@ config.json 里那些 `_说明` 注释是给人看的，整体重写会把它们
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -28,7 +33,7 @@ from . import paths
 
 # ---------------------------------------------------------------- 字段声明
 # type: text | password | number | bool | select | textarea | tags
-# secret=True 的字段写入 secrets.local.json，其余写入 config.json
+# secret=True 的字段（API Key）同样写入 config.json —— 只是接口侧永远只回掩码
 
 
 def _f(path: str, label: str, ftype: str, group: str, default: Any,
@@ -47,6 +52,7 @@ GROUPS = [
     {"id": "behavior", "title": "对话行为", "desc": "谁会被回、回多长、以及非文本消息怎么处理。"},
     {"id": "rhythm", "title": "节奏与聚合", "desc": "对方连发多条时合并成一次调用，避免刷屏。"},
     {"id": "commands", "title": "对话内指令", "desc": "在 QQ 里以 .ai 开头下指令。指令本身不会转发给模型，也不会写进上下文。"},
+    {"id": "memory", "title": "长期记忆", "desc": "每日对话自动归档成长期记忆，聊天时按需召回。上下文只留最近若干条，更早的内容靠它记住。"},
     {"id": "risk", "title": "风控与排队", "desc": "决定能同时服务几个会话。改大之前先读并发评估文档。"},
     {"id": "discovery", "title": "多会话发现", "desc": "扫会话列表找新消息。这是「降级方案」的核心开关。"},
     {"id": "foreground", "title": "前台与稳定性", "desc": "关于抢前台、OCR 兜底、方向判定的取舍。"},
@@ -57,7 +63,7 @@ FIELDS: list[dict] = [
     _f("llm.api_base", "接口地址", "text", "model", "https://api.deepseek.com",
        "OpenAI 兼容的 base_url。DeepSeek 官方是 https://api.deepseek.com，不要带 /v1 后缀之外的路径。"),
     _f("llm.api_key", "API Key", "password", "model", "",
-       "只保存在 secrets.local.json，不进仓库。", secret=True),
+       "写进 config.json（该文件被 .gitignore 排除，不进仓库）；界面回显永远是掩码。", secret=True),
     _f("llm.model", "模型名", "text", "model", "deepseek-flash",
        "如 deepseek-flash / deepseek-chat / gpt-4o-mini / qwen-plus。"),
     _f("llm.temperature", "温度", "number", "model", 1.1,
@@ -134,6 +140,34 @@ FIELDS: list[dict] = [
     _f("commands.prefixes", "指令前缀", "tags", "commands",
        [".ai", "。ai", "/ai", ".aichat"],
        "回车分隔。前缀后必须跟空格或冒号，所以 `.aichat` 不会被 `.ai` 抢走。", advanced=True),
+
+    # -------------------------------------------------- 长期记忆
+    _f("memory.enabled", "启用长期记忆", "bool", "memory", True,
+       "关掉之后不再记录、也不再召回；已经攒下的档案会留在磁盘上，重新打开就能继续用。"),
+    _f("memory.capacity_tokens", "记忆容量（token）", "number", "memory", 10000,
+       "一个会话的长期记忆最多留这么多。超出时把最老的一批事件**先并入画像、再删除**，"
+       "不是直接丢掉。10000 ≈ 1.5 万汉字，够记半年到一年的关键事。",
+       step=1000, minimum=300, maximum=200000),
+    _f("memory.digest_max_tokens", "画像篇幅上限（token）", "number", "memory", 1500,
+       "滚动画像（这个人是谁、偏好、重要事件）。每次生成回复都会带上它，"
+       "所以别写太大 —— 这一项直接等于每条回复的固定成本。",
+       step=100, minimum=100, maximum=8000),
+    _f("memory.recall_max_items", "每次召回条数", "number", "memory", 5,
+       "按当前这句话的线索，从往事里挑几条最相关的带上。0 = 只带画像、不召回往事。",
+       step=1, minimum=0, maximum=20),
+    _f("memory.archive_hour", "归档时点（小时）", "number", "memory", 0,
+       "每天这个点之后才把「昨天」的对话压成记忆。0 = 过了零点就归档。",
+       step=1, minimum=0, maximum=23, advanced=True),
+    _f("memory.catch_up_on_start", "启动时补归档", "bool", "memory", True,
+       "关机几天再开机，把之前漏掉的日期一起补上。"),
+    _f("memory.summarize", "用模型做摘要", "bool", "memory", True,
+       "关掉就退化成原文截断存档：更省调用，但内容几乎没法按话题检索。"),
+    _f("memory.model", "归档用的模型", "text", "memory", "",
+       "留空 = 跟随上面的「模型名」。想省钱可以指定更便宜的那个，只影响归档，不影响正常回复。",
+       placeholder="(跟随模型接入)", advanced=True),
+    _f("memory.dir", "档案目录", "text", "memory", "state/memory",
+       "相对路径按数据目录解析。删掉里面某个 <会话>.json 就等于让那个会话失去长期记忆。",
+       advanced=True),
 
     # -------------------------------------------------- 风控与排队
     _f("queue.max_replies_per_minute", "每分钟最多回复", "number", "risk", 12,
@@ -363,6 +397,9 @@ _LOCAL_DEFAULTS = {
                  "unknown_hint": "这条指令还没移植到 PC 端，暂时只支持 .ai reset / .ai help。"},
     "persist": {"enabled": True, "file": "state/conversations.json",
                 "save_interval_seconds": 3.0, "max_scopes": 50},
+    "memory": {"enabled": True, "dir": "state/memory", "capacity_tokens": 10000,
+               "digest_max_tokens": 1500, "recall_max_items": 5, "archive_hour": 0,
+               "catch_up_on_start": True, "summarize": True, "model": ""},
     "identity": {"enabled": True, "store": "state/uid-map.json",
                  "enroll_on_demand": True, "require_qq_uin": False},
     "queue": {"enabled": True, "max_replies_per_minute": 12, "min_interval_seconds": 5.0,
@@ -400,7 +437,7 @@ def ensure_config_file() -> bool:
     paths.ensure_dirs()
     template = dict(agent_defaults())
     template["_说明"] = "由 QQAgent 界面生成。可以直接编辑，也可以在界面里改；界面保存时不会丢掉本文件的注释键。"
-    template["_密钥说明"] = "api_key 留空时会去 api_key_file（secrets.local.json）里找。界面里填的 Key 只写那个文件。"
+    template["_密钥说明"] = "界面里填的 Key 写进本文件（唯一主存储），本文件已被 .gitignore 排除。api_key 为空时会回退到 api_key_file（默认 secrets.local.json，旧配置的只读后备）。"
     _atomic_write_json(paths.CONFIG_PATH, template)
     return True
 
@@ -462,7 +499,7 @@ def resolve_api_key_display() -> dict:
     sec = _read_json(paths.SECRETS_PATH)
     key = ((sec.get("llm") or {}).get("api_key") or "").strip()
     if key:
-        return {"present": True, "source": "secrets.local.json",
+        return {"present": True, "source": "secrets.local.json（旧配置的只读后备）",
                 "masked": _mask(key)}
     return {"present": False, "source": "", "masked": ""}
 
@@ -562,7 +599,8 @@ def validate(payload: dict) -> dict:
     # 已配置的密钥如果本身是掩码，说明它被写坏过（历史 bug：掩码被当成真密钥存盘）。
     # 这种情况下模型**一定调不通**，而且报出来的是编码错误（看起来像网络问题）。
     # 在这里直接点破，比让用户去猜强得多。
-    for label, stored in (("secrets.local.json", sec_key), ("config.json 内联 api_key", inline_key)):
+    for label, stored in (("config.json 的 llm.api_key", inline_key),
+                          ("secrets.local.json（旧配置后备）", sec_key)):
         if stored and looks_like_mask(stored):
             add(errors, "E-LLM-011",
                 f"{label} 里存的**不是真密钥，而是界面上的掩码**（{_mask(stored)}）—— "
@@ -685,7 +723,15 @@ def save(payload: dict) -> dict:
 def reset_to_defaults() -> dict:
     backup = backup_config()
     paths.ensure_dirs()
-    template = dict(agent_defaults())
+    # 必须 deepcopy：agent_defaults() 返回的是模块级的 _LOCAL_DEFAULTS 本体，
+    # 浅拷贝之后任何 _set_path 都会写进那份全局默认值里（下一个新装用户就带着别人的配置）。
+    template = copy.deepcopy(agent_defaults())
     template["_说明"] = "已恢复到内置默认值。"
+    # 2026-09-28 起密钥就住在 config.json 里，而本函数把 config.json 整份换掉 ——
+    # 不特意捞一把的话，用户点一次「恢复默认」就得重新粘一遍 Key，
+    # 而界面上的确认文案承诺的是「API Key 不受影响」。
+    kept = (((_read_json(paths.CONFIG_PATH).get("llm") or {}).get("api_key")) or "").strip()
+    if kept and not _is_mask(kept):
+        _set_path(template, "llm.api_key", kept)
     _atomic_write_json(paths.CONFIG_PATH, template)
-    return {"ok": True, "backup": backup}
+    return {"ok": True, "backup": backup, "kept_api_key": bool(kept)}

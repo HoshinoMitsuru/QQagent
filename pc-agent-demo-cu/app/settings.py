@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-settings.py —— 配置的三文件模型
+settings.py —— 配置的文件模型
 
-刻意拆成三个文件，各管一件事，谁都不越界：
+故意拆成三个文件，各管一件事，谁都不越界：
 
-    config.json        agent.py 的全部行为参数（结构必须和 agent.DEFAULTS 对齐）
-    secrets.local.json API key。单独放，因为它不该进仓库、也不该出现在截图里
+    config.json        agent.py 的全部行为参数 + **API Key（唯一主存储）**
+    secrets.local.json 旧配置的 Key 文件，**只读后备**（resolve_api_key 仍读它，本模块不再写）
     app-settings.json  exe 壳自己的设置（QQ 路径、端口、自启…）。agent.py 根本不读它
 
-为什么 key 不写进 config.json：那个文件的历史约定就是「可以公开」，
-真把 key 写进去，迟早被谁复制粘贴出去。UI 里输入 key 只会落到 secrets.local.json。
+2026-09-28 起密钥收拢进 config.json：拆成两处会让「这把 key 到底在哪」变成每次都要想一遍的
+索引问题，而 resolve_api_key 又同时认两处、谁覆盖谁全靠读代码。收拢后只有一个答案。
+代价是「config 里明文躺着 key」，所以安全不变量换成两条，两条都必须成立：
+
+    ① config.json 必须被 .gitignore 覆盖（本仓库会推到公开 Gitee）
+    ② 接口 / 状态只回掩码，绝不吐明文
 
 保存时用「读原文件 → 只覆盖我们管的那些路径 → 写回」的策略，而不是整体重写：
 config.json 里那些 `_说明` 注释是给人看的，整体重写会把它们全部抹掉。
@@ -17,6 +21,7 @@ config.json 里那些 `_说明` 注释是给人看的，整体重写会把它们
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -28,7 +33,7 @@ from . import paths
 
 # ---------------------------------------------------------------- 字段声明
 # type: text | password | number | bool | select | textarea | tags
-# secret=True 的字段写入 secrets.local.json，其余写入 config.json
+# secret=True 的字段（API Key）同样写入 config.json —— 只是接口侧永远只回掩码
 
 
 def _f(path: str, label: str, ftype: str, group: str, default: Any,
@@ -58,7 +63,7 @@ FIELDS: list[dict] = [
     _f("llm.api_base", "接口地址", "text", "model", "https://api.deepseek.com",
        "OpenAI 兼容的 base_url。DeepSeek 官方是 https://api.deepseek.com，不要带 /v1 后缀之外的路径。"),
     _f("llm.api_key", "API Key", "password", "model", "",
-       "只保存在 secrets.local.json，不进仓库。", secret=True),
+       "写进 config.json（该文件被 .gitignore 排除，不进仓库）；界面回显永远是掩码。", secret=True),
     _f("llm.model", "模型名", "text", "model", "deepseek-flash",
        "如 deepseek-flash / deepseek-chat / gpt-4o-mini / qwen-plus。"),
     _f("llm.temperature", "温度", "number", "model", 1.1,
@@ -450,7 +455,7 @@ def ensure_config_file() -> bool:
     paths.ensure_dirs()
     template = dict(agent_defaults())
     template["_说明"] = "由 QQAgent 界面生成。可以直接编辑，也可以在界面里改；界面保存时不会丢掉本文件的注释键。"
-    template["_密钥说明"] = "api_key 留空时会去 api_key_file（secrets.local.json）里找。界面里填的 Key 只写那个文件。"
+    template["_密钥说明"] = "界面里填的 Key 写进本文件（唯一主存储），本文件已被 .gitignore 排除。api_key 为空时会回退到 api_key_file（默认 secrets.local.json，旧配置的只读后备）。"
     _atomic_write_json(paths.CONFIG_PATH, template)
     return True
 
@@ -512,7 +517,7 @@ def resolve_api_key_display() -> dict:
     sec = _read_json(paths.SECRETS_PATH)
     key = ((sec.get("llm") or {}).get("api_key") or "").strip()
     if key:
-        return {"present": True, "source": "secrets.local.json",
+        return {"present": True, "source": "secrets.local.json（旧配置的只读后备）",
                 "masked": _mask(key)}
     return {"present": False, "source": "", "masked": ""}
 
@@ -612,7 +617,8 @@ def validate(payload: dict) -> dict:
     # 已配置的密钥如果本身是掩码，说明它被写坏过（历史 bug：掩码被当成真密钥存盘）。
     # 这种情况下模型**一定调不通**，而且报出来的是编码错误（看起来像网络问题）。
     # 在这里直接点破，比让用户去猜强得多。
-    for label, stored in (("secrets.local.json", sec_key), ("config.json 内联 api_key", inline_key)):
+    for label, stored in (("config.json 的 llm.api_key", inline_key),
+                          ("secrets.local.json（旧配置后备）", sec_key)):
         if stored and looks_like_mask(stored):
             add(errors, "E-LLM-011",
                 f"{label} 里存的**不是真密钥，而是界面上的掩码**（{_mask(stored)}）—— "
@@ -735,7 +741,15 @@ def save(payload: dict) -> dict:
 def reset_to_defaults() -> dict:
     backup = backup_config()
     paths.ensure_dirs()
-    template = dict(agent_defaults())
+    # 必须 deepcopy：agent_defaults() 返回的是模块级的 _LOCAL_DEFAULTS 本体，
+    # 浅拷贝之后任何 _set_path 都会写进那份全局默认值里（下一个新装用户就带着别人的配置）。
+    template = copy.deepcopy(agent_defaults())
     template["_说明"] = "已恢复到内置默认值。"
+    # 2026-09-28 起密钥就住在 config.json 里，而本函数把 config.json 整份换掉 ——
+    # 不特意捞一把的话，用户点一次「恢复默认」就得重新粘一遍 Key，
+    # 而界面上的确认文案承诺的是「API Key 不受影响」。
+    kept = (((_read_json(paths.CONFIG_PATH).get("llm") or {}).get("api_key")) or "").strip()
+    if kept and not _is_mask(kept):
+        _set_path(template, "llm.api_key", kept)
     _atomic_write_json(paths.CONFIG_PATH, template)
-    return {"ok": True, "backup": backup}
+    return {"ok": True, "backup": backup, "kept_api_key": bool(kept)}

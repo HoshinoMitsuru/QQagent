@@ -16,8 +16,8 @@ brain.py —— CU 的规划层（LLM Computer Use 的「大脑」）
 
 默认 `https://api.deepseek.com` + `deepseek-flash`；base_url / model / Key
 全部可配。Key 解析顺序：`cu.api_key` → `cu.api_key_file` → 复用主 llm 密钥
-（`agent.resolve_api_key`，即 secrets.local.json 里那份）——同一个 DeepSeek
-Key 三处通用。
+（`agent.resolve_api_key`，即 config.json 的 `llm.api_key`；旧配置的只读后备在
+secrets.local.json）——同一个 DeepSeek Key 三处通用。
 
 ## 安全闸（本层的三道）
 

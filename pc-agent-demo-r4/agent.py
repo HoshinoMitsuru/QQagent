@@ -13,10 +13,10 @@ agent.py — PC 端 QQ 私聊 AI 代理（最小 demo · 路线 A）
     - 已从 小清澈3.0.js 移植：防抖聚合、连续对话模式、上下文按会话持久化
 
 用法：
-    python agent.py --selftest          # 不开 QQ，自检配置 + 模型连通性 + 调教解析
+    python agent.py --selftest          # 不开 QQ，自检配置 + 模型连通性 + 调教解析 + 长期记忆往返
     python agent.py --replay "在吗"      # 不开 QQ，跑一遍「收到消息 → 生成回复」的链路
     python agent.py --state             # 不开 QQ，查看已持久化的会话上下文
-    python agent.py --forget "光みつる"   # 不开 QQ，清空某个会话的上下文
+    python agent.py --forget "测试备注C"   # 不开 QQ，清空某个会话的上下文
     python agent.py --once              # 开 QQ，只跑一轮（调试用）
     python agent.py                     # 开 QQ，进入常驻循环
     python agent.py --dry-run           # 开 QQ，只读不发（确认读到的内容对不对）
@@ -35,7 +35,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
+import threading
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -420,6 +422,33 @@ DEFAULTS = {
         "save_interval_seconds": 3.0,
         "max_scopes": 50,
     },
+    # ---------------------------------------------------------------- 长期记忆
+    # 补的是 History 的洞：上下文只留最近 chat.max_history_entries(40) 条，
+    # 更早的消息被 _trim 直接丢掉、不可恢复。这个功能每天把当天的对话压成
+    # 「原子事件 + 滚动画像」长期留存，回复时再按相关度召回。
+    #
+    # 为什么是「每天一次」而不是每条都记：记忆要的是"这个人是谁、发生过什么"，
+    # 逐条存既贵又难检索；按天做成摘要，一天一次模型调用，成本可控。
+    "memory": {
+        "enabled": True,
+        # 档案目录（相对路径按数据目录解析）。里面是 <scope>.json + journal/ 子目录。
+        "dir": "state/memory",
+        # 库容量上限（token 口径）。超过就把最老的事件**先并进画像再删**（压缩，不是丢弃）。
+        # 10K token ≈ 1.5 万汉字，够记半年到一年的关键事。
+        "capacity_tokens": 10000,
+        # 滚动画像（角色/偏好/重要事件）的篇幅上限，每次召回都会带上，别写太大。
+        "digest_max_tokens": 1500,
+        # 每次生成回复最多召回几条事件片段。
+        "recall_max_items": 5,
+        # 每天几点之后可以归档"昨天"。0 = 过了零点就归档。
+        "archive_hour": 0,
+        # 启动时把之前漏掉的日期补归档（关机几天再开也能补上）。
+        "catch_up_on_start": True,
+        # 用模型把当天对话压成摘要。关掉则原文截断存档（更省，但几乎没法检索）。
+        "summarize": True,
+        # 归档专用模型，留空 = 跟随 llm.model。想省成本可以指定更便宜的那个。
+        "model": "",
+    },
     # ------------------------------------------------------------ 会话身份 / 取号
     # 主键用 QQ 号而不是昵称：昵称能改、也会重名，拿它当主键迟早串味。
     "identity": {
@@ -774,9 +803,13 @@ class History:
          「AI 先说了这句话、用户才来提问」的因果颠倒。
     """
 
-    def __init__(self, max_entries: int = 40, system_prompt: str = ""):
+    def __init__(self, max_entries: int = 40, system_prompt: str = "",
+                 scope: str = ""):
         self.max_entries = max_entries
         self.system_prompt = system_prompt
+        # 会话名。只用来给长期记忆定位「这条消息属于谁」——写流水要用它。
+        # 由 ConversationStore 在 new 出来之后赋值（History 自己不知道 scope）。
+        self.scope = scope
         self._items: list[dict] = []
         self._seq = 0
 
@@ -808,6 +841,7 @@ class History:
              teach: bool = False, seq: Optional[int] = None) -> dict:
         entry = self._make(role, content, source, teach, seq)
         self._items.append(entry)
+        journal_note(self.scope, entry)     # 顺手抄进当日流水（失败不影响主链路）
         self._trim()
         return entry
 
@@ -823,6 +857,7 @@ class History:
                     idx = i
                     break
         self._items.insert(idx, entry)
+        journal_note(self.scope, entry)
         self._trim()
         return entry
 
@@ -846,6 +881,17 @@ class History:
 
     def __len__(self) -> int:
         return len(self._items)
+
+    def last_user_text(self) -> str:
+        """最近一条「对方说的话」的原文 —— 长期记忆拿它当召回线索。
+
+        为什么不用整段上下文当线索：召回是给**这一句**找往事，混进十轮之前的
+        旧话题只会把 top-k 名额分给不相关的事件。
+        """
+        for it in reversed(self._items):
+            if it.get("role") == "user":
+                return str(it.get("content") or "")
+        return ""
 
     def teach_entries(self) -> list[dict]:
         return [it for it in self._items if it.get("teach")]
@@ -882,8 +928,9 @@ class History:
         return [dict(it) for it in self._items]
 
     @classmethod
-    def from_dict(cls, rows, max_entries: int, system_prompt: str) -> "History":
-        h = cls(max_entries=max_entries, system_prompt=system_prompt)
+    def from_dict(cls, rows, max_entries: int, system_prompt: str,
+                  scope: str = "") -> "History":
+        h = cls(max_entries=max_entries, system_prompt=system_prompt, scope=scope)
         for r in rows or []:
             if not isinstance(r, dict):
                 continue
@@ -901,6 +948,658 @@ class History:
             h.set_seq(int(r.get("seq") or 0))
         h._trim()
         return h
+
+
+# ============================================================ 长期记忆（跨天归档 + 按需召回）
+def scope_slug(scope: str) -> str:
+    """scope → 安全的文件名片段（Windows 非法字符换成下划线）。
+
+    会话档案（ConversationStore）与长期记忆（state/memory/）必须用同一套规则，
+    界面删会话时要靠它找到对应的记忆档案 —— 所以这里是唯一实现，两边都调它。
+
+    ⚠️ 这里**不做 strip**：`ConversationStore._scope_file` 从目录化那天起就没 strip，
+    现在补上会让「昵称带前后空格」的老档案改名、在界面上凭空消失。首尾空格在
+    Windows 文件名里也是合法字符，没有必须去掉的理由。
+    """
+    name = scope or ""
+    if not name.strip():
+        name = "_"
+    for ch in '\\/:*?"<>|':
+        name = name.replace(ch, "_")
+    return name
+
+
+def token_estimate(text: str) -> int:
+    """粗估 token 数：CJK 每个字算 1，其余每 4 个字符算 1。
+
+    只用于判断「容量水位」，不参与计费对账，所以不值得为它引一个 tokenizer
+    依赖（全仓本来也没有）。中文场景下这个估计和真实值同量级。
+    """
+    if not text:
+        return 0
+    cjk = 0
+    other = 0
+    for ch in text:
+        if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
+            cjk += 1
+        else:
+            other += 1
+    return cjk + (other + 3) // 4
+
+
+_CJK_RUN = re.compile(r"[\u3000-\u9fff\uff00-\uffef]+")
+_ASCII_WORD = re.compile(r"[A-Za-z0-9_]{2,}")
+# 召回时要忽略的高频词：它们对不上任何具体话题，只会把 top-k 的名额挤满。
+_STOP_TERMS = frozenset({
+    "今天", "昨天", "明天", "现在", "什么", "怎么", "这个", "那个", "可以", "不是",
+    "就是", "我们", "你们", "他们", "自己", "一下", "还是", "但是", "因为", "所以",
+    "时候", "知道", "觉得", "真的", "有点", "然后", "而且", "如果", "已经",
+})
+
+
+def extract_terms(text: str) -> set[str]:
+    """从一句话里抠出可用来比对的「词」（不依赖分词库）。
+
+    中文：把每段连续汉字切成 2-gram 与 3-gram；英文/数字：取长度 ≥2 的连续串。
+    这当然粗糙 —— 但召回只需要"把可能相关的挑出来"，宁可多挑：
+    真正的排序交给"命中片段长度之和"，长匹配自然排在前面。
+    """
+    terms: set[str] = set()
+    for run in _CJK_RUN.findall(text or ""):
+        for n in (2, 3):
+            for i in range(len(run) - n + 1):
+                t = run[i:i + n]
+                if t not in _STOP_TERMS:
+                    terms.add(t)
+    for w in _ASCII_WORD.findall(text or ""):
+        terms.add(w.lower())
+    return terms
+
+
+def _parse_json_obj(raw: str) -> Optional[dict]:
+    """从模型回复里抠出一个 JSON 对象。
+
+    模型经常裹一层 ```json 围栏、或在前后说一句废话 —— 都容忍；
+    实在没有合法 JSON 就返回 None，由调用方降级处理。
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[A-Za-z]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s).strip()
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    i, j = s.find("{"), s.rfind("}")
+    if 0 <= i < j:
+        try:
+            obj = json.loads(s[i:j + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+ARCHIVE_SYSTEM = """你在为一个 AI 陪伴助手做「长期记忆归档」。把下面这一天的对话压成两样东西，\
+**只输出 JSON**，不要解释、不要代码块围栏：
+
+{"digest": "对这位聊天对象的长期画像：身份、称呼、性格、偏好、长期状态，以及必须长期记住的事。不超过 300 字。",
+ "events": [{"text": "一条值得长期记住的具体事，40 字以内，含时间或人", "keywords": ["关键词", "关键词"]}]}
+
+规则：
+1. digest 是**覆盖式重写**：你会同时收到「旧画像」，要把旧的重要信息和今天的合并成一份，不要丢。
+2. events 只保留"以后可能还用得上"的事，2~6 条；确实没有就返回空数组 []。
+3. 不要编造对话里没有的信息；寒暄、表情、一次性闲聊不要写进去。
+4. keywords 给 2~4 个，供以后检索（人名、地点、话题名词优先）。
+"""
+
+MERGE_SYSTEM = """你在维护一份 AI 陪伴助手的「长期画像」。下面给出一份当前画像，以及若干条已经很旧的\
+记忆片段。请把那些片段的**有效信息合并进画像**，只输出合并后的画像正文（不要 JSON、不要解释）。\
+要求：保留旧画像里仍然重要的信息；同类信息合并去重；总长度不超过 300 字。
+"""
+
+
+class LongTermMemory:
+    """
+    按会话（scope）隔离的长期记忆。
+
+    它补的是 History 的洞：上下文只留最近 `chat.max_history_entries`（默认 40）条，
+    更早的消息被 `_trim` 直接丢掉、不可恢复。这里把「值得长期记住的东西」另存一份。
+
+    三段数据（都在 memory.dir 下，已被 .gitignore 覆盖）：
+
+        journal/<scope>/YYYY-MM-DD.jsonl   当日流水（**临时**：归档成功即删）
+        <scope>.json                       长期档案：digest + events[]
+
+    生命周期：
+
+        对话进行中  note()      每条进上下文的消息顺手抄进当日流水
+        跨天 / 启动 archive()   用模型把某一天压成 events + 重写 digest，然后删流水
+        生成回复时  block()     拿最近一句当线索召回 top-k，拼成提示词片段
+        超容量      _compress() 把最老的一批事件**先并进画像再删**（压缩，不是丢弃）
+
+    只有 journal 里存在对话原文，且它活不过归档；长期留下来的只有摘要 ——
+    这是刻意的：逐条原文既贵又难检索，而记忆要的是"这个人是谁、发生过什么"。
+    """
+
+    def __init__(self, cfg: dict):
+        m = cfg.get("memory") or {}
+        self.cfg = cfg
+        self.enabled = bool(m.get("enabled", True))
+        self.dir = abs_here(m.get("dir") or "state/memory")
+        self.journal_dir = os.path.join(self.dir, "journal")
+        self.capacity = max(300, int(m.get("capacity_tokens") or 10000))
+        # 画像每次都随请求带上，所以它单独也有上限（否则等于给每条回复加成本）。
+        self.digest_max = min(max(100, int(m.get("digest_max_tokens") or 1500)), self.capacity)
+        # ⚠️ 这里**不能**写成 `m.get("recall_max_items") or 5`：0 是配置里明确
+        # 支持的取值（「只带画像、不召回往事」），而 `0 or 5` 会把它悄悄改回 5 ——
+        # 用户按文档填了 0 却依然在召回，且没有任何提示。test_memory 的 [7] 卡这条。
+        raw_recall = m.get("recall_max_items")
+        if raw_recall is None:
+            self.recall_max = 5
+        else:
+            try:
+                self.recall_max = max(0, int(raw_recall))
+            except (TypeError, ValueError):
+                self.recall_max = 5
+        self.archive_hour = min(23, max(0, int(m.get("archive_hour") or 0)))
+        self.catch_up = bool(m.get("catch_up_on_start", True))
+        self.summarize = bool(m.get("summarize", True))
+        self.model = (m.get("model") or "").strip()
+        self._cache: dict[str, dict] = {}
+        self._archiving = False
+        self._ticked = False
+        self._last_tick_day = ""
+        self._next_tick = 0.0
+        self._alt_client = None
+        self.stats = {"archived": 0, "fallback": 0, "compressed": 0, "failed": 0, "recalled": 0}
+
+    # ---------------------------------------------------- 路径与读写
+    def _path(self, scope: str) -> str:
+        return os.path.join(self.dir, scope_slug(scope) + ".json")
+
+    def _journal_dir(self, scope: str) -> str:
+        return os.path.join(self.journal_dir, scope_slug(scope))
+
+    @staticmethod
+    def _blank(scope: str) -> dict:
+        return {
+            "_说明": "长期记忆档案。digest=滚动画像，events=原子事件片段。"
+                     "删除本文件 = 让这个会话只剩最近若干条上下文。",
+            "_version": 1,
+            "_scope": scope,
+            "digest": {"text": "", "updated_at": 0.0, "covered_until": ""},
+            "events": [],
+            "last_archive_date": "",
+            "next_id": 1,
+        }
+
+    def _load(self, scope: str) -> dict:
+        rec = self._cache.get(scope)
+        if rec is not None:
+            return rec
+        rec = self._blank(scope)
+        p = self._path(scope)
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    dig = data.get("digest")
+                    if isinstance(dig, dict):
+                        rec["digest"] = {"text": str(dig.get("text") or ""),
+                                         "updated_at": float(dig.get("updated_at") or 0.0),
+                                         "covered_until": str(dig.get("covered_until") or "")}
+                    rec["events"] = [e for e in (data.get("events") or []) if isinstance(e, dict)]
+                    rec["last_archive_date"] = str(data.get("last_archive_date") or "")
+                    rec["next_id"] = int(data.get("next_id") or 0) or (len(rec["events"]) + 1)
+            except Exception as exc:
+                bad = p + ".bad"
+                try:
+                    os.replace(p, bad)
+                except Exception:
+                    bad = "(改名失败)"
+                report("E-MEM-001", "长期记忆档案解析失败，已改名保留现场并从空档案继续",
+                       ctx={"文件": p, "备份为": bad,
+                            "原因": f"{type(exc).__name__}: {exc}"})
+                rec = self._blank(scope)
+        self._cache[scope] = rec
+        return rec
+
+    def _save(self, scope: str, rec: dict) -> bool:
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            p = self._path(scope)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+            return True
+        except Exception as exc:
+            report_exc(exc, "E-MEM-006", ctx={"阶段": "写长期记忆档案", "scope": scope})
+            return False
+
+    def _total_tokens(self, rec: dict) -> int:
+        t = token_estimate((rec.get("digest") or {}).get("text") or "")
+        for e in rec.get("events") or []:
+            t += token_estimate(str(e.get("text") or "")) + 8   # +8 ≈ 每条的结构开销
+        return t
+
+    # ---------------------------------------------------- ① 当日流水
+    def note(self, scope: str, entry: dict) -> None:
+        """把一条刚落进上下文的消息抄进当日流水。
+
+        **绝不抛异常**：长期记忆是锦上添花，不能因为它写不进去就让回复链路失败。
+        """
+        if not self.enabled or not scope:
+            return
+        role = entry.get("role")
+        content = str(entry.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            return
+        try:
+            d = self._journal_dir(scope)
+            os.makedirs(d, exist_ok=True)
+            day = time.strftime("%Y-%m-%d")
+            row = {
+                "ts": round(float(entry.get("ts") or time.time()), 3),
+                "scope": scope,
+                "role": role,
+                "content": content[:2000],
+                "teach": bool(entry.get("teach")),
+                "source": str(entry.get("source") or ""),
+            }
+            with open(os.path.join(d, day + ".jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            report_exc(exc, "E-MEM-005", ctx={"阶段": "写当日流水", "scope": scope})
+
+    def journal_scopes(self) -> list[str]:
+        """有流水的会话目录名（= scope_slug）。"""
+        if not os.path.isdir(self.journal_dir):
+            return []
+        try:
+            return sorted(n for n in os.listdir(self.journal_dir)
+                          if os.path.isdir(os.path.join(self.journal_dir, n)))
+        except OSError:
+            return []
+
+    def _read_journal(self, scope: str, day: str) -> list[dict]:
+        p = os.path.join(self._journal_dir(scope), day + ".jsonl")
+        rows: list[dict] = []
+        if not os.path.isfile(p):
+            return rows
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(r, dict) and r.get("content"):
+                        rows.append(r)
+        except OSError:
+            return []
+        return rows
+
+    @staticmethod
+    def _scope_in_journal(path: str) -> str:
+        """从流水第一行读回真实 scope（目录名是脱敏后的 slug，不能反推）。"""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        r = json.loads(line)
+                        return str(r.get("scope") or "")
+        except Exception:
+            pass
+        return ""
+
+    def _pending(self, today: str) -> list[tuple[str, str]]:
+        """所有「有流水、且日期早于今天」的 (scope, day)，按日期升序。"""
+        out: list[tuple[str, str]] = []
+        for slug in self.journal_scopes():
+            d = os.path.join(self.journal_dir, slug)
+            try:
+                names = sorted(n for n in os.listdir(d) if n.endswith(".jsonl"))
+            except OSError:
+                continue
+            for n in names:
+                day = n[:-len(".jsonl")]
+                if day >= today:
+                    continue
+                full = os.path.join(d, n)
+                scope = self._scope_in_journal(full) or slug
+                out.append((scope, day))
+        out.sort(key=lambda x: (x[1], x[0]))
+        return out
+
+    def _drop_journal(self, scope: str, day: str) -> None:
+        p = os.path.join(self._journal_dir(scope), day + ".jsonl")
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError as exc:
+            report_exc(exc, "E-MEM-005", ctx={"阶段": "删除已归档的流水", "文件": p})
+
+    @staticmethod
+    def _render_day(rows: list[dict]) -> str:
+        out = []
+        for r in rows:
+            who = "对方" if r.get("role") == "user" else "小清澈"
+            if r.get("teach"):
+                who += "(被教过的话)"
+            ts = float(r.get("ts") or 0.0)
+            hhmm = time.strftime("%H:%M", time.localtime(ts)) if ts else "--:--"
+            out.append(f"{hhmm} {who}：{clip(str(r.get('content') or ''), 300)}")
+        return "\n".join(out)
+
+    # ---------------------------------------------------- ② 归档（模型摘要）
+    def _client(self):
+        """归档专用的模型客户端。
+
+        单独造一个的理由：归档要求低温度、稳定 JSON，而且不该跟"回复"共用
+        最小调用间隔（否则十几个会话要排队十几分钟）。密钥与地址仍用全局配置。
+        """
+        if self._alt_client is not None:
+            return self._alt_client or None
+        cfg2 = dict(self.cfg)
+        cfg2["llm"] = dict(self.cfg.get("llm") or {})
+        if self.model:
+            cfg2["llm"]["model"] = self.model
+        cfg2["llm"]["temperature"] = 0.2
+        cfg2["llm"]["max_tokens"] = max(800, int(cfg2["llm"].get("max_tokens") or 800))
+        cfg2["chat"] = dict(self.cfg.get("chat") or {})
+        cfg2["chat"]["min_llm_interval_seconds"] = 1.0
+        try:
+            self._alt_client = LLMClient(cfg2)
+        except Exception as exc:
+            report_exc(exc, "E-MEM-007", ctx={"阶段": "构造归档客户端"})
+            self._alt_client = False
+        return self._alt_client or None
+
+    def _ask_model(self, scope: str, day: str, text: str) -> Optional[dict]:
+        llm = self._client()
+        if llm is None or not llm.ready:
+            return None
+        old = (self._load(scope).get("digest") or {}).get("text") or "（暂无）"
+        body = f"【旧画像】\n{old}\n\n【{day} 的对话】\n{text}"
+        try:
+            raw = llm.chat([{"role": "system", "content": ARCHIVE_SYSTEM},
+                            {"role": "user", "content": body}])
+        except EC.AppError as exc:
+            # 模型侧的错误码已经分好类（密钥/限流/超时…），透传，别盖一层"归档失败"
+            report(exc.code, exc.detail_text,
+                   ctx={**exc.context, "scope": scope, "阶段": "长期记忆归档"})
+            return None
+        except Exception as exc:
+            report_exc(exc, "E-LLM-012", ctx={"scope": scope, "阶段": "长期记忆归档"})
+            return None
+        obj = _parse_json_obj(raw)
+        if obj is None:
+            report("E-LLM-008", "长期记忆归档返回的不是合法 JSON，本次降级为原文存档",
+                   ctx={"scope": scope, "日期": day, "首 80 字": clip(raw or "", 80)})
+        return obj
+
+    def archive(self, scope: str, day: str) -> bool:
+        """把某一天的流水压成长期记忆。成功则删掉流水并返回 True。"""
+        rows = self._read_journal(scope, day)
+        if not rows:
+            self._drop_journal(scope, day)
+            return False
+        text = self._render_day(rows)
+        obj = self._ask_model(scope, day, text) if self.summarize else None
+        if not (isinstance(obj, dict) and (obj.get("events") or obj.get("digest"))):
+            # 降级：模型不可用 / 返回不可解析 → 原文截断存一条，保证这一天不会白丢
+            if self.summarize:
+                self.stats["fallback"] += 1
+                report("E-MEM-003", f"{day} 的对话无法摘要，已降级为原文存档",
+                       ctx={"scope": scope, "原文字数": len(text)})
+            obj = {"digest": "", "events": [{"text": clip(text, 300), "keywords": []}]}
+
+        rec = self._load(scope)
+        n = 0
+        for ev in (obj.get("events") or [])[:8]:
+            if not isinstance(ev, dict):
+                continue
+            t = str(ev.get("text") or "").strip()
+            if not t:
+                continue
+            rec["events"].append({
+                "id": rec["next_id"],
+                "date": day,
+                "text": clip(t, 300),
+                "keywords": [clip(str(k), 12) for k in (ev.get("keywords") or [])][:6],
+                "created_at": time.time(),
+            })
+            rec["next_id"] += 1
+            n += 1
+        dig = str(obj.get("digest") or "").strip()
+        if dig:
+            rec["digest"] = {"text": clip(dig, self.digest_max),
+                             "updated_at": time.time(),
+                             "covered_until": day}
+        rec["last_archive_date"] = day
+        self._compress(rec)
+        self._save(scope, rec)
+        self._drop_journal(scope, day)
+        self.stats["archived"] += 1
+        log("MEM", f"{scope} 的 {day} 已归档：新增 {n} 条事件"
+                   f"｜画像 {token_estimate((rec.get('digest') or {}).get('text') or '')} token"
+                   f"｜事件共 {len(rec['events'])} 条 / {self._total_tokens(rec)} token")
+        return True
+
+    def _merge_into_digest(self, rec: dict, batch: list[dict]) -> bool:
+        frag = "\n".join(f"- {e.get('date')}　{e.get('text')}" for e in batch)
+        old = (rec.get("digest") or {}).get("text") or "（暂无）"
+        covered = (rec.get("digest") or {}).get("covered_until") or ""
+        llm = self._client()
+        if self.summarize and llm is not None and llm.ready:
+            try:
+                out = llm.chat([{"role": "system", "content": MERGE_SYSTEM},
+                                {"role": "user",
+                                 "content": f"【当前画像】\n{old}\n\n【要并入的旧记忆】\n{frag}"}])
+                out = (out or "").strip()
+                if out:
+                    rec["digest"] = {"text": clip(out, self.digest_max),
+                                     "updated_at": time.time(), "covered_until": covered}
+                    return True
+            except Exception as exc:
+                report_exc(exc, "E-LLM-012", ctx={"阶段": "长期记忆画像合并"})
+        # 模型不可用：把原文截断并进画像，至少不丢
+        joined = (old + "；" + "；".join(str(e.get("text") or "") for e in batch)).strip("； ")
+        rec["digest"] = {"text": clip(joined, self.digest_max),
+                         "updated_at": time.time(), "covered_until": covered}
+        return True
+
+    def _compress(self, rec: dict) -> int:
+        """超容量时压缩：把最老的一批事件**先并进画像、再从事件里删**。
+
+        为什么不是直接丢：这些事件是已经花过模型调用换来、且被判定"值得长期记住"的
+        内容，一超容量就开始遗忘等于白记。并进画像当然也有损，但保住了主干。
+        """
+        dropped = 0
+        while rec["events"] and self._total_tokens(rec) > self.capacity:
+            batch = rec["events"][:10]
+            self._merge_into_digest(rec, batch)
+            rec["events"] = rec["events"][len(batch):]
+            dropped += len(batch)
+            if not rec["events"]:
+                break
+        if dropped:
+            self.stats["compressed"] += dropped
+            report("E-MEM-002",
+                   f"长期记忆超出 {self.capacity} token，已把最老的 {dropped} 条事件并入画像",
+                   ctx={"scope": rec.get("_scope") or "",
+                        "剩余事件": len(rec["events"]),
+                        "当前用量": f"{self._total_tokens(rec)} token"})
+        return dropped
+
+    # ---------------------------------------------------- ③ 召回与注入
+    def recall(self, scope: str, query: str = "", k: Optional[int] = None) -> list[dict]:
+        """按线索召回最相关的若干条事件。没有线索时给最近的几条。"""
+        if not self.enabled:
+            return []
+        rec = self._load(scope)
+        events = [e for e in (rec.get("events") or []) if str(e.get("text") or "").strip()]
+        if not events:
+            return []
+        k = self.recall_max if k is None else int(k)
+        if k <= 0:
+            return []
+        terms = extract_terms(query)
+        if not terms:
+            return events[-k:]
+        scored = []
+        for e in events:
+            bag = (str(e.get("text") or "") + " "
+                   + " ".join(str(x) for x in (e.get("keywords") or []))).lower()
+            score = sum(len(t) for t in terms if t in bag)
+            if score:
+                scored.append((score, float(e.get("created_at") or 0.0), e))
+        if not scored:
+            return []
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [e for _, _, e in scored[:k]]
+
+    def block(self, scope: str, query: str = "") -> str:
+        """拼成给模型看的「长期记忆」段落。没有记忆时返回空串（调用方什么都不加）。"""
+        if not self.enabled or not scope:
+            return ""
+        rec = self._load(scope)
+        dig = str((rec.get("digest") or {}).get("text") or "").strip()
+        hits = self.recall(scope, query, self.recall_max)
+        if not dig and not hits:
+            return ""
+        parts = []
+        if dig:
+            parts.append("【长期记忆 · 你对这个人的了解】\n" + dig)
+        if hits:
+            lines = [f"- {e.get('date')}　{str(e.get('text') or '').strip()}" for e in hits]
+            parts.append("【长期记忆 · 与当前话题相关的往事】\n" + "\n".join(lines))
+        parts.append("（这些是你过去和这个人相处攒下的记忆。自然地用，别生硬复述，"
+                     "也别把没提过的事说成发生过。）")
+        self.stats["recalled"] += 1
+        return "\n\n".join(parts)
+
+    # ---------------------------------------------------- ④ 归档调度
+    def archive_due(self) -> int:
+        """把该归档的都归档掉（定时 tick 与启动补算都走这里）。返回成功归档的天数。"""
+        if not self.enabled or self._archiving:
+            return 0
+        self._archiving = True
+        done = 0
+        try:
+            today = time.strftime("%Y-%m-%d")
+            for scope, day in self._pending(today):
+                try:
+                    if self.archive(scope, day):
+                        done += 1
+                except Exception as exc:
+                    self.stats["failed"] += 1
+                    report_exc(exc, "E-MEM-007",
+                               ctx={"阶段": "归档", "scope": scope, "日期": day})
+        finally:
+            self._archiving = False
+        return done
+
+    def tick(self, now: Optional[float] = None) -> bool:
+        """主循环每轮调一次：到点就把归档**丢到后台线程**，返回是否真的启动了归档。
+
+        为什么不在主循环里同步做：归档要发模型请求（秒级），同步做会把读消息、
+        发送整条链路卡住 —— 而"多记一条记忆"不值得让回复晚几秒。
+        为什么用线程也没破坏「全进程一条线程碰 UIA」的规矩：归档只碰文件和 HTTP，
+        一次 UIA 调用都没有。
+        """
+        if not self.enabled:
+            return False
+        now = time.time() if now is None else now
+        if now < self._next_tick or self._archiving:
+            return False
+        self._next_tick = now + 60.0        # 一分钟看一次就够
+        if time.localtime(now).tm_hour < self.archive_hour:
+            return False                    # 还没到归档时点：先不动「跨天」判断
+        today = time.strftime("%Y-%m-%d")
+        first = not self._ticked
+        self._ticked = True
+        crossed = self._last_tick_day not in ("", today)
+        self._last_tick_day = today
+        if first and not self.catch_up:
+            return False                    # 明确要求不补算：本次启动先不动历史流水
+        if not (first or crossed):
+            return False                    # 没跨天就别反复扫盘
+        if not self._pending(today):
+            return False
+        threading.Thread(target=self.archive_due, name="ltm-archive", daemon=True).start()
+        return True
+
+    # ---------------------------------------------------- ⑤ 查询 / 删除
+    def stats_of(self, scope: str) -> dict:
+        rec = self._load(scope)
+        return {
+            "events": len(rec.get("events") or []),
+            "tokens": self._total_tokens(rec),
+            "capacity": self.capacity,
+            "has_digest": bool(str((rec.get("digest") or {}).get("text") or "").strip()),
+            "last_archive_date": str(rec.get("last_archive_date") or ""),
+        }
+
+    def forget(self, scope: str) -> bool:
+        """删掉这个会话的长期记忆（档案 + 尚未归档的流水）。"""
+        ok = True
+        self._cache.pop(scope, None)
+        p = self._path(scope)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError as exc:
+            report_exc(exc, "E-MEM-004", ctx={"scope": scope, "文件": p})
+            ok = False
+        d = self._journal_dir(scope)
+        try:
+            if os.path.isdir(d):
+                for n in os.listdir(d):
+                    try:
+                        os.remove(os.path.join(d, n))
+                    except OSError:
+                        pass
+                os.rmdir(d)
+        except OSError:
+            pass
+        return ok
+
+    def summary_line(self) -> str:
+        """给自检/日志用的一句话概览。"""
+        if not self.enabled:
+            return "长期记忆: 关"
+        return (f"长期记忆: 开 → {self.dir}"
+                f"（容量 {self.capacity} token｜召回 {self.recall_max} 条｜"
+                f"归档时点 {self.archive_hour:02d}:00 后｜"
+                f"{'模型摘要' if self.summarize else '原文存档'}）")
+
+
+# History 每写一条就顺手抄一份流水。做成模块级钩子的理由：History 是在
+# ConversationStore 里 new 出来的，让它自己拿得到记忆对象就得多传一层参数；
+# 单进程只有一个 agent，挂全局足够。
+_MEMORY: "Optional[LongTermMemory]" = None
+
+
+def init_memory(cfg: dict) -> "LongTermMemory":
+    global _MEMORY
+    _MEMORY = LongTermMemory(cfg)
+    return _MEMORY
+
+
+def journal_note(scope: str, entry: dict) -> None:
+    if _MEMORY is not None and scope:
+        _MEMORY.note(scope, entry)
 
 
 # ============================================================ 会话仓库（按 scope 隔离 + 持久化）
@@ -943,11 +1642,12 @@ class ConversationStore:
     # ---------------------------------------------------- 载入 / 落盘
     @staticmethod
     def _scope_file(scope: str) -> str:
-        """scope → 会话档案文件名。Windows 非法字符替换成下划线。"""
-        name = scope
-        for ch in '\\/:*?"<>|':
-            name = name.replace(ch, "_")
-        return name + ".json"
+        """scope → 会话档案文件名。
+
+        与长期记忆共用同一个 `scope_slug()`：UI 删会话时要靠它**同时**找到
+        会话档案和记忆档案，两套转义规则一旦漂移就会删不干净。
+        """
+        return scope_slug(scope) + ".json"
 
     def _migrate_legacy(self) -> None:
         """旧单文件（state/conversations.json）一次性拆分进目录。
@@ -1141,7 +1841,8 @@ class ConversationStore:
         if not isinstance(row, dict):
             return False
         cont = row.get("continuous") or {}
-        hist = History.from_dict(row.get("history") or [], self.max_entries, self.system_prompt)
+        hist = History.from_dict(row.get("history") or [], self.max_entries,
+                                 self.system_prompt, scope)
         hist.set_seq(int(row.get("seq") or 0))
         self._book[scope] = {
             "history": hist,
@@ -1158,7 +1859,7 @@ class ConversationStore:
                 row = self._book[scope]
             else:
                 row = {
-                    "history": History(self.max_entries, self.system_prompt),
+                    "history": History(self.max_entries, self.system_prompt, scope),
                     "cont": {"active": False, "last_at": 0.0},
                     "used_at": time.time(),
                 }
@@ -1694,7 +2395,7 @@ CLS_CHAT_TITLE = "chat-header__contact-name"  # 会话标题
 CLS_DIR_OTHER = "container--others"
 CLS_DIR_SELF = "container--self"
 # ⚠️ 踩坑记录：'group-chat' 这个 class 名具有误导性 —— 私聊的容器也叫 group-chat！
-#    实测（2026-09-11）私聊「光みつる」的聊天区容器同样是 class='group-chat'，
+#    实测（2026-09-11）私聊「测试备注C」的聊天区容器同样是 class='group-chat'，
 #    所以它**绝不能**用来判断群聊。群聊只能靠「标题旁的 (人数)」和「群资料面板」判定。
 CLS_GROUP_CHAT = "group-chat"            # 聊天区容器（群聊/私聊都用，勿当群聊标志）
 CLS_MSG_CONTAINER_SELF = "message-container--self"    # 消息容器级的方向标记
@@ -3343,6 +4044,9 @@ class Agent:
         self.llm = LLMClient(cfg)
         self.ocr = OcrReader(cfg)
         self.store = ConversationStore(cfg)
+        # 长期记忆必须先于 store 之外的任何写入路径初始化：History.push 走的是
+        # 模块级 `_MEMORY` 钩子，没 init 过的话钩子是 None，流水会被静默丢掉。
+        self.mem = init_memory(cfg)
         self.deb = Debouncer(cfg)
         self.queue = ReplyQueue(cfg)
         self.scope = ""
@@ -3486,6 +4190,9 @@ class Agent:
             n = len(hist)
             hist.clear()
             self.store.deactivate_continuous(scope)
+            # 「忘掉这个会话里聊过的一切」当然包括长期记忆 —— 只清上下文、
+            # 留着画像和事件，下次照样能被召回，用户会觉得 reset 没生效。
+            mem_ok = self.forget_memory(scope)
             if c.get("reset_clears_pending", True):
                 # 缓冲里那几条还没结算。不丢掉的话，几秒后它们照样会被送给 AI，
                 # 用户看到的就是「说了 reset，它还在回我刚才的话」。
@@ -3496,7 +4203,8 @@ class Agent:
                 dropped = 0
             self.store.save(force=True)
             log("CMD", f"{sender} 发出 .ai reset → 清空 {scope} 的上下文（{n} 条）"
-                       f"、退出连续对话、丢掉 {dropped} 条未结算的缓冲")
+                       f"、退出连续对话、丢掉 {dropped} 条未结算的缓冲"
+                       f"、长期记忆{'已删除' if mem_ok else '删除失败（见 E-MEM-004）'}")
             self._queue_ack(scope, c.get("ack_reset") or "好，我从头开始。")
             return ("handled", "")
 
@@ -4662,11 +5370,40 @@ class Agent:
         self.store.history(scope).push("assistant", reply, source="auto")
         return True
 
+    def _messages_with_memory(self, scope: str, hist: History) -> list[dict]:
+        """上下文 + 长期记忆片段。
+
+        记忆块**插在 system 提示词之后、对话之前**：它属于「背景设定」而不是
+        「某一方说过的话」，混进 user/assistant 序列里会让模型以为是我们真的
+        当面聊过这些内容。system 提示词为空时就直接放队首。
+        """
+        msgs = hist.build_messages()
+        try:
+            blk = self.mem.block(scope, hist.last_user_text())
+        except Exception as exc:
+            report_exc(exc, "E-MEM-008", ctx={"阶段": "拼长期记忆片段", "scope": scope})
+            return msgs
+        if not blk:
+            return msgs
+        idx = 1 if (msgs and msgs[0].get("role") == "system") else 0
+        msgs.insert(idx, {"role": "system", "content": blk})
+        log("MEM", f"{scope} 注入长期记忆：{token_estimate(blk)} token"
+                   f"（{blk.count(chr(10) + '- ')} 条往事 + 画像）")
+        return msgs
+
+    def forget_memory(self, scope: str) -> bool:
+        """连长期记忆一起忘掉（`.ai reset` 与界面「删除会话」都走它）。"""
+        try:
+            return self.mem.forget(scope)
+        except Exception as exc:
+            report_exc(exc, "E-MEM-004", ctx={"阶段": "删除长期记忆", "scope": scope})
+            return False
+
     def generate_reply(self, scope: str) -> str:
         self._last_gen_fail = ""        # 本次生成失败的原因码（供调用方判断要不要再报一条）
         hist = self.store.history(scope)
         try:
-            reply = self.llm.chat(hist.build_messages())
+            reply = self.llm.chat(self._messages_with_memory(scope, hist))
         except EC.AppError as exc:
             # 模型侧的错误已经按状态码分类好了（密钥/地址/限流/超时/服务端…），
             # 直接透传，不要再包一层「模型调用失败」把码盖掉。
@@ -4719,6 +5456,7 @@ class Agent:
             return 2
 
         log("INFO", f"已附着 QQ 窗口，标题={self.qq.dialog_title!r}，群聊={self.qq.is_group}")
+        log("INFO", self.mem.summary_line())
         if _desktop_locked():
             report("E-ENV-006", "桌面处于锁屏状态，只能读不能发", ctx={"前台": _foreground_title()})
         elif not _is_foreground(self.qq.hwnd):
@@ -4785,6 +5523,9 @@ class Agent:
                 self.serve_queue()      # 读+生成 → 排到就发
                 set_phase("落盘", 15)
                 self.store.save()
+                # 长期记忆归档：到点/跨天时把昨天的流水压成记忆（内部丢后台线程，
+                # 不阻塞本轮的读写发送；它只碰文件和 HTTP，一次 UIA 都不调）。
+                self.mem.tick()
                 round_cost = round(time.time() - round_start, 2)
                 round_start = time.time()
                 set_phase("空闲", interval + 15)
@@ -4890,6 +5631,7 @@ class Agent:
 
 # ============================================================ 自检 / 回放
 def selftest(cfg: dict) -> int:
+    global _MEMORY      # [6c] 要用沙箱记忆对象替换全局钩子，跑完必须换回来
     print("=" * 72)
     print("自检：配置 / 密钥 / 模型连通性 / 调教解析")
     print("=" * 72)
@@ -4997,6 +5739,73 @@ def selftest(cfg: dict) -> int:
             ok += 1
         print(f"    {'✓' if got == expect else '✗'} {text!r:<16} → {got!r}")
     print(f"    {ok}/{len(cases)} 通过")
+
+    print("\n[6c] 长期记忆（当日流水 → 跨天归档 → 按需召回）")
+    mm = cfg.get("memory") or {}
+    print(f"    开关       : {'开' if mm.get('enabled', True) else '关'}"
+          f"｜容量 {int(mm.get('capacity_tokens') or 0)} token"
+          f"｜画像上限 {int(mm.get('digest_max_tokens') or 0)} token")
+    print(f"    档案目录   : {abs_here(mm.get('dir') or 'state/memory')}")
+    print(f"    归档       : 每天 {int(mm.get('archive_hour') or 0):02d}:00 之后"
+          f"｜{'启动时补算漏掉的日期' if mm.get('catch_up_on_start', True) else '启动不补算'}"
+          f"｜{'模型摘要' if mm.get('summarize', True) else '原文截断存档'}")
+    print(f"    召回       : 最多 {int(mm.get('recall_max_items') or 0)} 条往事 + 画像"
+          f"｜线索 = 对方最后一句（本地 2/3-gram 检索，不引 embedding）")
+    if not mm.get("enabled", True):
+        print("    [i] 已关闭，跳过往返自检")
+    else:
+        # 全程离线、只写临时目录：自检不能碰真实档案，也不能因为模型不通而报假失败
+        sandbox = os.path.join(HERE, "state", "_selftest_memory")
+        old_mem = globals().get("_MEMORY")
+        try:
+            mem = init_memory(_deep_merge(cfg, {"memory": {"dir": sandbox}}))
+            scope = "private:自检会话"
+            h = History(20, "", scope)
+            h.push("user", "【自检】：周四要交 C 语言作业")
+            h.push("assistant", "记得了，周四。")
+            jd = mem._journal_dir(scope)
+            today = time.strftime("%Y-%m-%d")
+            yday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+            src, dst = os.path.join(jd, today + ".jsonl"), os.path.join(jd, yday + ".jsonl")
+            wrote = os.path.isfile(src)          # 先取，归档会把流水删掉
+            if wrote:
+                os.replace(src, dst)             # 把今天的流水挪到昨天 = 模拟跨天
+
+            class _Stub:                         # 归档客户端替身：自检不联网
+                ready = True
+
+                @staticmethod
+                def chat(messages):
+                    return json.dumps({
+                        "digest": "自检用的画像：对方在备考。",
+                        "events": [{"text": "周四要交 C 语言作业",
+                                    "keywords": ["C语言", "作业"]}],
+                    }, ensure_ascii=False)
+
+            mem._alt_client = _Stub()
+            archived = mem.archive(scope, yday)
+            st = mem.stats_of(scope)
+            hit = mem.recall(scope, "C 语言的作业")
+            blk = mem.block(scope, "作业")
+            forgotten = mem.forget(scope)
+            rows = [
+                ("按天写流水", wrote),
+                ("跨天归档成功", archived),
+                ("档案里有画像与事件", st["events"] >= 1 and st["has_digest"]),
+                ("归档后流水已清", not os.path.isfile(dst)),
+                ("按线索召回命中往事", bool(hit) and "作业" in hit[0]["text"]),
+                ("提示词片段成型", "长期记忆" in blk),
+                ("遗忘后档案清空", forgotten and mem.stats_of(scope)["events"] == 0),
+            ]
+            ok = sum(1 for _, c in rows if c)
+            for name, cond in rows:
+                print(f"    {'✓' if cond else '✗'} {name}")
+            print(f"    {ok}/{len(rows)} 通过")
+        except Exception as exc:
+            print(f"    [X] 自检抛异常：{type(exc).__name__}: {exc}")
+        finally:
+            _MEMORY = old_mem                    # 恢复全局钩子，别留下沙箱对象
+            shutil.rmtree(sandbox, ignore_errors=True)
 
     print("\n[7] 会话身份与排队风控")
     q = cfg.get("queue") or {}
@@ -5120,7 +5929,7 @@ def scope_aliases(cfg: dict) -> list[tuple[str, list[str]]]:
     列出「会话键 → 可用来匹配的别名」。
 
     别名来自取号缓存（昵称 → QQ 号）。**这一步很重要**：会话键长这样
-    `private:3302676083`，而用户脑子里记的是昵称（「光みつる」/「测试目标A」）。
+    `private:100000001`，而用户脑子里记的是昵称（「测试备注C」/「测试目标A」）。
     UI 上写着「支持模糊匹配昵称」但实际只能匹配会话键 —— 于是用户输入昵称时
     什么都不会被清掉，而他会以为清掉了。这个不一致本身就是个 bug。
     """
@@ -5158,7 +5967,7 @@ def forget(cfg: dict, target: str) -> int:
 
     ## 匹配键
 
-    同时接受 **会话键**（`private:3302676083`）与**昵称**（取号缓存里的显示名）。
+    同时接受 **会话键**（`private:100000001`）与**昵称**（取号缓存里的显示名）。
     以前只认会话键，而界面提示写的是「会话名或片段」—— 用户按昵称输入时
     **什么都清不掉**，却以为清掉了。所以匹配不到时会列出「昵称 ↔ 会话键」对照表。
     """

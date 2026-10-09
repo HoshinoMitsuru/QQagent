@@ -33,7 +33,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import agent  # noqa: E402
 
-SENDER = "光みつる"
+SENDER = "测试备注C"
 
 # 一条私聊用户「一口气说完」的典型内容池，按批次大小取前 N 条
 POOL = [

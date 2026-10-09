@@ -1,229 +1,54 @@
-# 小清澈.js 项目记忆
+# 项目长期记忆（本人/Psyche/HoshinoMitsuru）
 
-## 项目概述
-海豹骰子 JS 插件，接入 DeepSeek/OpenAI 兼容接口，支持 AI 聊天、多人格切换、连续对话、图片识别。
+> 真实值（真名 / QQ 昵称 / 群名）只住在 gitignored 的 `.workbuddy/memory-local/`；
+> 本文件与仓库其它文件一律用**占位符**。对照表：`.workbuddy/memory-local/身份对照表.md`。
 
-## 当前版本
-- `小清澈.js` v1.7.0 (通用版，识图需手动开启)
-- `小清澈2.0.js` v2.0.0 (QQ陪伴特化版，对话与识图默认全开)
+## 统一纪律（跨项目）
+- **统一更新纪律**：同一处功能改动必须同步到所有适用树（pc-agent-demo-r4 / -cu / -vm），同步后各树独立回归；多版本并列存放、从不覆盖不删除。
+- 安全风格：先只读侦察；破坏性操作先警告+清单+确认；删除走回收站/确认可 Git 复原；错误码一个码一个根因、fixes 给可执行抓手；掩码按最宽形态认（含 • 即掩码，防真密钥被占位符覆盖）。
+- **脱敏约定（2026-10-09 起）**：真名/昵称/备注名/群名一律写成占位符 —— `本人`（叙述与决策记录）、`小明`（测试语料位）、`测试目标A`（QQ 资料卡昵称）、`测试备注C`（同一联系人的**备注名**，必须与 `测试目标A` 分开 —— README 那个「列表显示备注名、资料卡显示昵称」的例子靠两者不同成立）、`测试群B`（群名）。**同一个人的多个名字各占一个占位符**。真实值只落 `.workbuddy/memory-local/`（已 gitignore）；词表 `tools/sensitive-words.local.txt` + `.githooks/pre-commit` 会拦住漏网，命中提示里指向那个目录。**绝不要 `git add -f` 本地值目录**（`-f` 绕过 ignore = 直接入库）。
+- 流程偏好：报告 bug 只给症状→AI 先修复；复跑命令完整含全部 flags；A+B 选择题拍板后再落地；UI 禁 emoji、用 SVG 图标；文档用 file+function 锚点（不用行号）。
+- 密钥规范：config.json（gitignored）为唯一来源；接口只回掩码；模板走 *.example.json。
+- 每日变更落盘 .workbuddy/memory/YYYY-MM-DD.md 再切项目。
 
-## 关键架构
-- 单文件 IIFE 架构 `(() => { ... })()`
-- 使用 `seal.ext` API 注册插件
-- 配置通过 `seal.ext.registerXxxConfig` 注册，通过 `cfg(ext)` 函数统一读取
-- 消息缓冲防抖机制（`onNotCommandReceived` + setTimeout）
-- 历史记录持久化到 ext.storage
+## 小清澈.js（海豹骰 AI 插件）
+- v1.7.0 通用版 / v2.0.0 QQ 陪伴特化（识图默认开、连续对话 1800s）。
+- 单文件 IIFE + seal.ext API；防抖 onNotCommandReceived+setTimeout；历史存 ext.storage。
+- 识图 image-to-text：transformTextToArray/imageToText/processMessageWithImages；学习源 D:/Psyche/sealdiceextension/aiplugin4.js。
 
-## 图片识别功能 (v1.7.0 新增)
-- 移植自 `D:/Psyche/sealdiceextension/aiplugin4.js` 第 14400 行附近
-- 采用 image-to-text 模式：先识别图片为文字，再融入对话
-- 核心函数：`transformTextToArray`、`imageToText`、`processMessageWithImages`
-- 配置项：`imageRecognitionEnabled`（默认关闭）、`visionApiUrl/Key/Model`（留空回退到主API）
-- 指令：`.ai img [提示词] + 图片`
+## pc-agent-demo（PC 端 QQ AI 代理，UIAutomation 路线）
+- 三树并列：-vm（V1 附着）/ -r4（V2 独立桌面 R4）/ -cu（V3 LLM Computer Use，deepseek-flash，F1-F7✅）。仓库 github.com/HoshinoMitsuru/QQagent，双远程 GitHub+Gitee。
+- 交付：qq-agent.exe（onefile）+ WebUI；验收必须 -noadmin 变体（默认版 UAC 清单→WinError 740）。
+- 打包铁律：冻结后 sys.executable 不接受 -m，一律子命令 child_args()；动态拉起模块进 spec hiddenimports；打包版无 Pillow（抓图落 .bmp）。
+- 数据目录唯一来源 QQ_AGENT_HOME→exe 目录→源码目录（app/paths.py），绝不看 CWD。
+- 宿主进程不要提前碰 UIA（失败 Invoke 会永久弄坏进程内 uiautomation）；探测派一次性子进程；全进程一条线程碰 UIA。
+- 读窗口标题：两阶段枚举+SendMessageTimeoutW（GetWindowTextW 会挂）。
+- 写文本免前台：判据=焦点在 Chrome_RenderWidgetHostHWND；AttachThreadInput+SetFocus+WM_CHAR；「必须抢前台」已证伪。剪贴板路在独立桌面必败→ write_mode=auto 按桌面自动（独立桌面判据见 agent._independent_desktop，锁屏不能当独立桌面）。
+- R4：CreateDesktopW+lpDesktop，实测六项通过；最小激活集合=空；停机语义=宿主退出连 QQ+桌面一并销毁（_cleanup_after_stop 由壳执行，两分支都收尾）。锁屏判据用 OpenInputDesktop。
+- CDP 已作废（QQ 丢弃调试端口，判据=端口是否监听）；Chromium 系 Pattern 判断用 IsXxxPatternAvailable（GetCurrentPattern 谎报全可用）。
+- 常驻前提：QQ 有打开着的会话（E-QQ-008）；无会话列表=E-QQ-004（判据 recent-contact-list）。
+- 停止用哨兵 state/STOP；碰 QQ 任务串行；ctypes 显式 argtypes/restype。
+- 会话持久化：conversations/ 目录化（每会话一 json），旧单文件一次性迁移（目录非空不迁移防覆盖）；UI 可删（store.forget）。
+- 长期记忆（2026-10-09，VM+R4，CU 不做）：`memory` 配置块 + `LongTermMemory`；当日流水 jsonl（临时）→ 跨天/启动补算用模型压成 digest+events（长期只留摘要）；注入位置=system 之后、对话之前；检索用本地 CJK 2/3-gram（不引 embedding）；超容量把最老事件**先并进画像再删**；`.ai reset` 与 UI 删会话都**连带删**记忆（壳侧 `_delete_memory`，E-WEB-006 报「部分成功」）。E-MEM-001~008。
+- 长期记忆的两个坑：① `m.get(k) or 5` 会把合法值 **0** 悄悄改回 5（`recall_max_items` 的 0 是文档化取值）→ 用 `k if k is None else ...`；② 壳进程不能 import agent，`_memory_dir()` 必须与 `abs_here(memory.dir)` 解析出**同一目录**，否则「界面看不到记忆/删不干净」。
+- 测试隔离：History.push 会往 memory.dir 写流水，凡造 Agent/History 的测试都要把 `memory.dir` 指到临时目录，否则假会话（`private_小明`）会进真实 state/memory。
+- 行尾判据：本机 `grep -c $'\r'` 会**假阴性**；判 CRLF 用 `tr -cd '\r' | wc -c`。R4 盘上 CRLF、VM 是 LF（core.autocrlf=true），打补丁前先把目标文件整份 LF 化再 `patch -p1`，打完还原。
+- 安全闸（CU）：GatedExecutor 三名单 open_chat_allow/read_allow/attach，config.json 唯一来源，`qq-cu allow` 管理；hosted 空名单 fail-closed；探不到会话标题=fail-closed。
+- 改 agent 配置键两处同步：agent.DEFAULTS + app/settings.py 副本（test_ui 有比对闸）。
+- 改完必跑：test_errors.py + test_ui.py + build.bat + test_exe.py。
+- **密钥纪律（2026-09-28 定，2026-10-09 收尾）**：唯一主存储 = `config.json` 的 `llm.api_key`（该文件必须被 `.gitignore` 覆盖）；`secrets.local.json` 是旧配置的**只读后备** —— `resolve_api_key` 的 `api_key_file` 分支 / `ensure_secrets_file()` / `SECRETS_PATH` 都**有意保留，不许删**。两条安全不变量：① config.json 被 ignore ② 接口/状态只回掩码。三树 test_exe.py 的旧断言（「Key 进了 secrets.local.json」）已按新纪律反转。
+- **`reset_to_defaults()` 的假承诺（10-09 抓到的真回归）**：它把 config.json 整份换掉 → 收拢后连密钥一起换掉，而界面文案承诺「API Key 不受影响」。修法=写盘前把现有 `llm.api_key`（掩码则丢）捞回来，返回值加 `kept_api_key`。**配套陷阱**：`agent_defaults()` 返回的是模块级 `_LOCAL_DEFAULTS` **本体**，`dict(...)` 只是浅拷贝 —— 在它上面 `_set_path` 会把用户密钥写进全局默认值。改它必须 `copy.deepcopy`。
+- **跑测试要用对解释器**：本机 bash 的 `python` 是不带 uiautomation 的裸 3.13，跑 test_ui 会**假报 2 条失败**（--peek rc=2 / 子进程没输出 JSON）。用 `%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe`（build.bat 第二候选，装齐依赖 + PyInstaller）。
+- 打包变体命名：**CU 的 qq-agent.spec 是新版**（`APP_NAME` 直接决定产物名，默认版与 nadmin 互不覆盖）；VM/R4 的 spec 仍硬编码 `qq-agent`，多变体必须构建后 `mv` 改名，否则后建的会盖掉前一个。
+- MCP 薄壳 qq-mcp.py：手写 stdio JSON-RPC，每次 tools/call 派一次性 qq-cu 子进程；信封提取兼容日志+JSON 混合 stdout。
+- 验证脚本自举污染：用 cmdline 内容当进程判据会匹配到脚本自身→用进程名过滤+标记。
+- git commit 信息含工具名字样会被 hook 误拦→写临时文件 `git commit -F`；gitee HTTPS 推送偶发卡死，github SSH 443 稳定。
 
-## 文件位置
-- 通用版：`小清澈.js`（v1.7.0）
-- 陪伴版：`小清澈2.0.js`（v2.0.0）
-- 学习源：`D:/Psyche/sealdiceextension/aiplugin4.js`
-- 类型定义：`seal.d.ts`
+## 多端 AI 陪伴（ai-web-page/wechat_client/小程序）
+- 部署：仅 ECS https://aligera.website（FastAPI/uvicorn+nginx+systemd）；demo_gate 中间件 DEMO_PASSWORD。
+- 语音克隆：DashScope Qwen-TTS qwen3-tts-vc-realtime；密钥收敛 ai-web-page\wechat_et_qq_client\tools\data；voices.json 登记。
+- 前端错误收敛 wechat_client/utils/errors.js；webapp 迁移 Vite+TS+设计令牌。
+- P0 路径穿越（/assets/ 读 server/config.py）已修，保持复核警惕。
 
-## v2.0.0 与 v1.7.0 关键差异
-- EXT_NAME: `Mitsuru-AiChat-Companion`（可独立安装）
-- imageRecognitionEnabled: `false` → `true`
-- continuousConversationTimeoutSeconds: `600` → `1800`
-
----
-
-# pc-agent-demo（PC 端 QQ AI 代理 · 路线 A）
-
-目标：附着到本机已登录的 QQ 客户端窗口，用 **UIAutomation** 读消息、调模型、
-再用剪贴板+按键把回复打进去发出。不碰协议、不碰群控。
-
-## 已定路线
-- **部署走 Windows 虚拟机**（guest 里跑 QQ + 代理），宿主机不受打扰，且绕开锁屏限制。
-- **交付形态：单个 exe + WebUI 控制台**（`qq-agent.exe`），用户只需预先打开并登录 QQ。
-- 前台依赖的真实范围（实测）：**读取完全免前台**（最小化也能读），切会话走 `InvokePattern` 也免前台。
-  ⚠️ 原写「只有写文本必须抢前台」—— **已证伪**，见下面「写文本」条目。
-
-## 两棵并列目录树（V1 / V2）与 V2 现状
-
-- **V1** `pc-agent-demo-vm/`（附着式，服务 VM），代码零改动，tag `v1.0-vm-attach`。
-- **V2** `pc-agent-demo-r4/`（R4 独立桌面托管），tag `v2.0-r4-mechanism`。
-  V2 是从 V1 复制出来的，**里面仍有大量 V1 的附着逻辑**（尚未替换，待拍板）。
-- **V3** `pc-agent-demo-cu/`（LLM Computer Use，2026-09-25 立项）。路线 C 混合：
-  语义工具集（6 个 tool calls）为主路径 + 视觉 verifier 兜底；Executor 双执行面抽象
-  （attach 主号人工确认 / hosted 小号全自主）；第一版手动下发任务。
-  默认模型 `deepseek-flash`（V4.1-Flash，自带图像理解+Tool Calls+1M 上下文，
-  已核实官方文档，verifier 免第二路视觉 Key）。
-  分期 F1(基建+基线✅)→F2(Executor双执行面+安全锁✅)→F3(工具化 dispatch✅)
-  →F4(Brain tool calling 循环+实测授权：hosted 小号全自主、attach 主号仅「测试群B/本人」
-  白名单+逐条确认✅)→F5(Verifier 视觉校验：截图+deepseek-flash 图像理解三态结论✅)
-  →F6 WebUI→F7 exe 验收。详见 2026-09-25 日志。
-- V2 已实机验证：独立 profile 启动 → 免扫码登录 → **打开一个会话** →
-  常驻宿主 `app/hostd.py` 跑 `agent.run_forever()` → **真的发出回复** → 优雅停止；
-  控制台「隐藏桌面」面板（`GET /api/host/status|shot.png`、`POST /api/host/start|stop|grab`）
-  + 日志通道（`app/logtail.py` tail `logs/hostd.log`）。
-- **V2 的三条新增硬约束**（都是踩出来的）：
-  ① 宿主进程里**不要提前碰 UIA** —— 一次失败的 `Invoke` 会把本进程的 uiautomation
-     弄成永久坏状态（`-2147220991 事件无法调用任何订户`），登录/探测一律派**一次性子进程**；
-  ② 常驻前**必须有一个打开着的会话**（`ml-list`/`ExEditor-qq-msg-editor` 只在聊天页）
-     → `E-QQ-008`；且「点第一条」不够（第一条可能是公众号 webview），要按客观判据迭代候选；
-  ③ 读窗口标题必须走 `SendMessageTimeoutW` + 两阶段枚举（`EnumWindows` 回调里发消息会挂）。
-
-**理论依据**（解释为什么"藏起来"会导致停摆）：Chromium 在 Windows 上**自算遮挡**
-（z 序枚举减法），判定 occluded 后**停止渲染 + JS 节流**。会被判的情形：
-最小化 / 完全遮挡 / 另一虚拟桌面 / 锁屏 / **移到屏幕外**。
-
-**参考项目 sealdice-core 走的是协议端路线**（`lagrange/` `milky/`），它的"无窗口"
-只是 `ShowWindow(GetConsoleWindow(), SW_HIDE)` 藏控制台 ——
-**给不了"后台渲染 UI"的答案，只有进程形态可借鉴**。
-
-## 目录约定（`pc-agent-demo/`）
-- `agent.py` 主流程（读→防抖聚合→入队→生成→三重复核→发送）；
-  `qqid.py` 取 QQ 号；`reply_queue.py` 排队与风控。
-- `error_codes.py` **错误码目录**（73 条，十一个域），agent 与 app 共用同一份；
-  `app/errors.py` 统一 JSON 信封；`app/diagnose.py` 一键体检 + 可复制报告。
-- `app/` 控制台壳：`main`（双模式入口）`server`（REST+SSE）`supervisor`（子进程托管）
-  `qqctl`（QQ 发现/体检/重启 + UiaWorker）`settings`（三文件配置）`tray` `platform_win`
-  `logbus` `paths` `runtime` `errors` `diagnose` `web/index.html`。
-- **`archive/` = 开发期证据（归档不删）**：11 个探针/基准脚本 + 9 个原始 dump +
-  `archive/README.md`（逐个写明「当时要回答什么问题 → 结论」，含复现命令）。
-  它们是 README 里「实测证明……」说法的依据，**不要删**。
-  文档里的命令已同步成 `archive/` 前缀。
-  新增（R4 调研）：`probe_hidden_desktop.py`、`probe_no_foreground_write.py`、
-  `r4_bed.html`（被测目标页）、`r4_shot_hidden.png`、`host-result.json`。
-  ⚠️ 其中 `cdp_probe.py` 的「已探通」在当前 QQ 版本**不再成立**（QQ 丢弃了调试端口）。
-- 构建：`build.bat` → `qq-agent.spec` → `dist/qq-agent.exe`（onefile + windowed + uac_admin）。
-  三个变体：admin / `qq-agent-noadmin.exe`（免 UAC）/ `qq-agent-console.exe`（诊断版）。
-  **开关名 `nadmin`（也接受 `noadmin`）**，产物名由 build.bat 自动决定，不再互相覆盖。
-- **打包的两条铁律**（都是踩出来的）：
-  ① **冻结后 `sys.executable` 是 exe 自己，不接受 `-m`** —— 任何「让程序再跑一个自己」
-     的地方都要走子命令（`--run-agent/--run-qqid/--run-hostagent/--run-hostd`），
-     V2 里统一收在 `host.child_args()`；只被动态拉起的模块必须写进 spec 的 hiddenimports。
-  ② **打包版没有 Pillow**（spec 刻意排除）→ `winmsg.grab_any` 落的是 `.bmp` 不是 `.png`。
-     服务端不能假定后缀，要问抓图结果要文件名（`server._shot_path()`）。
-- **验收顺序**：`test_exe.py`（真 exe，**必须用 `-noadmin` 变体**，默认版带
-  requireAdministrator 清单而 CreateProcess 不弹 UAC → `WinError 740`）
-  → `archive/probe_exe_hidden_desktop.py`（打包版真能进隐藏桌面，14 项）。
-- 测试：`test_errors.py`(252)、`test_ui.py`(104)、`test_text_port.py`(104)、
-  `test_discovery.py`(43)、`reply_queue.py --selftest`(68)、`test_exe.py`(45)；
-  另有 3 套真机测试 `test_live_chain` / `test_pipeline` / `test_send_guard`。
-- **`技术核实文档.md`**：汇报底稿，主线 = 技术难点与创新。
-  每个难点按「问题→约束→做法→证据→代价」写，含 §9 汇报要点速查（30 秒/3 分钟/10 分钟）。
-
-## 硬性约定
-1. **路径解析只允许一个事实来源**：数据目录走 `QQ_AGENT_HOME → exe 目录 → 源码目录`
-   三级解析（`app/paths.py` / `agent._resolve_home()`）；其它模块引用它，不要各自重算 `__file__`。
-   相对路径一律按数据目录解析，**绝不看当前工作目录**（CWD 相关的行为会导致「换个目录结果不同」）。
-2. **密钥三文件分离**：`config.json`（可公开）/ `secrets.local.json`（Key，已 gitignore）/
-   `app-settings.json`（壳设置）。API Key 绝不写进 config.json，接口只回掩码。
-3. **全进程只有一条线程碰 UIA**（`CUIAutomation` 是进程级单例，跨线程会静默返空）；
-   该线程启动时必须 `UIAutomationInitializerInThread()`。
-4. **停止常驻用哨兵文件** `state/STOP`，不用 Ctrl+C（子进程 `CREATE_NO_WINDOW` 无控制台）。
-5. **会碰 QQ 的任务必须串行**，且常驻运行时一律禁用（用一个 `concurrent` 标志表达）。
-6. 纯 ctypes 调用一律显式声明 `argtypes`/`restype`（64 位句柄截断是静默的）。
-7. 改完必须跑：`test_errors.py` + `test_ui.py` + 重新 `build.bat` + `test_exe.py`
-   （冻结问题只在真 exe 上暴露）。
-8. **报错规范：一个错误码只对应一个根因**，且每条 `fixes` 要给可执行的抓手
-   （界面元素名/路径/命令/明确动词），不要写成解释。
-   新增报错一律走 `report()`/`E.envelope()`，不允许裸 `log("ERR", "失败了")`
-   —— `test_errors.py` 里有源码扫描会拦住它。
-   `agent.py` 侧：`report()` 带抑制（常驻用）、`diag()` 直接打印（命令行用）。
-
-## 已知使用约束（部署时必看）
-1. **启动常驻前，QQ 里必须先有一个打开着的会话** —— 2026-09-25 已**修好并精确报码**：
-   `ml-list` / `ExEditor-qq-msg-editor` / `send-msg` / `chat-header__contact-name`
-   只存在于聊天页，起始页一个都没 → `dom_exposed()` 为 False。
-   - `E-QQ-004` 与新增的 `E-QQ-008` 分工：判据是「`recent-contact-list` 在不在」。
-     会话列表在 = `E-QQ-008`（点开会话即可）；连会话列表都没有 = `E-QQ-004`（树是空壳）。
-     两个原误导点都改了：① 常驻不再拿「参数没生效」去解释「没打开会话」；
-     ② 界面「体检」的 `ok` 判据改成与 `dom_exposed()` **完全一致**（`ml_list_found or editor_found`，
-     不再把 `session_count` 算作可读），并单独给出 `chat_open` 字段让界面说清那一种情况。
-   - 隐藏桌面形态下由 `hostd` 自动完成（迭代候选会话条目，直到 `ml-list` 出现）。
-
-## 已修的关键坑（防再犯）
-1. **掩码判据过窄 → 真密钥被覆盖**（`settings._is_mask`）。
-   判据必须是「出现 `•` 就当掩码」而不是「全是 `•`」：
-   `_mask()` 会保留首尾各 4 位真字符（`sk-1••••••••ghij`），窄判据会把它当成真密钥
-   写进 `secrets.local.json`，**静默覆盖真密钥**，之后报出的却是
-   `UnicodeEncodeError: latin-1 position 11-18`（看起来像网络问题）。
-   一般原则：**「是不是占位符」要按最宽形态认** —— 把真数据当占位符只是麻烦，
-   把占位符当数据是拿它覆盖真数据。回归测试见 `test_errors.py §18`。
-2. **兜底错误码不得断言具体根因**。`EC.wrap(exc, "E-LLM-002")` 这种写法会把
-   任何未知异常打成「连不上接口」→ 假诊断。兜底一律用中性的 `E-LLM-012`。
-   回归测试见 `test_errors.py §17`。
-3. **失败之后不得再报一条互相矛盾的后续错误**（`_last_gen_fail` 机制）。
-4. **「写文本必须抢前台」是错的**（原 `agent.py:3713`）。
-   真正判据：**OS 焦点是否落在 `Chrome_RenderWidgetHostHWND` 上**（不是窗口是不是前台）。
-   `AttachThreadInput` + `SetFocus(renderer 子窗口)` + `WM_CHAR` 即可写入后台窗口，
-   **用户前台全程不动**（含中文，实测）。`SetForegroundWindow` / `BringWindowToTop` 在写文本路径上多余。
-   ⚠️ 改之前必须先补测：`SetFocus` 到 QQ 后**用户的按键会不会漏进 QQ**（U3，尚未测）。
-   另注：`SendMessage` 返回值非 0 **≠** 对方处理了 —— 必须读回验证。
-5. **「被盖住」≠「被最小化」**。完全遮挡下 `Invoke` **可用**（实测 0.63 s 切会话成功）；
-   只有最小化才静默失效。`agent.py:3713` 与 `qqid.py:698` 原口径互相矛盾，以后者为准。
-6. **Chromium 系不能靠 `GetCurrentPattern` 判断 Pattern 存不存在** —— 它会**谎报"全可用"**。
-   要读 `IsXxxPatternAvailable` 属性投影。实测 QQ 输入框：`IsValuePatternAvailable=False`、
-   `IsTextPatternAvailable=True`（只读）→ **输入框没有任何可写 Pattern**，
-   写入只能走窗口消息（或 CDP，但见下）。
-7. **`GetWindowTextLengthW` / `GetWindowTextW` 会给对方线程发消息**，对方不处理就
-   **无限期挂住**（无返回、无异常、无日志）。控制台的 `/api/state` 每 2s 被轮询，
-   曾因此整个状态流永久冻住（界面显示"心跳停更/连不上"，而进程活得好好的）。
-   正确做法：**两阶段**枚举（先收集不发消息的字段，枚举结束后再读标题）
-   + `SendMessageTimeoutW(SMTO_ABORTIFHUNG)`。且在 `EnumWindows` 回调**里**发消息
-   会静默拿到空标题（实测 45 个窗口全空）。
-8. **`_desktop_locked()` 不能用「有没有前台窗口」当判据** —— 非活动桌面上
-   `GetForegroundWindow()` 恒为 NULL，那是 R4 的正常态。判据应是
-   `OpenInputDesktop` 能不能打开（锁屏的直接证据）。
-9. **一个错误码只对应一个根因**这条也要用在「进程级状态」上：
-   宿主进程的退出码、agent 的退出码、心跳里的阶段，三者不能混用一个字段
-   （原名 `agent_rc` 会把「启动就失败」读成「正常返回 0」）。
-
-## 后台化运行（R4）—— 已实测全部通过
-
-- **R4 = `CreateDesktopW` + `STARTUPINFO.lpDesktop`**，把 QQ 启动到用户看不见的桌面。
-- **实测六项全通过**：窗口可见 / **renderer 完全不节流**（`raf` 持续涨、`fps=180`、`vis=visible`）/
-  a11y 树完整 / **免前台写入成功（含中文）** / **窗口画面可抓**（`PrintWindow`+`PW_RENDERFULLCONTENT`，
-  二维码登录靠它）/ **用户前台完全不受影响**。
-- **激活方案消融：最小必需集合 = 空**。那张桌面上只有它一个窗口，Chromium 上来就认为自己是 active，
-  连 `SetFocus` 都不必调。⚠️ 消融每档必须**独立进程、全新窗口**（焦点状态有粘性）。
-- **非活动桌面上不存在前台窗口**：`SetForegroundWindow` 恒返 0、`GetForegroundWindow()` 恒 NULL。
-  → 剪贴板 + `Ctrl+V` 那条路在隐藏桌面上**直接断掉**（但也**不需要**它）。
-- **已排除**：窗口移到屏幕外（官方点名会节流）；R3 虚拟显示器（用户 D3=b 已否决）；
-  **不能做成 Windows 服务 / Session 0**（UIA 看不到用户会话窗口）。
-- **CDP 路线在本机 QQ 版本（9.9.35-52892）已作废**：双桌面对照证明 QQ 主动丢弃
-  `--remote-debugging-port`（参数在命令行里、但端口不监听、`DevToolsActivePort` 不存在）。
-  → 判据是「端口是否监听」，不是「命令行里有没有参数」。
-- **新增产品级前提**：隐藏桌面上的 QQ 必须用**独立 profile**（否则抢用户自己的 `%APPDATA%\QQ`）
-  → 未登录 → **首次必须扫码**，而二维码画在看不见的桌面上 → 靠 `PrintWindow` 取图给用户。
-- 全文与未验证清单：`虚拟后台方案调研.md`（§6.4 实测 / §6.5 免前台写入 / §6.6 诚实清单）。
-
-## V2 的一条血泪教训：两张卡操作的是**不同的号**
-- 界面上「隐藏桌面（独立 profile）」操作**那张桌面上用独立 profile 的号**；
-  「常驻运行」操作**你自己桌面上登录着的那个号**（= 主号）。两者互斥。
-- 2026-09-25 01:37 真实误操作：有人在 V2 的 exe 上点了「常驻运行 → 开始常驻」，
-  于是程序附着**主号**并**真的往一个群里发了一条 AI 回复**。
-  三层叠加：① 那不是残留进程，V1 路线本来就操作本机 QQ；
-  ② **exe 的数据目录是 `dist\`**（它自己那一层），读的是首次运行新生成的默认配置
-  （默认 `private_chat_only=false`＝群聊也回）；③ 按下去没有任何二次确认。
-- 已修：卡片换序并改名「常驻运行（操作你桌面上的 QQ）」、加二次确认
-  （显示上次读到的会话名 / 回复范围 / 数据目录）、卡片内常驻警告行、
-  `build_state` 暴露 `reply_policy` 供界面念出「这次会回复谁」。
-
-## 写入路径必须是「按桌面自动」，不能靠人配（E-FG-001 的根因）
-- `uia.write_mode` 三档：**`auto`（默认）**/ `wmchar` / `clipboard`。
-  `auto` = 普通桌面走剪贴板（V1 老路）、独立桌面（R4）走窗口消息。
-- 为什么不能让用户手配：**独立桌面上剪贴板路径 100% 不可能成功**
-  （`SetForegroundWindow` 恒返 0）。原先这个键没有默认值、代码缺省当 clipboard，
-  于是隐藏桌面路线上每次发送都报 `E-FG-001`，看着像偶发。
-- 判定独立桌面：`本线程桌面名 != 输入桌面名` 且 `输入桌面 != 'Winlogon'`；
-  输入桌面打不开时**不能**当成独立桌面（那是锁屏/权限，仍在自己的桌面上）。
-  `agent._independent_desktop()`。
-- 显式配 `clipboard` 但处于独立桌面 → 仍改用 wmchar + 一条 WARN（不静默改人配置）。
-- 加 agent 配置键时**两处都要加**：`agent.DEFAULTS` 与 `app/settings.py` 里那份副本
-  （`test_ui.py` 有逐键比对闸门）。
-
-## 用户偏好（本项目内已确认）
-- UI 禁 emoji，用内联 SVG 图标；支持明暗主题。
-- 破坏性操作必须二次确认并说明后果（重启 QQ、真发消息、清空上下文）。
-- 存疑的设计要给「为什么这样做」的解释，而不是只给结论。
-- 有时会明确要求「只记录、先别改代码」——照做，把要点与将来方案写进日志即可。
+## 共享雨伞 IoT
+- STM32+ESP8266+微信云开发+小程序；边缘 GPS/防拆/锁，云端计费/二维码（generateRackQrcode）。

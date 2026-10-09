@@ -141,7 +141,7 @@ Chromium 一上来就自认 active，连 `SetFocus` 都不必调。
 RECV  测试目标A: 我选择发的测试消息是：预祝顺利。
 AGG   聚合 3 条 → 1 个待回复项入队
 CONT  连续对话已激活
-SEND  → '测试目标A'(QQ 3302676083) (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
+SEND  → '测试目标A'(QQ 100000001) (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
 回读： 【我方】Susurrus-本人: (｡･ω･｡) 收到啦～你这是在调试什么功能吗？…
 ```
 
@@ -255,7 +255,7 @@ R4 专有的验收项：`--help` 里列出两个宿主子模式、两个子模�
 [01:37:57] EXEC  启动子进程：qq-agent.exe --run-agent
 [01:37:57] RUN   常驻进程已启动 —— 会真的回复并发送消息
 [01:37:58] INFO  已附着 QQ 窗口，标题='测试目标A'，群聊=False     ← 主号
-[01:39:37] SEND  → '凡杜林办事处'(QQ 1106928276) 哈哈，可能是我最近吃多了？…  ← 真的发出了
+[01:39:37] SEND  → '凡杜林办事处'(QQ 100000005) 哈哈，可能是我最近吃多了？…  ← 真的发出了
 ```
 
 **为什么会这样**（三层叠加，每一层都单独成立）：
@@ -351,7 +351,7 @@ qq-agent.exe --run-qqid  ...  把自己当 qqid.py 跑
 | ① 定位 QQ | 自动查找 | 顺序：手动指定 → 注册表 → 常见目录 → **盘根**（本机 `D:\QQ.exe` 靠这条） |
 | ② 启动 QQ | 带 `--force-renderer-accessibility` 拉起 | 只在 QQ 完全没在跑时可用；登录由用户自己做 |
 | ③ 体检 | 判「无障碍树读不读得到」 | **不看命令行猜**，见下 |
-| ④ 填参数 | 6 组配置 + 运行环境 | API Key 只写 `secrets.local.json` |
+| ④ 填参数 | 6 组配置 + 运行环境 | API Key 写进 `config.json`（该文件被 gitignore） |
 | ⑤ 开始常驻 | 先只读、后真发 | 停止走「哨兵文件」而不是 Ctrl+C，见下 |
 
 ### 界面上的第六步：隐藏桌面面板（R4 独有）
@@ -404,8 +404,8 @@ V2 多了一张卡：**隐藏桌面（独立 profile）**。两者**互斥**（�
 
 | 文件 | 内容 | 能不能公开 |
 |---|---|---|
-| `config.json` | 全部行为参数 | 可以（注释键都会被保留） |
-| `secrets.local.json` | API Key | **不可以**，已被 `.gitignore` 排除 |
+| `config.json` | 全部行为参数 + **API Key（唯一主存储）** | 不可公开，已被 `.gitignore` 排除 |
+| `secrets.local.json` | 旧配置的 Key（**只读后备**，新版不再写入） | 本来也不可公开，已 ignore |
 | `app-settings.json` | 壳自己的设置（QQ 路径、端口） | 可以 |
 
 界面回显 Key 永远是掩码，接口也不会把明文吐回来 —— `test_ui.py` 里有专门的用例守着。
@@ -804,11 +804,11 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 | **`qq-agent.spec`** | PyInstaller 打包配置（单文件/windowed/UAC 清单/隐式导入） |
 | **`build.bat`** | 一键构建；自动挑一个装齐依赖的解释器 |
 | **`run_ui.bat`** | 源码模式启动控制台 |
-| **`test_ui.py`** | **控制台端到端测试**（101 条：令牌、配置往返、密钥隔离、进程托管、互斥、SSE、UIA 线程、托盘） |
-| **`test_exe.py`** | **打包产物验收**（38 条：真 exe、冻结后的数据目录、exe 自调用、退出） |
+| **`test_ui.py`** | **控制台端到端测试**（128 条：令牌、配置往返、密钥收拢、恢复默认保 Key、进程托管、互斥、SSE、UIA 线程、托盘） |
+| **`test_exe.py`** | **打包产物验收**（52 条：真 exe、冻结后的数据目录、exe 自调用、退出） |
 | **`EXE使用说明.md`** | **给最终用户的手册**（五步流程、VM 加固、排错表） |
-| `config.json` | 配置（模型、提示词、防抖/连续对话/持久化、identity、queue、discovery） |
-| `secrets.local.json` | **本地敏感信息文件**（密钥），已被 `.gitignore` 排除，不进仓库 |
+| `config.json` | 配置（模型、提示词、防抖/连续对话/持久化、identity、queue、discovery、memory）+ **API Key**，已被 `.gitignore` 排除 |
+| `secrets.local.json` | 旧版敏感信息文件（密钥），**只读后备**：`resolve_api_key` 仍读，但界面填的 Key 不再写入 |
 | `secrets.example.json` | 上面那个文件的**模板**（不含真密钥），可以入库 |
 | `state/conversations.json` | 运行期自动生成：按会话隔离的上下文（同样被 ignore） |
 | `state/uid-map.json` | 运行期自动生成：`显示名 → QQ号` 映射（同样被 ignore） |
@@ -821,19 +821,32 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 
 ### 密钥怎么放（重要）
 
-`config.json` 里**不要**填 `llm.api_key` —— 本仓库会推到公开 Gitee。
-密钥单独放在 `pc-agent-demo/secrets.local.json`：
+**2026-09-28 起：密钥就只有一处 —— `config.json` 的 `llm.api_key`。**
+
+单文件收拢的代价是「config 里明文躺着 key」，所以安全不变量换成两条，两条都必须成立：
+
+1. **`config.json` 必须被 `.gitignore` 排除** —— 仓库里只留 `config.example.json`（模板）。
+   本仓库会推到公开 Gitee，这条一旦破，密钥就直接进公开历史了。
+2. **接口/状态只回掩码** —— 界面回显永远是 `sk-1••••••••ghij`，`/api/state` 里不出现明文。
 
 ```json
 { "llm": { "api_key": "sk-xxxxxxxx" } }
 ```
 
-`config.json` 只用 `llm.api_key_file: "secrets.local.json"` 指向它（相对路径按脚本目录解析）。
-`.gitignore` 已排除该文件与 `state/` 目录，`git status` 里不会出现它们。
+为什么不再拆成两个文件：拆开之后「这把 key 到底在 config 还是 secrets」会变成每次都要想一遍
+的索引问题，而 `resolve_api_key` 又同时认两处，谁覆盖谁全靠读代码。收拢后只有一个答案。
 
-这个文件定位是**所有敏感信息的统一存放处**：以后要接视觉模型（图片识别 / URL 读取），
-对应的 key 也写进同一个文件（例如 `vision.api_key`），不要散落到别处。
-结构照抄可入库的 `secrets.example.json`。
+升级路径（不用手动做任何事）：
+
+- 老版本留在 `secrets.local.json` 里的 key **仍然会被读到** ——
+  `llm.api_key_file`（默认就指向 `secrets.local.json`）作为**只读后备**保留。
+- 第一次在界面里填 key 并保存，key 就落进 `config.json`；`secrets.local.json` 从此不再被写。
+- 确认 `config.json` 里已经有 key 之后，那个旧文件留着或删掉都行。
+
+`secrets.example.json` 也留着（历史模板 + 后备文件的结构说明），可以入库；里面没有任何真值。
+
+`state/` 目录、`config.json`、`app-settings.json` 里的运行期痕迹同样已被 ignore，
+`git status` 里不会出现它们。
 
 ## 会话身份：怎么拿到 QQ 号（2026-09-11 实测）
 
@@ -846,7 +859,7 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 | UIA 通用属性（AriaRole / PositionInSet / SizeOfSet / Level） | ❌ | Chromium 对 group 角色一律填 `group` 与 `0`，无业务信息 |
 | 全 UIA 树扫 `AutomationId` | ❌ | 192 个节点里只有 5 个非空：RenderWidget / RootWebArea / drag-area / app / loading |
 | 全树扫「5~12 位数字」文本 | ❌ | 0 个 |
-| **资料卡窗口** | ✅ | `buddy-profile__header-uid` → TextControl `'QQ 3302676083'` |
+| **资料卡窗口** | ✅ | `buddy-profile__header-uid` → TextControl `'QQ 100000001'` |
 | CDP（`--remote-debugging-port=9222`） | ⏳ 未启用 | 端口未监听；需重启 QQ 加参数 |
 
 ### 关键：资料卡是**独立顶层窗口**
@@ -861,7 +874,7 @@ WindowControl '资料卡' class='Chrome_WidgetWin_1'          ← 顶层窗口�
           ├ ButtonControl  '测试目标A的头像'
           ├ GroupControl   'buddy-profile__header-name-wrap' → '查看XXX的个人主页'
           ├ GroupControl   'buddy-profile__header-uid'       ← QQ 号在这里
-          │   └ TextControl 'QQ 3302676083'                  ← 私聊带前缀
+          │   └ TextControl 'QQ 100000001'                  ← 私聊带前缀
           └ GroupControl   'buddy-profile__details-item' …   → 备注 / 签名 / 所在地
 ```
 
@@ -870,7 +883,7 @@ WindowControl '资料卡' class='Chrome_WidgetWin_1'          ← 顶层窗口�
 ```
 GroupControl 'buddy-profile__header-sub-wrap'
   └ GroupControl 'buddy-profile__header-uid'
-      ├ TextControl '1098451742'    ← 群号，没有 "QQ" 前缀
+      ├ TextControl '100000002'    ← 群号，没有 "QQ" 前缀
       └ TextControl ' (7人)'
 ```
 
@@ -885,7 +898,7 @@ GroupControl 'buddy-profile__header-sub-wrap'
 （`state/uid-map.json`）。缓存的键是**会话列表上显示的名字**（通常是备注名）。
 
 > 实测：备注名和资料卡上的真实昵称**可以完全不同**。
-> 例：会话列表显示 `光みつる`，资料卡上却是 `测试目标A`。
+> 例：会话列表显示 `测试备注C`，资料卡上却是 `测试目标A`。
 
 ### 取号命令
 
@@ -1137,7 +1150,7 @@ QQ 主窗口必须**可见**（不能缩托盘、不能最小化），并带无�
 WindowControl 'QQ' class='Chrome_WidgetWin_1'
   ... DocumentControl '' id='RootWebArea'
     GroupControl class='chat-header panel-header ...'
-      ButtonControl '光みつる' class='chat-header__contact-name'        ← 会话标题
+      ButtonControl '测试备注C' class='chat-header__contact-name'        ← 会话标题
         └ 群聊时：同级还有一个 TextControl '(9)'    ← 人数，【群聊判据】
         └ 私聊时：同级是 ButtonControl '在线状态 在线'
     GroupControl class='group-chat'              ← ⚠️ 私聊也用这个名字，不能当群聊标志
@@ -1172,7 +1185,7 @@ GroupControl class='recent-contact-item ...'
   GroupControl class='item__content'
     GroupControl class='item__avatar' → GroupControl class='avatar'   ← Name 空、aid 空
     GroupControl class='item__info'
-      TextControl  '光みつる'                        ← 显示名（= 备注名）
+      TextControl  '测试备注C'                        ← 显示名（= 备注名）
       GroupControl class='secondary-info'           ← 空
       GroupControl class='summary-main' → TextControl 最后一条摘要
       GroupControl class='3条未读'                  ← ⚠️ 未读徽标是 item__info 的【直接子节点】
@@ -1421,7 +1434,7 @@ python -X utf8 archive/cdp_probe.py --type "测试"   # 3) 实测写入（绝不
 | 自己昵称 | ✅ 自动识别 `Claritas-小清澈` |
 | 消息解析 | ✅ 9 条全对：昵称、正文、时间、`[图片]` 标记 |
 | **正文完整性** | ✅ 实测 131 / 138 字完整读出，**无省略**（修正前的 `…` 是打印截断） |
-| **方向判定** | ✅ 私聊双向都正确：`【我方】Claritas-小清澈` / `【对方】光みつる` |
+| **方向判定** | ✅ 私聊双向都正确：`【我方】Claritas-小清澈` / `【对方】测试备注C` |
 | 剪贴板 | ✅ ctypes 写入与回读一致（不依赖第三方库） |
 | **输入链路** | ✅ **可复现 3/3**：写入 → 回读完全一致 → `send--disabled` 翻转 → 清空 |
 | **InvokePattern** | ✅ 代理测试（QQ 不在前台时用 Invoke 点「表情」，面板正常弹出并 Esc 关闭） |
@@ -1429,7 +1442,7 @@ python -X utf8 archive/cdp_probe.py --type "测试"   # 3) 实测写入（绝不
 | **文本能力移植**（2026-09-11 第二轮） | ✅ 防抖聚合 + 连续对话 + 上下文持久化，全部离线冒烟通过 |
 | **基础等待两档自适应** | ✅ 连续 3 轮单条 → 5s 降 2s；出现连发 → 回 5s 并重新计数（端到端已验） |
 | **离线测试** | ✅ `test_text_port.py` **57/57 通过**（不碰 QQ、不联网、不发送） |
-| **敏感信息落位** | ✅ `secrets.local.json` 取到插件同款 key（35 位）；`.gitignore` 已排除，`git status` 不出现 |
+| **敏感信息落位** | ✅ `secrets.local.json` 取到插件同款 key（35 位）；`.gitignore` 已排除，`git status` 不出现 —— *当时的落点；2026-09-28 起密钥已收拢进 `config.json`（同样 ignore），该文件降级为只读后备* |
 | **未读徽标可读** | ✅ 会话列表项能读到 `3条未读` / `99+`，并解析出数字（发现链路的输入） |
 | **扫列表开销** | ✅ 7 个会话中位数 **84ms**（min 76 / max 90）；2s 间隔下约 4% 时间占用 |
 | **列表虚拟化上限** | ⚠️ 7 项 × 96px = 672px，视口 821px，`ScrollPattern` 不支持 → 折叠以下的会话**不在 UIA 树里** |

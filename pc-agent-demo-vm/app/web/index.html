@@ -1239,7 +1239,7 @@ $("#btnSave").addEventListener("click", async () => {
 $("#btnReload").addEventListener("click", () => { loadSettings(); toast("已重新读取磁盘上的配置"); });
 $("#btnReset").addEventListener("click", async () => {
   const ok = await confirmDialog({ title: "恢复默认配置", danger: true, confirmText: "恢复",
-    body: "config.json 会被替换成内置默认值（会先自动备份）。API Key 不受影响。" });
+    body: "config.json 会被替换成内置默认值（会先自动备份）。API Key 会保留。" });
   if (ok) { const r = await api("/api/settings/reset", {}); toast(r.ok ? "已恢复默认值" : "失败", r.ok ? "ok" : "err"); loadSettings(); refresh(); }
 });
 $("#btnOpenData").addEventListener("click", () => api("/api/system/open", { target: "data" }));
@@ -1373,7 +1373,8 @@ async function loadConversations() {
     const res = await api("/api/conversations");
     const items = res.items || [];
     $("#convSub").textContent =
-      `${items.length} 个档案 · ${res.dir || "目录未知"}`;
+      `${items.length} 个档案 · ${res.dir || "目录未知"}` +
+      (res.memory_dir ? ` · 记忆 ${res.memory_dir}` : "");
     if (!items.length) {
       body.innerHTML = '<div class="empty">还没有会话档案</div>';
       return;
@@ -1382,6 +1383,19 @@ async function loadConversations() {
     for (const it of items) {
       const when = it.used_at
         ? new Date(it.used_at * 1000).toLocaleString() : "—";
+      // 长期记忆：和上下文分开显示。用户最需要一眼看出的是「删了会话，
+      // 但这家伙是不是还记得我」—— 所以有档案时把条数和 token 都摆出来。
+      const mem = it.memory || {};
+      let memTxt = "";
+      if (mem.broken) {
+        memTxt = " · 长期记忆档案损坏";
+      } else if (mem.exists) {
+        memTxt = ` · 长期记忆 ${mem.events} 条 / ${mem.tokens} token`
+               + (mem.has_digest ? "（含画像）" : "")
+               + (mem.journal_days ? ` + 待归档 ${mem.journal_days} 天` : "");
+      } else if (mem.journal_days) {
+        memTxt = ` · 长期记忆 ${mem.journal_days} 天待归档`;
+      }
       const row = el("div", "conv-row" + (it.broken ? " broken" : ""));
       row.innerHTML =
         `<div class="conv-info">` +
@@ -1390,17 +1404,24 @@ async function loadConversations() {
         (it.broken ? "档案损坏（建议删除）"
                    : `${it.entries} 条上下文`) +
         (it.continuous ? " · 连续对话中" : "") +
+        memTxt +
         ` · 最近使用 ${when}</div></div>`;
       const btn = el("button", "ghost sm icon-btn");
       btn.innerHTML = ICONS.trash;
       btn.title = "删除该会话记录";
       btn.addEventListener("click", async () => {
         // 破坏性操作：档案删了就没了（历史上下文不可恢复），必须二次确认
+        const memNote = (mem.exists || mem.journal_days)
+          ? `<br><br>该会话的<b>长期记忆</b>` +
+            (mem.exists ? `（${mem.events} 条事件 / ${mem.tokens} token）` : "") +
+            `会一并删除 —— 否则清了上下文它还是记得往事。`
+          : "";
         const ok = await confirmDialog({
           title: "删除会话记录？",
           body: `将删除 <b>${esc(it.scope)}</b> 的对话档案` +
                 `（${it.broken ? "损坏档案" : it.entries + " 条上下文"}）。<br><br>` +
                 `删除后该会话的 AI 上下文清空，<b>不可恢复</b>。` +
+                memNote +
                 `若常驻正在运行，它会在下次落盘前自动丢弃内存里的副本。`,
           confirmText: "确认删除", danger: true
         });
@@ -1408,7 +1429,14 @@ async function loadConversations() {
         try {
           const r = await api("/api/conversations/delete", { scope: it.scope });
           if (r.ok) {
-            toast(r.deleted ? `已删除：${it.scope}` : "档案不存在（可能已删过）", "ok");
+            const extra = (r.memory && r.memory.files)
+              ? `（含长期记忆 ${r.memory.files} 个文件）` : "";
+            toast((r.deleted ? `已删除：${it.scope}` : "档案不存在（可能已删过）") + extra,
+                  "ok");
+            if (r.warning) {
+              // 部分成功必须显式提示，不能让「已删除」把记忆没删掉这件事盖过去
+              toast(`长期记忆没删干净 [${r.code || "E-WEB-006"}]：${r.warning}`, "err");
+            }
             loadConversations();
           } else {
             const err = r.error || {};

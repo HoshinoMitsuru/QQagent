@@ -67,7 +67,7 @@ def item_label(item) -> dict:
           └ item__content
               ├ item__avatar  (GroupControl，Name 空、aid 空 —— 拿不到头像 URL)
               └ item__info
-                  ├ TextControl           '光みつる'      ← 昵称
+                  ├ TextControl           '测试备注C'      ← 昵称
                   ├ secondary-info        '13:40'        ← 时间
                   └ summary-main          '测试'          ← 最后一条摘要
 

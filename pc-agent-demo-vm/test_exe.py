@@ -253,10 +253,13 @@ def main():
         R.check("config.json 写在 exe 旁边", os.path.isfile(cfg_path), cfg_path)
         cfg = json.load(open(cfg_path, encoding="utf-8"))
         R.check("值真的落盘了", cfg["llm"]["model"] == "exe-acceptance-test-model")
+        # 2026-09-28 起密钥收拢进 config.json（唯一主存储，该文件被 .gitignore 排除）；
+        # secrets.local.json 降级为**只读后备**，不再接收界面新填的 Key。
         sec = json.load(open(os.path.join(work, "secrets.local.json"), encoding="utf-8"))
-        R.check("Key 进了 secrets.local.json",
-                sec.get("llm", {}).get("api_key") == "sk-exe-acceptance-123456")
-        R.check("Key 没进 config.json", "sk-exe-acceptance" not in json.dumps(cfg))
+        R.check("Key 落在 config.json（唯一主存储）",
+                cfg.get("llm", {}).get("api_key") == "sk-exe-acceptance-123456")
+        R.check("Key 不进 secrets.local.json（它只是旧配置的只读后备）",
+                sec.get("llm", {}).get("api_key") != "sk-exe-acceptance-123456")
 
         # ---------------- 7. SSE ----------------
         print("\n[7] SSE")

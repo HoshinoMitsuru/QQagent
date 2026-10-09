@@ -852,7 +852,7 @@
     let isAtSelf = false;
     if (cqAtMatch) {
       const atQq = cqAtMatch[1];
-      const claritasQq = "3567509079"; // 小清澈的QQ号，请根据实际情况修改
+      const claritasQq = "100000004"; // 小清澈的QQ号，请根据实际情况修改
       isAtSelf = (atQq === claritasQq) || (atQq === userId);
     } else if (textAtMatch) {
       const atName = textAtMatch[1];

@@ -134,6 +134,8 @@ def make_cfg(tmpdir: str) -> dict:
         "discovery": {"state_file": os.path.join(tmpdir, "rotation.json")},
         "queue": {"jitter_seconds": 0.0, "min_interval_seconds": 0.0,
                   "max_replies_per_minute": 600},
+        # 长期记忆写到临时目录，别让测试里的假会话进真实 state/memory
+        "memory": {"dir": os.path.join(tmpdir, "memory")},
     })
 
 

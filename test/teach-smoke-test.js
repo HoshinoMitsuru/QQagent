@@ -109,7 +109,7 @@ const check = (name, actual, expected) => {
     ["U1", "小清澈 ： 冒号前后有空格"],
     ["U1", "Claritas-小清澈：英文名形式"],
     ["U1", "CLARITAS-小清澈:英文名大写"],
-    ["U1", "[CQ:at,qq=3567509079] 小清澈：带at前缀"],
+    ["U1", "[CQ:at,qq=100000004] 小清澈：带at前缀"],
     ["U1", "小清澈：：重复冒号"],
   ];
   for (const [u, t] of variants) await fire(u, t);

@@ -16,7 +16,7 @@ agent.py — PC 端 QQ 私聊 AI 代理（最小 demo · 路线 A）
     python agent.py --selftest          # 不开 QQ，自检配置 + 模型连通性 + 调教解析
     python agent.py --replay "在吗"      # 不开 QQ，跑一遍「收到消息 → 生成回复」的链路
     python agent.py --state             # 不开 QQ，查看已持久化的会话上下文
-    python agent.py --forget "光みつる"   # 不开 QQ，清空某个会话的上下文
+    python agent.py --forget "测试备注C"   # 不开 QQ，清空某个会话的上下文
     python agent.py --once              # 开 QQ，只跑一轮（调试用）
     python agent.py                     # 开 QQ，进入常驻循环
     python agent.py --dry-run           # 开 QQ，只读不发（确认读到的内容对不对）
@@ -1717,7 +1717,7 @@ CLS_CHAT_TITLE = "chat-header__contact-name"  # 会话标题
 CLS_DIR_OTHER = "container--others"
 CLS_DIR_SELF = "container--self"
 # ⚠️ 踩坑记录：'group-chat' 这个 class 名具有误导性 —— 私聊的容器也叫 group-chat！
-#    实测（2026-09-11）私聊「光みつる」的聊天区容器同样是 class='group-chat'，
+#    实测（2026-09-11）私聊「测试备注C」的聊天区容器同样是 class='group-chat'，
 #    所以它**绝不能**用来判断群聊。群聊只能靠「标题旁的 (人数)」和「群资料面板」判定。
 CLS_GROUP_CHAT = "group-chat"            # 聊天区容器（群聊/私聊都用，勿当群聊标志）
 CLS_MSG_CONTAINER_SELF = "message-container--self"    # 消息容器级的方向标记
@@ -5249,7 +5249,7 @@ def scope_aliases(cfg: dict) -> list[tuple[str, list[str]]]:
     列出「会话键 → 可用来匹配的别名」。
 
     别名来自取号缓存（昵称 → QQ 号）。**这一步很重要**：会话键长这样
-    `private:3302676083`，而用户脑子里记的是昵称（「光みつる」/「测试目标A」）。
+    `private:100000001`，而用户脑子里记的是昵称（「测试备注C」/「测试目标A」）。
     UI 上写着「支持模糊匹配昵称」但实际只能匹配会话键 —— 于是用户输入昵称时
     什么都不会被清掉，而他会以为清掉了。这个不一致本身就是个 bug。
     """
@@ -5287,7 +5287,7 @@ def forget(cfg: dict, target: str) -> int:
 
     ## 匹配键
 
-    同时接受 **会话键**（`private:3302676083`）与**昵称**（取号缓存里的显示名）。
+    同时接受 **会话键**（`private:100000001`）与**昵称**（取号缓存里的显示名）。
     以前只认会话键，而界面提示写的是「会话名或片段」—— 用户按昵称输入时
     **什么都清不掉**，却以为清掉了。所以匹配不到时会列出「昵称 ↔ 会话键」对照表。
     """

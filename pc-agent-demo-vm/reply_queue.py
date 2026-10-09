@@ -124,7 +124,7 @@ class RateBudget:
 @dataclass
 class QueuedReply:
     """一个「待回复」的任务：某个会话攒下的一批对方消息，等待被结算成一次回复。"""
-    scope: str                     # 身份主键，形如 private:3302676083 / group:1098451742
+    scope: str                     # 身份主键，形如 private:100000001 / group:100000002
     display_name: str              # 会话列表上显示的名字（用于切会话）
     uin: str                       # QQ 号 / 群号（用于发送前复核）
     texts: list = field(default_factory=list)

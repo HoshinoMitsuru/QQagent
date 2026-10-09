@@ -45,6 +45,10 @@ def make_cfg(tmpdir: str) -> dict:
         # 轮转状态也要隔离：它会记「哪些会话建过基线」，
         # 写到真实文件里会污染下一次运行（实测踩过）。
         "discovery": {"state_file": os.path.join(tmpdir, "rotation.json")},
+        # 长期记忆也要隔离：History.push 会顺手往 memory.dir 写当日流水，
+        # 用默认的 state/memory 就会把测试里的假会话（「小明」「桌游群」）
+        # 写进真实数据目录（实测踩过，state/memory/journal/ 里多出一堆假账号）。
+        "memory": {"dir": os.path.join(tmpdir, "memory")},
     })
     cfg["llm"]["system_prompt"] = "（测试用 system prompt）"
     return cfg

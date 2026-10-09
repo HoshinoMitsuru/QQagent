@@ -60,3 +60,9 @@ pc-agent-demo*/archive/*
 # 敏感词表（真实片段）绝不入库；模板在 tools/sensitive-words.example.txt
 tools/sensitive-words.local.txt
 
+# ── 本地真实值目录（2026-10-09 起）──
+# 真名 / QQ 昵称 / 备注名 / 群名这类真实值只落在这里；仓库里的 .workbuddy/memory/、代码与文档
+# 一律用占位符（本人 / 小明 / 测试目标A / 测试备注C / 测试群B）。对照表见该目录的 身份对照表.md。
+# ⚠️ 绝不要 `git add -f` 这个目录：-f 会绕过 ignore，等于直接入库。
+/.workbuddy/memory-local/
+

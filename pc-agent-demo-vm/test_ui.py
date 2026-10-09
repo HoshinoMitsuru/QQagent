@@ -14,7 +14,7 @@ test_ui.py —— 控制台壳的端到端测试（离线，不碰 QQ、不发�
     1  静态页面与令牌校验（没令牌拿不到页面，页面里注入了令牌）
     2  /api/state 结构完整（管理员/桌面/路径/QQ/常驻/日志统计）
     3  /api/settings 读写往返（保存后磁盘上的 config.json 真的变了，且注释键还在）
-    4  API Key 只写进 secrets.local.json，绝不落到 config.json
+    4  API Key 只写进 config.json（该文件被 .gitignore 覆盖）；secrets.local.json 只是只读后备
     5  风控参数的矛盾组合会被拦下（这是最容易被误判成「程序卡住」的配置错误）
     6  任务清单与参数校验（缺参数要报错，不是默认空串硬跑）
     7  子进程真实启动并把输出送进日志（用 --run-agent --state，不碰 QQ）
@@ -244,6 +244,23 @@ def t4_secret_isolation():
     gi = open(gi_path, encoding="utf-8").read() if os.path.isfile(gi_path) else ""
     R.check("config.json 被 .gitignore 覆盖（pc-agent-demo*/config.json）",
             "pc-agent-demo*/config.json" in gi, f"{gi_path} 里没有对应条目")
+
+    # 收拢进 config.json 的副作用：本函数「恢复默认」会把整份 config.json 换掉。
+    # 必须把 Key 捞回来 —— 否则用户点一次「恢复默认」就丢一次 Key，
+    # 而界面上的确认文案承诺的是「API Key 会保留」。
+    st, d = http("/api/settings/reset", {})
+    R.check("恢复默认成功", st == 200 and d.get("ok"), str(d)[:200])
+    R.check("恢复默认把 Key 捞回来了", d.get("kept_api_key") is True, str(d)[:200])
+    after = json.load(open(P.CONFIG_PATH, encoding="utf-8"))
+    R.check("Key 真的还在盘上",
+            after.get("llm", {}).get("api_key") == "sk-test-roundtrip-1234567890",
+            f"变成了 {after.get('llm', {}).get('api_key')!r}")
+    R.check("别的参数确实被还原了（不是整份没动）",
+            after["llm"]["model"] != "deepseek-chat", str(after["llm"].get("model")))
+    # 模块级默认值不能被这次 reset 污染（agent_defaults() 返回的是 _LOCAL_DEFAULTS 本体）
+    R.check("内置默认值没被写进用户密钥",
+            SET.agent_defaults()["llm"]["api_key"] == "",
+            repr(SET.agent_defaults()["llm"]["api_key"]))
 
 
 def t5_validation():

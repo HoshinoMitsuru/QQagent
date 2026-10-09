@@ -772,6 +772,33 @@ def t16_host_panel():
             st == 200 and (res or {}).get("ok") is True,
             f"HTTP {st} {str(res)[:160]}")
 
+    # ---- 切换模式（2026-10-09 新增）
+    #
+    # 这一条钉的是一件**不能含糊**的事：切换模式必须显式给出目标模式。
+    # 反例就在同一个文件的上面 —— `/api/agent/restart` 不带 dry_run 时会
+    # 「沿用旧值」，于是点了「重启常驻」回来还是只读，按钮说重启、人以为能换模式。
+    # 那种静默沿用会把「没切成」伪装成「切成了」，所以这里宁愿它报错。
+    st, res = probe("/api/host/restart", {})
+    R.check("host/restart 不给目标模式 → 明确报错（不猜、不静默沿用）",
+            st == 200 and (res or {}).get("ok") is False
+            and (res or {}).get("code") == "E-WEB-004",
+            f"HTTP {st} {str(res)[:200]}")
+
+    st, res = probe("/api/host/restart", {"dry_run": False})
+    R.check("没跑宿主时 host/restart 说清「没有模式可切」，而不是假装成功",
+            st == 200 and (res or {}).get("ok") is False
+            and "没在运行" in str((res or {}).get("error", "")),
+            f"HTTP {st} {str(res)[:200]}")
+
+    # /api/state 里必须能读到「它现在到底发不发消息」—— 这一格以前是不存在的，
+    # 界面上只有一句「运行中」；2026-10-09 那次「界面说只读、日志里却发了」的误判，
+    # 就长在这片空白上。
+    st, res = probe("/api/state")
+    hd = ((res or {}).get("state") or {}).get("host") or {}
+    R.check("state.host 带模式三件套（dry_run / no_send / agent_enabled）",
+            all(k in hd for k in ("dry_run", "no_send", "agent_enabled")),
+            str(sorted(hd))[:200])
+
 
 # ============================================================ 主流程
 def main():

@@ -3,10 +3,11 @@
 test_stop_cleanup.py —— stop_daemon 收尾清理（杀 QQ + 销毁桌面）离线自检
 
 2026-09-26 拍板：R4 进程关闭 = 同时关闭虚拟桌面上的 QQ 和虚拟桌面。
-本文件用 stub 验证三条链路（不碰 QQ、不碰真实桌面）：
+本文件用 stub 验证四条链路（不碰 QQ、不碰真实桌面）：
 1. _cleanup_after_stop 的正常路径（QQ 杀干净 → 桌面销毁）
 2. 容错路径（stop 炸 / close 炸 / 销毁超时，各记各的错，不阻塞主结论）
 3. stop_daemon 两个退出分支（宿主在跑/不在跑）都要做收尾
+4. keep_qq（切换模式专用）真的不碰 QQ；restart_daemon 只换模式、其余参数原样回放
 
 用法：python test_stop_cleanup.py
 """
@@ -75,6 +76,13 @@ class Stopper:
 S = Stopper()
 _saved = {n: getattr(host_mod, n) for n in ("stop", "last_record")}
 _saved_close, _saved_exists = desktop.close, desktop.exists
+#: 后面几节还会替换这些入口（含 [4] 的切换模式）—— 一并存下来，收尾时还回去。
+#: 不还原的话，将来往本文件末尾再加用例，就会在一个「假装」的环境里跑。
+_saved_more = {n: getattr(host_mod, n) for n in
+               ("daemon_status", "start_daemon", "stop_daemon", "last_launch",
+                "_cleanup_after_stop")}
+_saved_time = host_mod.time
+_saved_pid_alive = pw.pid_alive
 
 try:
     # ------------------------------------------------------------------
@@ -135,10 +143,116 @@ try:
          calls == ["cleanup"] and out["ok"] is True and out["cleanup"] is not None,
          str(out))
 
+    # ------------------------------------------------------------------
+    print("[4] 切换模式：keep_qq 不动 QQ；restart_daemon 原样回放启动参数")
+    #
+    # 2026-10-09：界面加了「运行中切模式」。模式是宿主的**启动参数**，所以切换
+    # 必须重启宿主进程；但**不必**连 QQ 一起重启 —— 而原来唯一那条
+    # 「先停再启动」的路会把那张桌面上的 QQ 一起收走（_cleanup_after_stop），
+    # 于是切一次模式要重新冷启 QQ、重新等窗口，一两分钟。
+    # 这里钉住两件事：keep_qq 真的不碰 QQ；restart 真的只换模式、其余照旧。
+
+    calls = []
+    host_mod.daemon_status = lambda: {"pid": 4321, "alive": True}
+    pw.pid_alive = lambda pid: False
+    host_mod._cleanup_after_stop = lambda *a, **k: (
+        calls.append("cleanup"), {"qq": None, "desktop": None})[1]
+
+    out = host_mod.stop_daemon(keep_qq=True)
+    case("keep_qq=True：完全不碰 QQ 与桌面（cleanup 没被调用）",
+         calls == [] and "keep_qq" in str(out["cleanup"]), f"calls={calls} {out}")
+
+    calls.clear()
+    out = host_mod.stop_daemon()
+    case("默认 keep_qq=False：仍然照老语义收尾（杀 QQ + 销毁桌面）",
+         calls == ["cleanup"], f"calls={calls} {out}")
+
+    # ---- restart_daemon 的替身：把 stop/start 换成记录本 ----
+    seen = {"stop": [], "start": [], "sleep": 0}
+    RUN_ST = {"pid": 4321, "alive": True, "running": True, "dry_run": True,
+              "no_send": False, "agent_enabled": True,
+              "desktop": "QQAgentHidden", "profile": "C:\\x\\qq-profile"}
+    REC = {"desktop_name": "QQAgentHidden", "profile": "C:\\x\\qq-profile",
+           "qq_exe": "D:\\QQ\\QQ.exe", "with_agent": True, "stop_qq_on_exit": False,
+           "chat": "测试会话"}
+    host_mod.daemon_status = lambda: dict(RUN_ST)
+    host_mod.last_launch = lambda: dict(REC)
+
+    def fake_stop(timeout=20.0, keep_qq=False):
+        seen["stop"].append({"timeout": timeout, "keep_qq": keep_qq})
+        return {"ok": True, "pid": 4321, "waited": 1.2, "killed": False,
+                "error": "", "cleanup": None}
+
+    def fake_start(**kw):
+        seen["start"].append(kw)
+        return {"ok": True, "pid": 999, "desktop": kw.get("desktop_name"),
+                "profile": kw.get("profile"), "args": [], "error": ""}
+
+    host_mod.stop_daemon = fake_stop
+    host_mod.start_daemon = fake_start
+    _saved_time = host_mod.time
+    host_mod.time = types.SimpleNamespace(sleep=lambda s: seen.__setitem__("sleep", s))
+
+    r = host_mod.restart_daemon(dry_run=False)
+    kw = seen["start"][0] if seen["start"] else {}
+    case("切模式：先停（且是 keep_qq=True，QQ 留着）",
+         seen["stop"] == [{"timeout": 20.0, "keep_qq": True}], str(seen["stop"]))
+    case("切模式：只换 dry_run，其余参数从启动记录原样回放",
+         kw.get("dry_run") is False and kw.get("no_send") is False
+         and kw.get("desktop_name") == "QQAgentHidden"
+         and kw.get("profile") == "C:\\x\\qq-profile"
+         and kw.get("qq_exe") == "D:\\QQ\\QQ.exe"
+         and kw.get("chat") == "测试会话"
+         and kw.get("with_agent") is True and kw.get("stop_qq_on_exit") is False,
+         str(kw))
+    case("切模式：返回值说清「以前是什么、现在是什么」",
+         r.get("ok") is True and r.get("mode") == {"dry_run": False, "no_send": False}
+         and r.get("prev_mode") == {"dry_run": True, "no_send": False}
+         and r.get("degraded") == [], str(r))
+    case("切模式：起新宿主前让旧进程退干净（那个 0.6s）",
+         seen["sleep"] == 0.6, str(seen["sleep"]))
+
+    # 模式没变 → 不该白重启一次（重启是真实的中断），更不能假装切过了
+    seen["stop"].clear(); seen["start"].clear()
+    r = host_mod.restart_daemon(dry_run=True)          # 当前就是 dry_run=True
+    case("模式没变 → 什么都不做，并如实说「没变」（不假装切过）",
+         not seen["stop"] and not seen["start"]
+         and r.get("ok") is True and r.get("unchanged") is True, str(r))
+
+    # 没有启动记录（老版本起的宿主 / 文件被删）→ 用心跳兜底，并把没还原到的项报出来
+    seen["stop"].clear(); seen["start"].clear()
+    host_mod.last_launch = lambda: {}
+    r = host_mod.restart_daemon(dry_run=False)
+    kw = seen["start"][0] if seen["start"] else {}
+    case("启动记录缺失 → 用心跳兜底（桌面/profile 不丢），并报出没还原的项",
+         kw.get("desktop_name") == "QQAgentHidden"
+         and kw.get("profile") == "C:\\x\\qq-profile"
+         and set(r.get("degraded") or []) == {"qq_exe", "chat", "stop_qq_on_exit"},
+         f"{kw} degraded={r.get('degraded')}")
+
+    # 没跑宿主 / 只是「摆着」的宿主，都不该装作切成功
+    host_mod.daemon_status = lambda: {"pid": 0, "alive": False, "running": False}
+    seen["stop"].clear(); seen["start"].clear()
+    r = host_mod.restart_daemon(dry_run=False)
+    case("宿主没在跑 → 明说「没有模式可切」，不动任何东西",
+         r.get("ok") is False and "没在运行" in str(r.get("error"))
+         and not seen["stop"] and not seen["start"], str(r))
+
+    host_mod.daemon_status = lambda: dict(RUN_ST, agent_enabled=False)
+    r = host_mod.restart_daemon(dry_run=False)
+    case("--no-agent 起的（没跑回复循环）→ 没有模式可切，明说原因",
+         r.get("ok") is False and "回复循环" in str(r.get("error")), str(r))
+
 finally:
     for n, v in _saved.items():
         setattr(host_mod, n, v)
     desktop.close, desktop.exists = _saved_close, _saved_exists
+    # [3]/[4] 里被替换掉的模块级符号也要还回去 —— 它们是真模块的入口，
+    # 不还原的话，将来往本文件后面再加用例就会在一个「假装」的环境里跑。
+    for n, v in _saved_more.items():
+        setattr(host_mod, n, v)
+    host_mod.time = _saved_time
+    pw.pid_alive = _saved_pid_alive
 
 print("=" * 70)
 print(f"结果：{OK} 通过 / {FAIL} 失败")

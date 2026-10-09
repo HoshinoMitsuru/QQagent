@@ -3979,6 +3979,7 @@ class Agent:
         cap = max(1, int(d.get("max_enqueue_per_scan") or 3))
         self._scan_stats["scans"] += 1
         enqueued = 0
+        noted = 0                       # dry-run 下「本来会发现」的条数（只记，不入队）
 
         for s in sessions:
             if not s.display_name:
@@ -4007,6 +4008,23 @@ class Agent:
                            else "摘要变化")
 
             wait = self._discovery_wait(self.scope or s.display_name)
+
+            if self.dry_run:
+                # 只读：把「本来会发现什么」写进日志，但**挡在入队之前** ——
+                # 不入队就没有后面的 prepare()（调模型）和 deliver()（真发）。
+                #
+                # ⚠️ 这道判断不能挪到入队之后。2026-10-09 之前这里没有它，而 dry_run
+                # 只守住了 `_flush`（当前会话的实时路径），于是「会话列表里**别的**会话
+                # 冒未读红点」会被正常入队、正常生成、并**真的发出去** ——
+                # 界面写着「只读模式，不会发送任何消息」，日志里却留着 SEND。
+                log("DRY", f"dry-run：发现 {s.display_name!r} 有新消息（{trigger}），"
+                           f"只记录不入队（不调模型、不发送）")
+                noted += 1
+                if noted >= cap:
+                    log("DISC", f"本轮已达上限 {cap} 个，剩下的下一轮再说")
+                    break
+                continue
+
             scope, uin = self._scope_for_session(s)
             item, created = self.queue.ensure_pending(
                 scope, s.display_name, uin, now=now,
@@ -4026,8 +4044,11 @@ class Agent:
 
         if enqueued:
             self._scan_stats["hits"] += 1
-            rot.save()
             log("QUE", self.queue.snapshot())
+        if enqueued or noted:
+            # dry-run 下也必须落盘：`set_fp` 只改内存，不 save 就白记 ——
+            # 那样下一轮扫描还会看到同一个未读，每 2 秒刷一条「发现」日志。
+            rot.save()
         return enqueued
 
     # ==================================================== 总读取（把正文读全）
@@ -4200,6 +4221,20 @@ class Agent:
         会话会把前台预算打穿。而两阶段之间我们**停在同一会话上**（单项队列天然
         把我们park在那儿），所以整条链路仍然只付一次「切会话」的成本。
         """
+        # ⚠️ 只读模式：**队列一个字都别碰**（连 pick 都不做）。
+        #
+        # 这道判断不能靠「dry_run 下没人往队列里放东西」替代 —— 队列是**落盘**的，
+        # 磁盘上可能正躺着上一次没发出去的待回复（`_save_pending` 存在的全部理由
+        # 就是「重启不丢消息」）。带着这些遗留项跑只读会连出两个错：
+        #   ① `prepare()` 会**真的调一次模型** —— 而只读承诺的是「不调模型」；
+        #   ② 算出来的回复会一头撞进 `deliver()` 的 dry_run 兜底，被当成「已处理」
+        #      收下，紧接着 `serve_queue` 就把这一项 `drop` 掉 —— 那条回复**永久没了**。
+        #   而本项目对「已生成但还没发出去」的既定契约是**一条都不丢**。
+        # 2026-10-09 加这段的直接原因：界面新增了「运行中切模式」，而
+        # 「正常 → 只读」的那一次切换必然会撞上队列里的遗留项。
+        if self.dry_run:
+            return False
+
         item = self.queue.pick(ignore_budget=True)
         if item is None:
             return False
@@ -4659,9 +4694,18 @@ class Agent:
         # 必须能被 _command_allowed 认出来并排除（否则模型回一句 `.ai …` 就会自触发）。
         self._own_sent.append(reply)
 
-        if self.no_send:
-            log("DRY", f"彩排模式：已通过①②闸，签名={sig[0]!r}/{len(sig[2])}条，"
-                       f"本条不会真的发出")
+        if self.no_send or self.dry_run:
+            # 两种模式的差别只在「该不该走到这里」：
+            #   no_send  —— 本该走完整链路（切会话/复核/生成），只是最后一步不发；
+            #   dry_run  —— **根本不该走到这里**：走到这里说明有一条路径没守 dry_run
+            #               （2026-10-09 那次漏的是 `discover()`）。这里兜住它，
+            #               并且把这件事明确报出来，免得将来再添新路径时又静默真发一次。
+            if self.no_send:
+                log("DRY", f"彩排模式：已通过①②闸，签名={sig[0]!r}/{len(sig[2])}条，"
+                           f"本条不会真的发出")
+            else:
+                log("WARN", f"dry-run 兜底拦下一条本不该走到发送的回复 → {item.display_name!r}"
+                            f"｜说明某条路径漏了 dry_run 守卫，请查 discover() 与新加的通路")
             self.store.history(scope).push("assistant", reply, source="auto")
             return True
 

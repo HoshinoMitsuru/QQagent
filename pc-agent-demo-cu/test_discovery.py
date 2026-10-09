@@ -94,7 +94,10 @@ class FakeQQ:
         msgs = self.read_messages(8)
         return (self.cur, self.is_group, tuple(m.key for m in msgs))
 
-    def send_text(self, text: str, guard=None) -> bool:
+    def send_text(self, text: str, guard=None, resume: bool = False) -> bool:
+        # 签名要跟真实 QQWindow 对齐：`deliver` 会带 `resume=` 调用它
+        # （草稿还在输入框里时走「原地重发」）。少了这个参数，回归用例在
+        # 「兜底本该拦住却没拦住」时会以 TypeError 崩掉，而不是干净地判 FAIL。
         if guard is not None and not guard():
             return False
         self.sent.append((self.cur, text))
@@ -137,10 +140,17 @@ def make_cfg(tmpdir: str) -> dict:
     })
 
 
-def build(tmpdir: str) -> A.Agent:
-    """装好假 QQ + 假模型 + 假会话列表的 Agent。"""
+def build(tmpdir: str, dry_run: bool = False) -> A.Agent:
+    """
+    装好假 QQ + 假模型 + 假会话列表的 Agent。
+
+    `dry_run` 与 `no_send` 是**两种不同**的模式，别混：
+        no_send —— 走完整链路（切会话 / 复核 / 生成），只是最后一步不发（彩排）；
+        dry_run —— 连模型都不该调、队列都不该进，更不该发（只读）。
+    默认走 no_send —— 本文件大多数用例要的是「把链路走完」。
+    """
     cfg = make_cfg(tmpdir)
-    ag = A.Agent(cfg, no_send=True)
+    ag = A.Agent(cfg, dry_run=dry_run, no_send=not dry_run)
     ag.qq = FakeQQ()
     # 模型不联网
     ag.generate_reply = lambda scope: f"（测试回复 → {scope}）"
@@ -196,6 +206,7 @@ def main() -> int:
         test_total_read(sub("t2"))
         test_no_new_messages_aborts(sub("t3"))
         test_nontext_policy(sub("t4"))
+        test_dry_run_never_sends(sub("t5"))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -420,6 +431,82 @@ def test_nontext_policy(tmpdir: str) -> None:
     writes4, why4 = ag3._admit(empty, "private:1001")
     case("content 为空的条目被静默丢弃（不写理由）", writes4 == [] and why4 == "",
          f"{writes4} {why4!r}")
+
+
+def test_dry_run_never_sends(tmpdir: str) -> None:
+    """
+    ⚠️ 回归：`--dry-run` 必须连「发现路径」也守住。
+
+    2026-10-09 的真事故：隐藏桌面上跑着一个「只读运行」的常驻，界面上写着
+    「只读模式，不会发送任何消息」，日志里却出现了两条**真的发出去**的 SEND
+    （其中一条发到了群里）。原因就是 `dry_run` 当时只守住了 `_flush`
+    —— 那是「当前打开的会话」的实时路径；而 `discover()` 扫到**别的**会话
+    冒未读红点时，照样入队 → `prepare()` 调模型 → `deliver()` 真发。
+
+    所以这里同时钉住三件事：
+        1. discover() 在 dry_run 下不入队（把入口挡住）；
+        2. 万一日后又有新路径漏进来，deliver() 也绝不真的发出去（把出口兜住）；
+        3. 队列里已有遗留项时，只读也**不消费**它（把队列原样留住）——
+           这条是 2026-10-09 加「运行中切模式」时补的：那次切换必然发生在队列
+           非空的时候，而只读若照常出队，会把已经生成好的回复静默 drop 掉。
+    """
+    print("\n[5] dry-run 也必须守住发现路径（2026-10-09 回归）")
+    ag = build(tmpdir, dry_run=True)
+    calls: list = []
+
+    def fake_gen(scope: str) -> str:
+        calls.append(scope)
+        return f"（不该生成的回复 → {scope}）"
+
+    ag.generate_reply = fake_gen
+    ag.qq.cur = "自己人"
+    ag.qq.sessions["自己人"] = {"msgs": [], "is_group": False}
+    seed_session(ag, "阿离", False, "1001", [mkmsg("阿离", "在吗", 1)])
+    seed_session(ag, "群A", True, "2002", [mkmsg("甲", "开团", 2)])
+
+    # ① 别的会话冒未读红点 —— 当年正是这条路径漏掉了 dry_run
+    ag._fake_cards = [card("阿离", preview=("在吗", "在忙吗"), unread=1),
+                      card("群A", preview=("甲：", "开团"), unread=3)]
+    n = ag.discover()
+    case("dry-run：发现路径不入队", n == 0 and len(ag.queue) == 0,
+         f"n={n} scopes={ag.queue.scopes()}")
+    case("dry-run：指纹仍然记账（否则每轮重复报）",
+         len(ag._rot().fingerprints) == 2, f"{ag._rot().fingerprints}")
+    ag._last_scan = 0.0
+    case("dry-run：同一份新动静不重复报", ag.discover() == 0)
+
+    case("dry-run：队列空转，serve_queue 什么都不做", ag.serve_queue() is False)
+    case("dry-run：一次都没调模型", calls == [], f"{calls}")
+    case("dry-run：一条都没发出去", ag.qq.sent == [], f"{ag.qq.sent}")
+
+    # ③ 队列里有**遗留项**时，只读也不许碰它（2026-10-09 随「运行中切模式」一起加）。
+    #
+    #    队列是**落盘**的：磁盘上可能正躺着上一次没发出去的待回复
+    #    （`_save_pending` 存在的全部理由就是「重启不丢消息」）。
+    #    而「正常 → 只读」这一次切换，必然就是在队列非空的时候发生的。
+    #    如果只读模式照常出队，会连出两个错：
+    #      ① `prepare()` 会**真的调一次模型** —— 只读承诺的是「不调模型」；
+    #      ② 算出来的回复一头撞进 `deliver()` 的兜底，被当成「已处理」收下，
+    #         `serve_queue` 随即 drop 掉它 —— 那条回复**永久没了**。
+    #    本项目对「已生成但没发出去」的契约是一条都不丢，所以只读就该一个字都不碰。
+    left = ag.queue.submit("private:1001", "阿离", "1001", "（上次没发出去的正文）",
+                           key="k8", seq=8, wait_seconds=0.0)
+    case("dry-run：队列非空时也不出队", ag.serve_queue() is False)
+    case("dry-run：遗留项原样留在队列里（没被消费、也没被 drop）",
+         len(ag.queue.items) == 1 and ag.queue.items[0] is left
+         and left.reply == "" and not left.prepared,
+         f"items={ag.queue.items}")
+    case("dry-run：有遗留项时依然一次都没调模型", calls == [], f"{calls}")
+    case("dry-run：有遗留项时依然一条都没发出去", ag.qq.sent == [], f"{ag.qq.sent}")
+
+    # ② 兜底：假如将来有条新路径把东西塞进了队列，最后一步也必须拦住
+    it = ag.queue.submit("private:1001", "阿离", "1001", "（漏进来的正文）",
+                         key="k9", seq=9, wait_seconds=0.0)
+    ag._verify_target = lambda item: True   # 这里只测「模式闸」，身份复核另有用例覆盖
+    stopped = ag.deliver(it, "（漏进来的回复）")
+    case("dry-run：deliver 兜底不发（send_text 从没被调用）", ag.qq.sent == [],
+         f"sent={ag.qq.sent}")
+    case("dry-run：兜底按「已处理」收尾，不回队列空转", stopped is True)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ QQ 一旦退出，桌面随之消失，下次要重建（这没问题，`create(
     python -m app.host daemon start --dry-run   # 常驻但只读不发
     python -m app.host daemon status
     python -m app.host daemon stop
+    python -m app.host daemon restart --mode send   # 只换模式重启宿主（QQ 不动、免扫码）
 """
 
 from __future__ import annotations
@@ -67,6 +68,7 @@ import json
 import os
 import sys
 import time
+from typing import Optional
 
 import psutil
 
@@ -548,6 +550,17 @@ SHOT_PNG = os.path.join(paths.STATE_DIR, "desktop-shot.png")
 #: 20s 足够容忍一次长模型调用，又不至于让「宿主已死」拖太久才被发现。
 HOSTD_STALE_SECONDS = 20.0
 
+#: 上一次 `start_daemon()` 的**完整启动参数**。存在的唯一理由：让「切换模式」
+#: 能原样重启宿主。
+#:
+#: 模式（`--dry-run` / `--no-send`）是宿主的**启动参数**，换模式必然要重启宿主进程；
+#: 而「只换模式、其余照旧」里的**其余**（桌面名、profile、qq_exe、chat、
+#: stop-qq-on-exit、有没有跑回复循环）只活在上一次那个调用里 ——
+#: Web 壳手里没有这些值，让它自己拼一遍就会丢掉它们
+#: （现象是「切换模式之后 QQ 换成默认 profile 了」，而那等于换了个人在发消息）。
+#: 所以由 `start_daemon()` 自己记下来，`restart_daemon()` 照着回放。
+HOSTD_LAUNCH = os.path.join(paths.STATE_DIR, "hostd-launch.json")
+
 
 def _read_json(path: str) -> dict:
     try:
@@ -567,6 +580,31 @@ def last_grab() -> dict:
     那种误判会让人去修一个已经不存在的问题。
     """
     return _read_json(GRAB_JSON)
+
+
+def _save_launch(rec: dict) -> None:
+    """
+    记下这一次 `start_daemon()` 的参数（`restart_daemon()` 靠它原样回放）。
+
+    ## 为什么写失败要报出来，但不该让这次启动失败
+
+    这份文件丢了，切模式就退化成「参数不全的重启」—— 严重时会把 QQ 换到另一个
+    profile 上去，也就是**换了一个号在发消息**。所以必须让人知道下一次切模式不可靠。
+    但宿主此刻已经在跑了，那是既成事实 —— 不能因为事后记一笔账没记上就把它判失败。
+    """
+    try:
+        os.makedirs(paths.STATE_DIR, exist_ok=True)
+        with open(HOSTD_LAUNCH, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+    except Exception as exc:                       # noqa: BLE001
+        BUS.emit(f"记下常驻宿主启动参数失败（{type(exc).__name__}: {exc}）—— "
+                 f"之后「切换模式」可能还原不全，那就手动停止再重新启动一次。",
+                 tag="WARN", source="host")
+
+
+def last_launch() -> dict:
+    """上一次 `start_daemon()` 的参数。文件不在/坏了都返回 `{}`（兜底在调用方）。"""
+    return _read_json(HOSTD_LAUNCH)
 
 
 def daemon_status(stale: float = HOSTD_STALE_SECONDS) -> dict:
@@ -619,12 +657,45 @@ def daemon_status(stale: float = HOSTD_STALE_SECONDS) -> dict:
         "reason": hb.get("reason") or "",
         "note": hb.get("note") or "",
         "stop_requested": os.path.isfile(HOSTD_STOP),
+        # ---- 模式：这三个值**一直**在心跳里（宿主启动时自己写的，见 hostd.main），
+        #      但以前没往外露 —— 于是界面上只有一句「运行中」，看不出它现在是
+        #      只读还是会真发。「模式不可见」正是 2026-10-09 那次误判的温床：
+        #      界面写着只读、日志里却有 SEND，谁都说不清到底发没发。
+        #      `agent_enabled=False` 是 `--no-agent`（只把 QQ 摆上去，不跑回复循环）。
+        "dry_run": bool(hb.get("dry_run")),
+        "no_send": bool(hb.get("no_send")),
+        "agent_enabled": bool(hb.get("agent_enabled")),
+        "profile": hb.get("profile") or "",
         "heartbeat_path": HOSTD_JSON,
         "heartbeat_present": bool(hb),
         "log_path": HOSTD_LOG,
         "log_exists": os.path.isfile(HOSTD_LOG),
         "log_bytes": os.path.getsize(HOSTD_LOG) if os.path.isfile(HOSTD_LOG) else 0,
     }
+
+
+def mode_text(st: dict) -> str:
+    """
+    「它现在到底发不发消息」的**唯一**措辞来源（命令行用它；界面那份在 index.html 里）。
+
+    这里有三态，不是两态 —— 混成一句「只读 / 正常」会让人以为彩排模式也不会回消息：
+
+      · `agent_enabled=False`（`--no-agent`）  根本没跑回复循环，读都不读；
+      · `dry_run=True`                        只读：连模型都不调、队列都不进、更不发；
+      · `no_send=True`                        彩排：走完整链路（切会话/复核/生成），
+                                              只把最后一步「真的发出去」换掉。
+
+    ⚠️ 措辞要跟 `agent.py` 里的行为对上：`dry_run` 是**只读**，
+    `no_send` 才是彩排。两者在 2026-10-09 被混用过一次，代价是界面写着只读、
+    日志里真的发了两条。
+    """
+    if not st.get("agent_enabled"):
+        return "只摆着（没跑回复循环）"
+    if st.get("dry_run"):
+        return "只读（不调模型、不入队、不发送）"
+    if st.get("no_send"):
+        return "彩排（走完整链路，但不真的发出）"
+    return "会真的回复并发送"
 
 
 def start_daemon(*, desktop_name: str = "", profile: str = "", qq_exe: str = "",
@@ -700,6 +771,15 @@ def start_daemon(*, desktop_name: str = "", profile: str = "", qq_exe: str = "",
     out.update({"ok": True, "pid": spawned["pid"], "desktop": name,
                 "profile": profile_dir(profile), "args": args})
     desktop.close_handle(spawned["hproc"])
+
+    # 记下这次的**入参**（不是拼好的 args）：重启时要能只改模式、其余照旧回放。
+    # 见 HOSTD_LAUNCH 的说明 —— 这份记录是「切换模式」唯一能拿到那些值的地方。
+    _save_launch({"desktop_name": name, "profile": profile, "qq_exe": qq_exe,
+                  "dry_run": bool(dry_run), "no_send": bool(no_send),
+                  "with_agent": bool(with_agent),
+                  "stop_qq_on_exit": bool(stop_qq_on_exit),
+                  "chat": chat.strip() or "",
+                  "at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
     if wait_ready > 0:
         deadline = time.time() + wait_ready
@@ -808,7 +888,7 @@ def _cleanup_after_stop(profile: str = "", destroy_wait: float = 5.0) -> dict:
     return out
 
 
-def stop_daemon(timeout: float = 20.0) -> dict:
+def stop_daemon(timeout: float = 20.0, keep_qq: bool = False) -> dict:
     """
     让常驻宿主优雅退出。
 
@@ -828,6 +908,19 @@ def stop_daemon(timeout: float = 20.0) -> dict:
     宿主确认退出后执行 `_cleanup_after_stop()`：杀干净 QQ + 销毁虚拟桌面。
     「宿主本来就没在跑」的分支**同样收尾**——宿主崩溃/被手动杀掉留下的
     僵尸 QQ 和桌面，恰恰要靠这条路径收走。
+
+    ## `keep_qq=True`：只为「切换模式」而停，不动 QQ 与登录态
+
+    这是 2026-10-09 加的口子。理由是「停止」与「换模式」要付的代价不一样：
+
+      · 用户点「停止」= 这一套不要了 → 顺手把 QQ 和桌面收掉是对的（上面那条拍板）；
+      · 「切换模式」= 这一套还要，只是换一种活法 → 把 QQ 杀掉纯属白付代价，
+        而且下一次启动要重走「冷启动 QQ → 等窗口 → 认登录」那几十秒。
+
+    `keep_qq=True` 跳过 `_cleanup_after_stop()`。QQ 继续在那张桌面上跑着、
+    登录态留在独立 profile 里，所以紧接着的 `start_daemon()` 会在
+    `_ensure_qq()` 里直接认领到它，几步就回到回复循环。
+    桌面也不用担心：QQ 这个进程本身就持有桌面引用，它活着桌面就活着。
     """
     st = daemon_status()
     out = {"ok": False, "pid": st["pid"], "waited": 0.0, "killed": False,
@@ -841,7 +934,8 @@ def stop_daemon(timeout: float = 20.0) -> dict:
         out["ok"] = True
         out["error"] = "常驻宿主本来就没在跑"
         # 宿主崩溃/被手动杀掉留下的僵尸 QQ 与桌面：照样收
-        out["cleanup"] = _cleanup_after_stop()
+        out["cleanup"] = ({"skipped": "keep_qq=True：切换模式专用，QQ 与桌面原样留着"}
+                          if keep_qq else _cleanup_after_stop())
         return out
 
     try:
@@ -875,10 +969,92 @@ def stop_daemon(timeout: float = 20.0) -> dict:
         pass
     out["final"] = daemon_status()
     # 收尾：宿主已确认退场 → 杀干净 QQ + 销毁虚拟桌面（2026-09-26 拍板）
-    out["cleanup"] = _cleanup_after_stop()
+    # `keep_qq=True` 是「切换模式」专用的例外，见本函数开头。
+    out["cleanup"] = ({"skipped": "keep_qq=True：切换模式专用，QQ 与桌面原样留着"}
+                      if keep_qq else _cleanup_after_stop())
     # 把 agent 的停止哨兵也清掉：下一次启动不该继承这一次的「停止意图」。
     clear_stop_sentinels("上次停止的收尾")
     return out
+
+
+def restart_daemon(*, dry_run: Optional[bool] = None, no_send: Optional[bool] = None,
+                   timeout: float = 20.0, wait_ready: float = 0.0) -> dict:
+    """
+    只换模式、其余照旧地重启常驻宿主 —— 界面上的「切换模式」。
+
+    ## 为什么必须是「重启」，而不是让模式热生效
+
+    模式（`--dry-run` / `--no-send`）是宿主进程的**启动参数**，它从第一轮扫描起
+    就决定了 agent 敢不敢入队、敢不敢调模型、敢不敢发。做成「跑着的时候随时可翻」
+    会引入一条全新的通路，而它有一个说不清的瞬间：翻的当下，队列里可能正躺着
+    已经生成好的回复 —— 它该按旧模式发掉，还是按新模式咽掉？两个答案都说得通。
+    而这种「两遍都说得通」的语义，正是本项目出过事故的地方
+    （2026-10-09：界面写着只读、日志里却真的发了两条）。
+    重启没有这个歧义：新模式配一个干净的队列。
+
+    ## 为什么不必连 QQ 一起重启（`keep_qq=True`）
+
+    见 `stop_daemon(keep_qq=...)`。把 QQ 留着，新宿主在 `_ensure_qq()` 里直接
+    认领它，然后「等窗口 → 已经登录 → 开会话」，通常十几秒就回到回复循环，
+    也不用重新扫码。代价是这十几秒里回复循环是停的（队列里的回复不会丢，见下）。
+
+    ## 参数回放与「还原不全」的坦白
+
+    桌面名/profile/qq_exe/chat 这些只活在上一次 `start_daemon()` 的那个调用里，
+    由那次调用写进 `HOSTD_LAUNCH`。记录不在时（老版本起的宿主、或文件被删）
+    退回用**心跳**能还原的那部分，并把没还原到的项放进 `degraded` 报出来 ——
+    不假装完美还原。那几项留空等于回落到设置里的默认值，而那**可能**与它现在
+    用的不一样，正是最该让人看见的一种降级。
+    """
+    st = daemon_status()
+    if not (st["running"] or st["alive"]):
+        return {"ok": False, "pid": 0, "degraded": [],
+                "error": "E-PROC-001 常驻宿主没在运行，没有模式可切 —— 直接点「启动」即可"}
+
+    rec = last_launch()
+    degraded: list = []
+    if not rec:
+        rec = {"desktop_name": st["desktop"], "profile": st["profile"], "qq_exe": "",
+               "with_agent": st["agent_enabled"], "stop_qq_on_exit": False, "chat": "",
+               "dry_run": st["dry_run"], "no_send": st["no_send"]}
+        degraded = ["qq_exe", "chat", "stop_qq_on_exit"]
+
+    cur_dry, cur_ns = bool(st["dry_run"]), bool(st["no_send"])
+    tgt_dry = cur_dry if dry_run is None else bool(dry_run)
+    tgt_ns = cur_ns if no_send is None else bool(no_send)
+
+    if not st["agent_enabled"]:
+        return {"ok": False, "pid": st["pid"], "degraded": degraded,
+                "error": "E-PROC-002 这套宿主是按「只把 QQ 摆上去」（--no-agent）起的，"
+                         "根本没有回复循环，没有模式可切"}
+    if (tgt_dry, tgt_ns) == (cur_dry, cur_ns):
+        # 模式没变就不折腾：重启是一次真实的中断，为「什么都没变」付这个代价没有理由。
+        # 更要紧的是**别假装重启了** —— 那种返回会让人以为切换成功。
+        return {"ok": True, "unchanged": True, "pid": st["pid"], "degraded": degraded,
+                "note": "模式没变，什么都没做",
+                "mode": {"dry_run": cur_dry, "no_send": cur_ns}}
+
+    s1 = stop_daemon(timeout=timeout, keep_qq=True)
+    if not s1.get("ok"):
+        return {"ok": False, "pid": st["pid"], "degraded": degraded, "stop": s1,
+                "error": f"切换模式失败在「先停掉旧宿主」这一步：{s1.get('error')}"}
+
+    # 进程引用释放是异步的（与 `restart_resident` 里那 0.6s 同一个原因）：
+    # 不等这一下，新宿主可能与还没退干净的老宿主撞上（旧心跳、桌面句柄）。
+    time.sleep(0.6)
+    res = start_daemon(desktop_name=rec.get("desktop_name") or "",
+                       profile=rec.get("profile") or "",
+                       qq_exe=rec.get("qq_exe") or "",
+                       dry_run=tgt_dry, no_send=tgt_ns,
+                       with_agent=bool(rec.get("with_agent", True)),
+                       stop_qq_on_exit=bool(rec.get("stop_qq_on_exit", False)),
+                       chat=rec.get("chat") or "",
+                       wait_ready=wait_ready)
+    res["degraded"] = degraded
+    res["stop"] = {"waited": s1.get("waited"), "killed": s1.get("killed"), "kept_qq": True}
+    res["mode"] = {"dry_run": tgt_dry, "no_send": tgt_ns}
+    res["prev_mode"] = {"dry_run": cur_dry, "no_send": cur_ns}
+    return res
 
 
 # ============================================================ 命令行
@@ -1026,6 +1202,10 @@ def _cmd_daemon(a) -> int:
                   f"（宿主自报 {s['desktop_self'] or '-'}）")
             print(f"  已登录       : {s['logged_in']}　昵称={s['nickname'] or '-'}"
                   f"　QQ 进程 {len(s['qq_pids'])} 个 {s['qq_pids']}")
+            # 模式必须报出来：这条命就是「它现在到底发不发消息」的唯一答案，
+            # 而它以前不在这个输出里（心跳一直在写，只是没往外露）。
+            print(f"  模式         : {mode_text(s)}"
+                  f"（dry_run={s['dry_run']} no_send={s['no_send']}）")
             if s["rc"] is not None:
                 print(f"  退出码       : {s['rc']}（0=正常，2=启动阶段失败）")
             if s["error"]:
@@ -1058,6 +1238,35 @@ def _cmd_daemon(a) -> int:
                   f"　已登录={st.get('logged_in')}")
         print("\n它现在在隐藏桌面上，你看不见 —— 这是预期的。")
         print("用 `python -m app.host daemon status` 看它还在不在。")
+        return 0
+
+    if action == "restart":
+        # 目标模式从 --mode 显式取；`keep` 就是不换（原样重启）。
+        mode = getattr(a, "mode", "keep")
+        kw: dict = {}
+        if mode == "send":
+            kw = {"dry_run": False, "no_send": False}
+        elif mode == "dry":
+            kw = {"dry_run": True, "no_send": False}
+        elif mode == "rehearse":
+            kw = {"dry_run": False, "no_send": True}
+        r = restart_daemon(timeout=float(a.timeout or 20.0),
+                           wait_ready=float(a.wait or 0.0), **kw)
+        if r.get("unchanged"):
+            print(f"[OK] {r.get('note')}（宿主 pid={r['pid']} 还在跑）")
+            return 0
+        if not r.get("ok"):
+            print(f"[X] 切换模式失败：{r.get('error')}")
+            return 2
+        m = r.get("mode") or {}
+        now = ("只读（不发送）" if m.get("dry_run") else
+               "彩排（走完整链路但不发出）" if m.get("no_send") else
+               "会真的回复并发送")
+        print(f"[OK] 模式已切到「{now}」　pid={r['pid']}　桌面={r['desktop']}")
+        if r.get("degraded"):
+            print(f"    [!] 这几项没能从启动记录里还原，已回落到默认值："
+                  f"{'、'.join(r['degraded'])}")
+        print("    QQ 没有重启：那张桌面上的 QQ 与登录态原样留着，回复循环十几秒后回来。")
         return 0
 
     r = stop_daemon(timeout=float(a.timeout or 20.0))
@@ -1097,8 +1306,12 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="grab --login：只报可行性，不点击")
     ap.add_argument("action", nargs="?", default="status",
-                    choices=("status", "start", "stop"),
+                    choices=("status", "start", "stop", "restart"),
                     help="daemon 的子动作（默认 status）")
+    ap.add_argument("--mode", choices=("keep", "send", "dry", "rehearse"), default="keep",
+                    help="daemon restart：目标模式。keep=保持现状；send=会真的回复并发送；"
+                         "dry=只读（不调模型、不入队、不发送）；"
+                         "rehearse=彩排（走完整链路但不真的发出）")
     ap.add_argument("--no-send", action="store_true",
                     help="daemon start：彩排，走完整链路但不真的发出")
     ap.add_argument("--no-agent", action="store_true",

@@ -751,6 +751,42 @@ class Handler(BaseHTTPRequestHandler):
                      f"停止失败：{res.get('error')}", tag="RUN", source="ui")
             return self._json(res)
 
+        if route == "/api/host/restart":
+            # 只换模式、其余照旧地重启宿主（细节见 host.restart_daemon）。
+            #
+            # ⚠️ 目标模式**必须显式给**，不学 /api/agent/restart 那条「没给就沿用」。
+            #    那个静默沿用的默认值正是「点了重启、回来还是只读」这个坑的来源，
+            #    而它藏在一张写着「重启常驻」的按钮底下时极难被发现 ——
+            #    按钮说它重启，人理所当然以为能顺手换模式。
+            #    这里宁可报错也不猜：猜错的代价是「以为切过去了，其实没有」。
+            if "dry_run" not in data and "no_send" not in data:
+                return self._json(E.envelope(
+                    "E-WEB-004", "没给目标模式：请带 dry_run 或 no_send",
+                    {"用法": 'POST /api/host/restart  {"dry_run": true|false}',
+                     "为什么": "模式是宿主的启动参数，不显式指定就只能沿用旧值 —— "
+                               "而那条静默沿用的语义会让人以为切换成功了"}))
+            res = host.restart_daemon(
+                dry_run=bool(data.get("dry_run")) if "dry_run" in data else None,
+                no_send=bool(data.get("no_send")) if "no_send" in data else None,
+                wait_ready=float(data.get("wait") or 0.0))
+            if res.get("unchanged"):
+                BUS.emit(f"没有切换：目标模式与当前一致（{res.get('note')}）",
+                         tag="RUN", source="ui")
+            elif res.get("ok"):
+                m = res.get("mode") or {}
+                now = ("只读，不会发送任何消息" if m.get("dry_run") else
+                       "彩排，走完整链路但不发出" if m.get("no_send") else
+                       "会真的回复并发送消息")
+                BUS.emit(f"模式已切换 —— 现在是「{now}」"
+                         f"（宿主 pid {res.get('pid')}，QQ 没重启、登录态原样留着）",
+                         tag="RUN", source="ui")
+                if res.get("degraded"):
+                    BUS.emit("注意：这几项没能从启动记录里还原，已回落到默认值 —— "
+                             + "、".join(res["degraded"]), tag="WARN", source="ui")
+            else:
+                BUS.emit(f"切换模式失败：{res.get('error')}", tag="ERR", source="ui")
+            return self._json(res)
+
         if route == "/api/host/grab":
             # 抓图要派一个进程进那张桌面（PrintWindow 是唯一可靠路径），
             # 单次可能几秒到几十秒 —— 所以走后台任务，别让 HTTP 请求一直挂着。

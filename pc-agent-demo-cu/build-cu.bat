@@ -33,7 +33,12 @@ for /f "delims=" %%P in ('where python 2^>nul') do (
   if not defined PY call :check "%%P"
 )
 if not defined PY (
-  echo [X] No python with PyInstaller found. Install deps first (see build.bat).
+  rem NOTE: never put a "(" ... ")" pair inside an echo that lives in a
+  rem parenthesised block. cmd's parser closes the block at that ")" and then
+  rem chokes on whatever follows it ("was unexpected at this time") -- it did
+  rem exactly that here ("...(see build.bat)." -> the stray "." aborted the
+  rem script before it ever ran PyInstaller). Keep this line paren-free.
+  echo [X] No python with PyInstaller found. Install deps first - see build.bat.
   exit /b 2
 )
 

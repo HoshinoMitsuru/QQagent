@@ -901,6 +901,13 @@ function renderRun(s) {
   html += r.running
     ? `<button class="danger" data-act="agent-stop">${icon("stop")}停止常驻</button>
        <button data-act="agent-restart">${icon("refresh")}重启常驻</button>`
+      // ⚠️ 「重启常驻」**不改模式**：`/api/agent/restart` 不带 dry_run 就沿用旧值。
+      //    于是设成只读之后，那张按钮点一百次回来还是只读 —— 想切回会发送，
+      //    以前只剩「先停止常驻、再点开始常驻（会真的回复）」这一条路。
+      //    按钮叫「重启」而人以为它能顺手换模式，这种落差本身就是疏漏，所以显式给一个。
+      + (r.dry_run
+         ? `<button class="primary" data-act="agent-mode-send">${icon("rocket")}切到正常发送</button>`
+         : `<button data-act="agent-mode-dry">${icon("eye")}切回只读</button>`)
     : `<button class="primary" data-act="agent-start">${icon("rocket")}开始常驻（会真的回复）</button>
        <button data-act="agent-start-dry">${icon("eye")}只读运行（不发送）</button>`;
   html += `</div>`;
@@ -952,6 +959,15 @@ function renderHost(s) {
     : running ? { t: "运行中", c: "ok" }
     : h.stale ? { t: "疑似卡住（心跳停更）", c: "warn" }
     : { t: "已停止", c: "" };
+  // ---- 模式：这里有三态，别简化成「只读 / 正常」两态。
+  //      会真发 / 只读（连模型都不调）/ 彩排（走完整链路但不发出）/ 只摆着（没跑回复循环）。
+  //      这一格以前**不存在**：界面上只有一句「运行中」，看不出它到底发不发消息。
+  //      2026-10-09 那次误判（界面写着只读、日志里却真的发了两条 SEND）就长在这片空白上。
+  const mode = !h.heartbeat_present ? { t: "—", c: "" }
+    : (h.agent_enabled === false) ? { t: "只摆着（不跑回复循环）", c: "" }
+    : h.dry_run ? { t: "只读（不发送）", c: "warn" }
+    : h.no_send ? { t: "彩排（走链路但不发出）", c: "warn" }
+    : { t: "会真的发送", c: "ok" };
   html += `<div class="grid2" style="margin-bottom:12px">
     <div class="stat"><div class="k">状态</div><div class="v" style="font-family:var(--sans)">
       <span class="badge ${st.c}">${esc(st.t)}</span></div></div>
@@ -966,6 +982,9 @@ function renderHost(s) {
         ? `<div class="k" style="margin-top:4px;color:var(--warn)">宿主自报 ${esc(h.desktop_self)}（不一致！）</div>` : ""}</div>
     <div class="stat"><div class="k">心跳</div><div class="v" style="font-family:var(--sans);font-size:13px">
       ${h.heartbeat_present ? (h.age >= 0 ? `${h.age}s 前` : "—") : "还没写过"}</div></div>
+    <div class="stat"><div class="k">${running ? "模式" : "上次模式"}</div>
+      <div class="v" style="font-family:var(--sans);font-size:13px">
+      <span class="badge ${mode.c}">${esc(mode.t)}</span></div></div>
   </div>`;
 
   if (running || h.heartbeat_present) {
@@ -1021,14 +1040,38 @@ function renderHost(s) {
   // ---- 按钮
   html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">`;
   if (running) {
-    html += `<button class="danger" data-act="host-stop">${icon("stop")}停止（连宿主一起）</button>
-             <button data-act="host-grab">${icon("camera")}抓一张现在的画面</button>`;
+    html += `<button class="danger" data-act="host-stop">${icon("stop")}停止（连宿主一起）</button>`;
+    // 运行中**必须**有换模式的入口。以前这里只有「停止」和「抓图」，于是
+    // 「设了只读、想切回会发送」只剩一条路：先停掉再重新启动 ——
+    // 而「停止」会把那张桌面上的 QQ 一起收走，重启又要重新冷启 QQ、等窗口，
+    // 一次切换要一两分钟。模式确实是宿主的启动参数、宿主必须重启，
+    // 但**不必**连 QQ 一起重启：QQ 与登录态可以原样留着（见 host.restart_daemon）。
+    if (h.agent_enabled !== false) {
+      html += (h.dry_run || h.no_send)
+        ? `<button class="primary" data-act="host-mode-send">${icon("rocket")}切到正常发送（只重启宿主）</button>`
+        : `<button data-act="host-mode-dry">${icon("eye")}切回只读（只重启宿主）</button>`;
+    }
+    html += `<button data-act="host-grab">${icon("camera")}抓一张现在的画面</button>`;
   } else {
     html += `<button class="primary" data-act="host-start">${icon("rocket")}启动常驻（会真的回复）</button>
              <button data-act="host-start-dry">${icon("eye")}只读运行（不发送）</button>
              <button data-act="host-start-idle">${icon("monitor")}只把 QQ 摆上去</button>`;
   }
   html += `</div>`;
+
+  // 跑在「不发消息」的模式里时，把「怎么切回去」直接写在旁边 ——
+  // 这句话不写，人就得自己去找、去猜，而猜错的代价是「以为切过去了，其实没有」。
+  if (running && h.agent_enabled !== false && (h.dry_run || h.no_send)) {
+    html += `<div class="notice warn" style="margin-top:10px">${icon("eye")}<div>
+      当前是<b>${h.dry_run ? "只读" : "彩排"}模式</b>：${h.dry_run
+        ? "连模型都不会调、队列也不会进，更不会发出去。"
+        : "链路全真跑（切会话 / 复核 / 生成），只把最后一步「真的发出去」换掉。"}
+      确认没问题之后点上面的「切到正常发送」—— <b>只重启宿主进程</b>，
+      那张桌面上的 QQ 与登录态原样留着，不用重新扫码，通常十几秒就回到回复循环。
+      <br><span style="opacity:.85">这十几秒里回复循环是停的；队列里已经生成好
+      但还没发出去的回复不会丢，它们留在磁盘上，新宿主起来会接着发。</span>
+      </div></div>`;
+  }
 
   // ---- 画面：非活动桌面唯一的可视化通道（PrintWindow）
   const cap = (g && g.capture) || {};
@@ -1444,6 +1487,29 @@ async function handleAction(act, btn) {
       break;
     }
     case "agent-restart": await run("/api/agent/restart", {}, "重启常驻"); break;
+    case "agent-mode-send": {
+      // 与 host-mode-send 一样：这是会把「只读」变成「真的发消息」的动作。
+      const ok = await confirmDialog({
+        title: "切到正常发送", danger: true, confirmText: "切过去（会真的发消息）",
+        body: `会重启这个常驻子进程，模式换成「会真的回复并发送」。<br><br>
+          只读状态下它连模型都没调过、队列也是空的，所以这次重启只是几秒钟的事
+          （不需要重启 QQ）。<br><br>
+          它操作的是<b>你自己桌面上那个 QQ</b> —— 切过去之后就会真的发出去。`
+      });
+      if (ok) await run("/api/agent/restart", { dry_run: false }, "切到正常发送");
+      break;
+    }
+    case "agent-mode-dry": {
+      const ok = await confirmDialog({
+        title: "切回只读", confirmText: "切过去（不再发送）",
+        body: `会重启这个常驻子进程，之后它<b>不再发送任何消息</b>
+          （连模型都不会调、队列也不进）。<br>
+          已经生成好、还没发出去的那几条回复会原样留在磁盘上，一条都不会丢 ——
+          等切回正常发送时接着发。`
+      });
+      if (ok) await run("/api/agent/restart", { dry_run: true }, "切回只读");
+      break;
+    }
 
     /* ---------- 隐藏桌面（R4） ----------
        启动前一定要说清两件事：它会在你的屏幕上「看不见地」登一个 QQ 号；
@@ -1474,14 +1540,49 @@ async function handleAction(act, btn) {
       if (ok) await run("/api/host/start", { no_agent: true, wait: 3 }, "启动隐藏桌面");
       break;
     }
+    case "host-mode-send": {
+      // ⚠️ 这是**唯一**能把「只读」变成「真的发消息」的动作，确认框不能省。
+      //    和 host-start 那张卡一样：涉及「它会真的发出去」时，必须把
+      //    操作对象、代价、以及「现在开始会发」摆在人面前。
+      const h = s.host || {};
+      const ok = await confirmDialog({
+        title: "切到正常发送", danger: true, confirmText: "切过去（会真的发消息）",
+        body: `会把宿主进程重启一次，<b>只换模式</b>：那张桌面、那份 profile、
+          那个 QQ 都不动 —— QQ 继续在上面跑着、登录态原样留着，<b>不用重新扫码</b>。<br><br>
+          重启期间（通常十几秒）回复循环是停的；队列里已经生成好但还没发出去的回复
+          <b>不会丢</b>，它们留在磁盘上，新宿主起来会接着发。<br><br>
+          切过去之后它就<b>会真的回复并发送消息</b>了，发的是隐藏桌面上的那个号
+          ${h.nickname ? `（上次读到 <b>${esc(h.nickname)}</b>）` : ""}。
+          当前阶段：<b>${esc(h.phase || "未知")}</b>　已运行 ${fmtDur(h.uptime)}`
+      });
+      if (ok) await run("/api/host/restart", { dry_run: false, wait: 4 }, "切到正常发送");
+      break;
+    }
+    case "host-mode-dry": {
+      // 反向也要确认，但不必标红：它是往「更安全」的方向变。
+      // 需要说清的只有一件事 —— 这十几秒里队列不再往前发。
+      const h = s.host || {};
+      const ok = await confirmDialog({
+        title: "切回只读", confirmText: "切过去（不再发送）",
+        body: `同样只重启宿主进程：QQ、登录态、那张桌面都原样留着，不用重新扫码。<br><br>
+          切过去之后就<b>不会发送任何消息</b>了 —— 不调模型、队列也不进。
+          已经躺在队列里、还没发出去的那几条会<b>原样留在磁盘上</b>（一条都不会丢），
+          等哪天切回正常发送时接着发。<br><br>
+          当前阶段：<b>${esc(h.phase || "未知")}</b>　已运行 ${fmtDur(h.uptime)}`
+      });
+      if (ok) await run("/api/host/restart", { dry_run: true, wait: 4 }, "切回只读");
+      break;
+    }
     case "host-stop": {
       const h = s.host || {};
       const ok = await confirmDialog({
         title: "停止隐藏桌面常驻", danger: true, confirmText: "停止",
         body: `会先给回复循环最多 20 秒把队列里已经生成好的回复发完，再退宿主进程。<br><br>
-          隐藏桌面上那个 QQ <b>默认会留着</b>（登录态也留着，下次启动直接复用）。
-          想连它一起结束，用命令行
-          <span class="ecode">python -m app.host stop --yes</span>。<br><br>
+          收尾会把<b>那张桌面上的 QQ 一起结束</b>，虚拟桌面也随之销毁（2026-09-26 定的语义：
+          「这一套不要了」）。下次启动要重新冷启 QQ、重新等窗口 —— 登录态还在 profile 里，
+          所以不用重新扫码，但要等几十秒。<br><br>
+          <b>只是想换模式的话别用这个</b>：用上面的「切到正常发送 / 切回只读」，
+          那条路只重启宿主、QQ 不动。<br><br>
           当前阶段：<b>${esc(h.phase || "未知")}</b>　已运行 ${fmtDur(h.uptime)}`
       });
       if (ok) await run("/api/host/stop", {}, "停止隐藏桌面常驻");

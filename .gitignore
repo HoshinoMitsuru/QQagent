@@ -33,6 +33,11 @@ pc-agent-demo*/*.json.bad
 pc-agent-demo*/build/
 pc-agent-demo*/dist/
 pc-agent-demo*/*.spec.bak
+# 构建日志：build.bat 每次打包都会写一份完整 stdout，可重新生成
+pc-agent-demo*/build-last.log
+/build-last.log
+# 批量重打三棵树时汇总的日志（tools 侧脚本产物）
+/build-all.log
 # 打包用的隔离环境
 pc-agent-demo*/.venv/
 # 图标是 build_icon.py 生成的，但生成结果要能随仓库走（构建时省一步）

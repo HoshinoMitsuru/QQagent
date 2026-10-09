@@ -79,9 +79,17 @@ echo [i] Python: %PY%
 "%PY%" -c "import PyInstaller, uiautomation, comtypes, requests, pyperclip; print('[i] deps OK, PyInstaller', PyInstaller.__version__)" || goto :fail
 
 rem ---- icon -------------------------------------------------------------------
+rem NOTE: build_icon.py lives in archive\ (probes and build helpers were all
+rem moved there). It resolves the project root itself, so the path below is the
+rem only thing that has to stay in sync. A missing icon is NOT fatal for
+rem PyInstaller -- but it would silently produce an exe without one, so we fail.
 if not "%QQAGENT_NO_ICON%"=="1" (
   echo [i] Generating icon ...
-  "%PY%" build_icon.py || goto :fail
+  "%PY%" "archive\build_icon.py" || goto :fail
+  if not exist "app\assets\qq-agent.ico" (
+    echo [X] Icon was not produced at app\assets\qq-agent.ico
+    goto :fail
+  )
 )
 
 rem ---- clean previous artefacts ----------------------------------------------

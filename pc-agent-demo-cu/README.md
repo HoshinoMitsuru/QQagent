@@ -186,7 +186,7 @@ SEND  → '测试目标A'(QQ 100000001) (｡･ω･｡) 收到啦～你这是�
 
 | 方式 | 怎么做 | 适合 |
 | --- | --- | --- |
-| **界面**（推荐） | 双击 `dist\qq-agent.exe` → 浏览器里那张「隐藏桌面（独立 profile）」卡片上的按钮 | 所有人。启动 / 只读 / 只摆 QQ / 停止 / 抓图都在上面 |
+| **界面**（推荐） | 双击 `dist\qq-agent.exe` → 浏览器里那张「隐藏桌面（独立 profile）」卡片上的按钮 | 所有人。启动 / 只读 / 只摆 QQ / **切模式** / 停止 / 抓图都在上面 |
 | **`hostctl.bat`** | 双击它，或 `hostctl status` / `start` / `stop` / `stop-qq` / `log` / `open` | 想用命令行但不想记 python 路径 —— 它自己 cd、自己挑一份装了依赖的 python |
 | 手敲 `python -m app.host ...` | **必须先 `cd` 到本目录**，并且要用**装了依赖的那份 python**（系统 python 会 `ModuleNotFoundError`） | 调试 / 脚本化 |
 
@@ -368,6 +368,7 @@ V2 多了一张卡：**隐藏桌面（独立 profile）**。两者**互斥**（�
 | 那边的 QQ 进程数 | 「QQ 还在不在」 | 凭命令行里的 `--user-data-dir` 认领（壳看不到那张桌面的窗口，但看得到进程） |
 | **抓一张现在的画面** | 「那边到底长什么样」 | `PrintWindow(PW_RENDERFULLCONTENT)` —— 非活动桌面唯一的抓图路径。子进程抓完落盘，壳用一个**固定文件名**的路由发出去（不为「按路径读文件」开口子） |
 | 启动 / 只读启动 / 只摆 QQ 上去 / 停止 | 副作用不同的四种启动 | 破坏性动作都走二次确认，且确认文案里写清「会不会真的发消息」 |
+| 模式 / 切到正常发送 / 切回只读 | 「它现在到底发不发消息」+ 怎么换 | 心跳里一直有 `dry_run`/`no_send`/`agent_enabled`，以前**没往外露**，界面上只显示「运行中」。见下 |
 
 两个容易被忽略的实现细节：
 
@@ -378,6 +379,30 @@ V2 多了一张卡：**隐藏桌面（独立 profile）**。两者**互斥**（�
   否则浏览器按路径缓存，新图永远不显示。
 
 接口验收脚本：`archive/probe_host_panel.py`（23 项，含「不能靠断连当报错」那一条）。
+
+### 运行中怎么换模式（2026-10-09 补）
+
+「只读运行」是**启动参数**（`--dry-run`）。以前想从只读切回「会真的发送」，界面上的路只剩
+「先停止、再启动」—— 而「停止」按 2026-09-26 的语义会把那张桌面上的 QQ 一起收走，
+重启又要冷启 QQ、等窗口，一次切换几十秒到一两分钟。现在卡片上直接给了一个切换按钮。
+
+* **为什么必须重启宿主**：`--dry-run` / `--no-send` 从第一轮扫描起就决定了 agent 敢不敢
+  入队、敢不敢调模型、敢不敢发。做成「跑着的时候随时翻」会留下一个说不清的瞬间：翻的
+  当下，队列里正躺着已经生成好的回复 —— 该按旧模式发掉，还是按新模式咽掉？两个答案都
+  说得通，而这种「两遍都说得通」的语义正是 2026-10-09 出事故的地方。重启没有这个歧义。
+* **为什么不必重启 QQ**：`stop_daemon(keep_qq=True)` 只让宿主退场，跳过
+  `_cleanup_after_stop()`。新宿主在 `_ensure_qq()` 里凭 `--user-data-dir` 认领到那个
+  QQ 进程，直接跳到「等窗口 → 已经登录 → 开会话」，通常十几秒回到回复循环，也不用重扫码。
+  桌面也不用管 —— QQ 这个进程本身就持有桌面引用，它活着桌面就活着。
+* **其余参数从哪来**：`start_daemon()` 把这次的入参写进 `state/hostd-launch.json`，
+  `restart_daemon()` 照着回放（桌面名 / profile / qq_exe / chat / stop-qq-on-exit / 有没有
+  跑回复循环）。记录丢了就退用心跳能还原的那部分，并把没还原到的项放进 `degraded` 报出来
+  —— 不假装完美还原。
+* **队列里的遗留项**：只读模式下 `serve_queue()` 直接返回，**一个字都不消费**。不这么做
+  的话，那些「切换前已经生成好、还没发出去」的回复会先被 `prepare()` 调一次模型
+  （违背只读「不调模型」的承诺），再被 `deliver()` 的兜底当「已处理」收下并 `drop` 掉
+  —— 那条回复就永久没了。现在的语义是：原样留在磁盘上，切回正常发送时接着发。
+* **命令行同款**：`python -m app.host daemon restart --mode send|dry|rehearse|keep`。
 
 ### 为什么体检不看命令行参数
 
@@ -441,7 +466,7 @@ V2 多了一张卡：**隐藏桌面（独立 profile）**。两者**互斥**（�
 ### 怎么验证这一层
 
 ```powershell
-python test_ui.py      # 101 条：端到端跑真 HTTP、真子进程，只隔离数据目录
+python test_ui.py      # 131 条：端到端跑真 HTTP、真子进程，只隔离数据目录
 python test_exe.py     # 38 条：把真 exe 拷到干净目录里跑，验证冻结适配
 build.bat              # 构建 dist\qq-agent.exe
 build.bat console      # 构建带控制台的诊断版（排错用）
@@ -794,7 +819,8 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 | `probe_profile.py` | 探查资料卡通路的取号可行性 |
 | `test_send_guard.py` | **实测**防错发的三道闸（切走会话后必须能检出） |
 | `test_pipeline.py` | **端到端彩排**：收到消息 → 入队 → 生成 → 复核 → 止步（不发送） |
-| `test_discovery.py` | **离线单测**：发现/占位/总读取/撤单/非文本策略（43 条，QQ 与模型全 fake） |
+| `test_discovery.py` | **离线单测**：发现/占位/总读取/撤单/非文本策略/`dry-run` 三道守卫（55 条，QQ 与模型全 fake） |
+| `test_stop_cleanup.py` | **宿主停止收尾离线自检**（18 条：杀 QQ + 销毁桌面、`keep_qq` 例外、`restart_daemon` 的参数回放） |
 | `test_live_chain.py` | **真机联调**：伪造一条未读 → 走完整真实链路（默认彩排，加 `--live` 才跑） |
 | `probe_minimized.py` | 测「最小化之后 UIA 还能读到什么」（结论：读取不受影响） |
 | `probe_switch_nofg.py` | 测「切会话能否免前台」（结论：`InvokePattern` 可以） |
@@ -804,7 +830,7 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 | **`qq-agent.spec`** | PyInstaller 打包配置（单文件/windowed/UAC 清单/隐式导入） |
 | **`build.bat`** | 一键构建；自动挑一个装齐依赖的解释器 |
 | **`run_ui.bat`** | 源码模式启动控制台 |
-| **`test_ui.py`** | **控制台端到端测试**（128 条：令牌、配置往返、密钥收拢、恢复默认保 Key、进程托管、互斥、SSE、UIA 线程、托盘） |
+| **`test_ui.py`** | **控制台端到端测试**（131 条：令牌、配置往返、密钥收拢、恢复默认保 Key、进程托管、互斥、SSE、UIA 线程、托盘） |
 | **`test_exe.py`** | **打包产物验收**（52 条：真 exe、冻结后的数据目录、exe 自调用、退出） |
 | **`EXE使用说明.md`** | **给最终用户的手册**（五步流程、VM 加固、排错表） |
 | `config.json` | 配置（模型、提示词、防抖/连续对话/持久化、identity、queue、discovery、memory）+ **API Key**，已被 `.gitignore` 排除 |
@@ -1037,7 +1063,7 @@ self.qq.baseline(skip_last=keep, scope=scope)
 ### 离线验证
 
 ```bash
-python -X utf8 test_discovery.py               # 43 条：发现/占位/总读取/撤单/非文本策略，不碰 QQ
+python -X utf8 test_discovery.py               # 55 条：发现/占位/总读取/撤单/非文本策略/dry-run 三道守卫，不碰 QQ
 python -X utf8 test_live_chain.py              # 真机联调（默认不跑，加 --live）
 python -X utf8 agent.py --sessions             # 只读发现视图：列出会话+未读+会怎么判
 ```
@@ -1102,7 +1128,10 @@ python -X utf8 agent.py --once --dry-run       # 单轮：只把最新 1 条当�
 python -X utf8 agent.py --once --no-send       # 单轮彩排：走完整链路（切会话/复核/生成），不发出
 python -X utf8 agent.py --no-send              # 常驻循环彩排：完整链路但不发出
 python -X utf8 agent.py --send "测试"           # 真发一条
-python -X utf8 agent.py --dry-run              # 常驻循环，只读不发
+python -X utf8 agent.py --dry-run              # 常驻循环只读：不调模型、不入队、不发送
+#    --dry-run 与 --no-send 的分工：no-send 是彩排（链路全真跑，只把最后一步换掉）；
+#    dry-run 是只读（连模型都不调）。2026-10-09 修过 dry-run 的一个洞：
+#    从会话列表发现【别的】会话冒未读红点的那条路径没守 dry-run，会静默真发。
 python -X utf8 agent.py                        # 常驻循环，正式运行（Ctrl+C 退出）
 python -X utf8 archive/probe.py --depth 30 --dump      # 重新导出控件树
 
@@ -1116,8 +1145,9 @@ python -X utf8 reply_queue.py --selftest       # 45 条离线单测，不碰 QQ 
 python -X utf8 reply_queue.py --report         # 容量仿真：5~40 并发扫一遍
 python -X utf8 reply_queue.py --simulate 20    # 单点仿真，输出 JSON
 python -X utf8 test_send_guard.py              # 实测三道闸（切走会话必须能检出）
+python -X utf8 test_stop_cleanup.py            # 18 条：停止收尾 + keep_qq + restart_daemon 参数回放，不碰 QQ 不碰真实桌面
 python -X utf8 test_pipeline.py                # 端到端彩排：入队→合并→生成→复核→止步
-python -X utf8 test_discovery.py               # 43 条：发现/总读取/撤单/非文本策略，不碰 QQ
+python -X utf8 test_discovery.py               # 55 条：发现/总读取/撤单/非文本策略/dry-run 三道守卫，不碰 QQ
 
 # 多会话发现（降级方案）
 python -X utf8 agent.py --sessions             # 只读发现视图：列会话+未读+会怎么判，不切前台

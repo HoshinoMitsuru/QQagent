@@ -11,11 +11,15 @@ test_discovery.py — 「发现 + 延迟总读取」降级方案的离线单测
       → 静默窗（5s 阈值）关闭后 → 切过去做一次「上下文总读取」
       → 按准入判定写进该会话上下文 → 生成回复 → 排到风控额度就发送
 
-这条链路以前没有任何自动化覆盖，只能靠真机手工试。而它有三个很容易回归的点：
+这条链路以前没有任何自动化覆盖，只能靠真机手工试。而它有几个很容易回归的点：
 
     1. 首见会话建基线时 **skip_last 要用上未读条数**，否则要么回灌历史、要么吞掉新消息；
     2. 「总读取没拿到新消息」必须**撤单**，否则会为一条根本不存在的新消息回一句；
-    3. 自己发出的回复会改会话预览，**发送后必须重采指纹**，否则形成自我叫醒循环。
+    3. 自己发出的回复会改会话预览，**发送后必须重采指纹**，否则形成自我叫醒循环；
+    4. 机器空闲到**锁屏**会让切会话 / 写输入框 / 发送全部失效，而已经锁上的锁屏
+       **没有受支持的办法能解开**（解锁要凭据，且必须在 Winlogon 安全桌面上输入）——
+       所以 `run_forever` 开工前必须挂上「进程内保活」。删掉那一行不会有任何报错，
+       只能靠这条用例钉住。
 
 本测试把 QQ 完全 fake 掉（包括 `qqid.list_sessions` / `qqid.switch_session`），
 **不需要 QQ、不需要网络、不发送任何东西**。
@@ -94,7 +98,10 @@ class FakeQQ:
         msgs = self.read_messages(8)
         return (self.cur, self.is_group, tuple(m.key for m in msgs))
 
-    def send_text(self, text: str, guard=None) -> bool:
+    def send_text(self, text: str, guard=None, resume: bool = False) -> bool:
+        # 签名要跟真实 QQWindow 对齐：`deliver` 会带 `resume=` 调用它
+        # （草稿还在输入框里时走「原地重发」）。少了这个参数，回归用例在
+        # 「兜底本该拦住却没拦住」时会以 TypeError 崩掉，而不是干净地判 FAIL。
         if guard is not None and not guard():
             return False
         self.sent.append((self.cur, text))
@@ -139,10 +146,17 @@ def make_cfg(tmpdir: str) -> dict:
     })
 
 
-def build(tmpdir: str) -> A.Agent:
-    """装好假 QQ + 假模型 + 假会话列表的 Agent。"""
+def build(tmpdir: str, dry_run: bool = False) -> A.Agent:
+    """
+    装好假 QQ + 假模型 + 假会话列表的 Agent。
+
+    `dry_run` 与 `no_send` 是**两种不同**的模式，别混：
+        no_send —— 走完整链路（切会话 / 复核 / 生成），只是最后一步不发（彩排）；
+        dry_run —— 连模型都不该调、队列都不该进，更不该发（只读）。
+    默认走 no_send —— 本文件大多数用例要的是「把链路走完」。
+    """
     cfg = make_cfg(tmpdir)
-    ag = A.Agent(cfg, no_send=True)
+    ag = A.Agent(cfg, dry_run=dry_run, no_send=not dry_run)
     ag.qq = FakeQQ()
     # 模型不联网
     ag.generate_reply = lambda scope: f"（测试回复 → {scope}）"
@@ -198,6 +212,8 @@ def main() -> int:
         test_total_read(sub("t2"))
         test_no_new_messages_aborts(sub("t3"))
         test_nontext_policy(sub("t4"))
+        test_dry_run_never_sends(sub("t5"))
+        test_keep_awake(sub("t6"))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -422,6 +438,160 @@ def test_nontext_policy(tmpdir: str) -> None:
     writes4, why4 = ag3._admit(empty, "private:1001")
     case("content 为空的条目被静默丢弃（不写理由）", writes4 == [] and why4 == "",
          f"{writes4} {why4!r}")
+
+
+def test_dry_run_never_sends(tmpdir: str) -> None:
+    """
+    ⚠️ 回归：`--dry-run` 必须连「发现路径」也守住。
+
+    2026-10-09 的真事故：隐藏桌面上跑着一个「只读运行」的常驻，界面上写着
+    「只读模式，不会发送任何消息」，日志里却出现了两条**真的发出去**的 SEND
+    （其中一条发到了群里）。原因就是 `dry_run` 当时只守住了 `_flush`
+    —— 那是「当前打开的会话」的实时路径；而 `discover()` 扫到**别的**会话
+    冒未读红点时，照样入队 → `prepare()` 调模型 → `deliver()` 真发。
+
+    所以这里同时钉住三件事：
+        1. discover() 在 dry_run 下不入队（把入口挡住）；
+        2. 万一日后又有新路径漏进来，deliver() 也绝不真的发出去（把出口兜住）；
+        3. 队列里已有遗留项时，只读也**不消费**它（把队列原样留住）——
+           这条是 2026-10-09 加「运行中切模式」时补的：那次切换必然发生在队列
+           非空的时候，而只读若照常出队，会把已经生成好的回复静默 drop 掉。
+    """
+    print("\n[5] dry-run 也必须守住发现路径（2026-10-09 回归）")
+    ag = build(tmpdir, dry_run=True)
+    calls: list = []
+
+    def fake_gen(scope: str) -> str:
+        calls.append(scope)
+        return f"（不该生成的回复 → {scope}）"
+
+    ag.generate_reply = fake_gen
+    ag.qq.cur = "自己人"
+    ag.qq.sessions["自己人"] = {"msgs": [], "is_group": False}
+    seed_session(ag, "阿离", False, "1001", [mkmsg("阿离", "在吗", 1)])
+    seed_session(ag, "群A", True, "2002", [mkmsg("甲", "开团", 2)])
+
+    # ① 别的会话冒未读红点 —— 当年正是这条路径漏掉了 dry_run
+    ag._fake_cards = [card("阿离", preview=("在吗", "在忙吗"), unread=1),
+                      card("群A", preview=("甲：", "开团"), unread=3)]
+    n = ag.discover()
+    case("dry-run：发现路径不入队", n == 0 and len(ag.queue) == 0,
+         f"n={n} scopes={ag.queue.scopes()}")
+    case("dry-run：指纹仍然记账（否则每轮重复报）",
+         len(ag._rot().fingerprints) == 2, f"{ag._rot().fingerprints}")
+    ag._last_scan = 0.0
+    case("dry-run：同一份新动静不重复报", ag.discover() == 0)
+
+    case("dry-run：队列空转，serve_queue 什么都不做", ag.serve_queue() is False)
+    case("dry-run：一次都没调模型", calls == [], f"{calls}")
+    case("dry-run：一条都没发出去", ag.qq.sent == [], f"{ag.qq.sent}")
+
+    # ③ 队列里有**遗留项**时，只读也不许碰它（2026-10-09 随「运行中切模式」一起加）。
+    #
+    #    队列是**落盘**的：磁盘上可能正躺着上一次没发出去的待回复
+    #    （`_save_pending` 存在的全部理由就是「重启不丢消息」）。
+    #    而「正常 → 只读」这一次切换，必然就是在队列非空的时候发生的。
+    #    如果只读模式照常出队，会连出两个错：
+    #      ① `prepare()` 会**真的调一次模型** —— 只读承诺的是「不调模型」；
+    #      ② 算出来的回复一头撞进 `deliver()` 的兜底，被当成「已处理」收下，
+    #         `serve_queue` 随即 drop 掉它 —— 那条回复**永久没了**。
+    #    本项目对「已生成但没发出去」的契约是一条都不丢，所以只读就该一个字都不碰。
+    left = ag.queue.submit("private:1001", "阿离", "1001", "（上次没发出去的正文）",
+                           key="k8", seq=8, wait_seconds=0.0)
+    case("dry-run：队列非空时也不出队", ag.serve_queue() is False)
+    case("dry-run：遗留项原样留在队列里（没被消费、也没被 drop）",
+         len(ag.queue.items) == 1 and ag.queue.items[0] is left
+         and left.reply == "" and not left.prepared,
+         f"items={ag.queue.items}")
+    case("dry-run：有遗留项时依然一次都没调模型", calls == [], f"{calls}")
+    case("dry-run：有遗留项时依然一条都没发出去", ag.qq.sent == [], f"{ag.qq.sent}")
+
+    # ② 兜底：假如将来有条新路径把东西塞进了队列，最后一步也必须拦住
+    it = ag.queue.submit("private:1001", "阿离", "1001", "（漏进来的正文）",
+                         key="k9", seq=9, wait_seconds=0.0)
+    ag._verify_target = lambda item: True   # 这里只测「模式闸」，身份复核另有用例覆盖
+    stopped = ag.deliver(it, "（漏进来的回复）")
+    case("dry-run：deliver 兜底不发（send_text 从没被调用）", ag.qq.sent == [],
+         f"sent={ag.qq.sent}")
+    case("dry-run：兜底按「已处理」收尾，不回队列空转", stopped is True)
+
+
+def test_keep_awake(tmpdir: str) -> None:
+    """
+    进程内保活。钉五件事：
+
+      ① 真调用能拿到牌（返回 True）；
+      ② **幂等** —— 重复申请只是把同一套标志再置一遍；
+      ③ 拿不到时**只降级、不炸**（返回 False，不把异常抛给调用方）；
+      ④ 拿不到时按 `E-ENV-009` 报出来 —— 用户能在界面上查到这个码该怎么办，
+         而不是只看到一句没有下文的「失败」；
+      ⑤ `run_forever` 在两道附着检查**之后**就去申请了 —— 这是「防止有人把那一行删掉」
+         的守卫：删掉它不会有任何报错，别处也测不出来。
+
+    刻意**不**断言「系统账本里能看到我们」：那要 `powercfg`，且它打印的是路径而不是 pid
+    （实测同一条目会显示成别人的 python），拿它做硬判据会变成一台机器一个结果。
+    这一条的真机核对记在当天的记忆里：申请后 `powercfg /requests` 的 DISPLAY/SYSTEM
+    段出现 [PROCESS] 条目，进程退出后自动回到「无」。
+    """
+    print("\n[6] 保持唤醒：只挂进程内的电源请求，不改这台机器的任何设置")
+
+    # ①② 真调用 + 幂等
+    case("keep_awake() 能拿到「保持唤醒」这块牌", A.keep_awake() is True)
+    case("keep_awake() 幂等（重复申请仍然成功）", A.keep_awake() is True)
+
+    # ③ 拿不到时只降级，不把异常抛给调用方
+    real_ctypes = A.ctypes
+
+    class _Boom:
+        """把 WinDLL 打桩成「拒绝访问」，模拟一台不许申请电源请求的机器。"""
+
+        @staticmethod
+        def WinDLL(*a, **k):
+            raise OSError(5, "拒绝访问")
+
+    A.ctypes = _Boom
+    try:
+        case("申请失败时返回 False（不往外抛，agent 照常跑）", A.keep_awake() is False)
+        # ④ 失败必须带码。带上码的 log 与不带的 log 在功能上毫无区别 ——
+        #    区别只在「出事时用户查不查得到怎么办」，所以只能靠断言钉住。
+        case("申请失败按 E-ENV-009 报出来（而不是一句没码的「失败」）",
+             A._LAST_CODE.get("code") == "E-ENV-009",
+             f"实际报的是 {A._LAST_CODE.get('code')!r}")
+    except Exception as exc:                       # noqa: BLE001
+        case("申请失败时返回 False（不往外抛，agent 照常跑）", False,
+             f"抛出去了：{type(exc).__name__}: {exc}")
+    finally:
+        A.ctypes = real_ctypes
+    case("恢复之后还能正常拿到（打桩没留下后遗症）", A.keep_awake() is True)
+
+    # ⑤ 调用点：附着成功后立刻申请。用「哨兵异常」把 run_forever 停在那一刻，
+    #    这样不用把 baseline / discover / 主循环全部 fake 出来。
+    ag = build(tmpdir)
+    ag.qq.attach = lambda: True            # type: ignore[method-assign]
+    ag.qq.dom_exposed = lambda: True       # type: ignore[method-assign]
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    real_ka = A.keep_awake
+
+    def fake_ka() -> bool:
+        seen.append(1)
+        raise _Stop()
+
+    A.keep_awake = fake_ka                  # type: ignore[assignment]
+    try:
+        ag.run_forever()
+        case("run_forever 在附着成功后申请了保持唤醒", False,
+             "run_forever 直接返回了 —— 调用点是不是被删了？")
+    except _Stop:
+        case("run_forever 在附着成功后申请了保持唤醒", len(seen) == 1, f"调用 {len(seen)} 次")
+    except Exception as exc:                       # noqa: BLE001
+        case("run_forever 在附着成功后申请了保持唤醒", False,
+             f"在申请之前就抛了别的：{type(exc).__name__}: {exc}")
+    finally:
+        A.keep_awake = real_ka              # type: ignore[assignment]
 
 
 if __name__ == "__main__":

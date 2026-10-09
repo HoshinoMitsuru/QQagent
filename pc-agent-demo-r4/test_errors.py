@@ -890,7 +890,14 @@ def t15_never_lose_reply():
         agent.report_exc = lambda exc, code, **kw: reports.append((code, str(exc), kw))
 
         def new_agent():
-            a = agent.Agent(cfg, dry_run=True)
+            # ⚠️ 这里要的是 `no_send`（彩排：链路全真跑，只把最后一步换掉），
+            #    不是 `dry_run`（只读）。两者在 2026-10-09 被明确区分开：`dry_run`
+            #    现在**连队列都不消费** —— `serve_queue()` 一进来就返回（理由见
+            #    agent.py 里那段说明：只读若照常出队，会把已经生成好的回复
+            #    静默 drop 掉）。而本节要测的恰恰是「发送失败之后的账目」，
+            #    那必须让队列真的被服务一次。原本这里写的是 dry_run=True，
+            #    那只是因为它当时恰好等价于「不真发」而已。
+            a = agent.Agent(cfg, no_send=True)
             # 待发队列落盘到临时目录，别污染项目
             a._pending_path = lambda: os.path.join(TMP, "pending-replies.json")
             return a

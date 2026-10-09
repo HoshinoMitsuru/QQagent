@@ -829,6 +829,13 @@ function renderRun(s) {
   html += r.running
     ? `<button class="danger" data-act="agent-stop">${icon("stop")}停止常驻</button>
        <button data-act="agent-restart">${icon("refresh")}重启常驻</button>`
+      // ⚠️ 「重启常驻」**不改模式**：`/api/agent/restart` 不带 dry_run 就沿用旧值。
+      //    于是设成只读之后，那张按钮点一百次回来还是只读 —— 想切回会发送，
+      //    以前只剩「先停止常驻、再点开始常驻（会真的回复）」这一条路。
+      //    按钮叫「重启」而人以为它能顺手换模式，这种落差本身就是疏漏，所以显式给一个。
+      + (r.dry_run
+         ? `<button class="primary" data-act="agent-mode-send">${icon("rocket")}切到正常发送</button>`
+         : `<button data-act="agent-mode-dry">${icon("eye")}切回只读</button>`)
     : `<button class="primary" data-act="agent-start">${icon("rocket")}开始常驻（会真的回复）</button>
        <button data-act="agent-start-dry">${icon("eye")}只读运行（不发送）</button>`;
   html += `</div>`;
@@ -1167,6 +1174,29 @@ async function handleAction(act, btn) {
       break;
     }
     case "agent-restart": await run("/api/agent/restart", {}, "重启常驻"); break;
+    case "agent-mode-send": {
+      // 与 host-mode-send 一样：这是会把「只读」变成「真的发消息」的动作。
+      const ok = await confirmDialog({
+        title: "切到正常发送", danger: true, confirmText: "切过去（会真的发消息）",
+        body: `会重启这个常驻子进程，模式换成「会真的回复并发送」。<br><br>
+          只读状态下它连模型都没调过、队列也是空的，所以这次重启只是几秒钟的事
+          （不需要重启 QQ）。<br><br>
+          它操作的是<b>你自己桌面上那个 QQ</b> —— 切过去之后就会真的发出去。`
+      });
+      if (ok) await run("/api/agent/restart", { dry_run: false }, "切到正常发送");
+      break;
+    }
+    case "agent-mode-dry": {
+      const ok = await confirmDialog({
+        title: "切回只读", confirmText: "切过去（不再发送）",
+        body: `会重启这个常驻子进程，之后它<b>不再发送任何消息</b>
+          （连模型都不会调、队列也不进）。<br>
+          已经生成好、还没发出去的那几条回复会原样留在磁盘上，一条都不会丢 ——
+          等切回正常发送时接着发。`
+      });
+      if (ok) await run("/api/agent/restart", { dry_run: true }, "切回只读");
+      break;
+    }
     case "task-run": {
       const t = TASKS.find(x => x.id === id); if (!t) return;
       const params = {};

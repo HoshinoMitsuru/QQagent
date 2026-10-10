@@ -17,6 +17,9 @@ hostd.py —— **常驻宿主进程**（daemon）：被启动到隐藏桌面上
        能去点那个按钮。
     3. **写心跳** —— 壳看不到窗口、拿不到 stdout（CreateProcessW 没接管管道），
        文件是唯一通道。
+    4. **启动期失败时自己收尾**（rc=2，2026-10-10 起）—— 壳不知道宿主失败了，
+       不收就会在隐藏桌面上留下「壳看不见、非提权 shell 也删不掉」的僵尸 QQ。
+       见 `_exit_cleanup_plan` / `_cleanup_on_exit`。
 
 ## 为什么 agent 必须跑在**主线程**
 
@@ -495,6 +498,76 @@ def _run_agent(dry_run: bool, no_send: bool) -> int:
     return ag.run_forever()
 
 
+# ============================================================ 退出时的收尾
+#: 启动期失败的返回码。`fail()` 与异常兜底都写它；`_run_agent` 的「入口检查没过」也是它。
+RC_STARTUP_FAIL = 2
+
+
+def _exit_cleanup_plan(rc: int, stop_qq_on_exit: bool) -> str:
+    """
+    退出时该走哪条收尾：`"qq-only"` / `"full"` / `"none"`。
+
+    ## 为什么单独抽出来
+
+    「谁负责收尾」这件事原来只有一个出口（壳的 `host.stop_daemon`），
+    现在多了一条（启动期失败由宿主自己收）。两条路一旦散在 `finally` 的
+    两个 `if` 里，以后加第三种退出原因就没人说得清哪条会命中 —— 所以把
+    判据收成一个纯函数，行为由它一处定义、一处测试。
+
+    ## 三条语义
+
+      · `"qq-only"`  —— `--stop-qq-on-exit`：用户显式要求，只结束 QQ；
+      · `"full"`     —— **启动期失败（rc=2）自动收尾**（2026-10-10 拍板）：
+        这时 QQ 是我们起的、桌面也还在，不收就会留下一个「壳看不见的
+        僵尸现场」（见 `_cleanup_on_exit` 的说明）；
+      · `"none"`     —— 正常停止（rc=0）：⛔ 不在这里收。壳的 `stop_daemon`
+        会收，而且「宿主活着时不顺手带走 QQ」是刻意保留的
+        （见 `host.stop_daemon(keep_qq=...)`）。
+
+    `stop_qq_on_exit` 优先：用户已经指名要那条路，就不要再叠一次全量收尾。
+    """
+    if stop_qq_on_exit:
+        return "qq-only"
+    if rc == RC_STARTUP_FAIL:
+        return "full"
+    return "none"
+
+
+def _cleanup_on_exit(profile: str, why: str) -> dict:
+    """
+    退出前收尾的**唯一入口**：调 `host._cleanup_after_stop`（杀我们认领得到的
+    QQ + 放桌面句柄销毁虚拟桌面）并把结果落成日志。
+
+    不抛 —— 收尾失败绝不能改退出码，退出码是壳判断「这次是正常停止还是启动
+    失败」的唯一依据。
+
+    ## 为什么这一条由宿主自己做，而不是像「停止」那样交给壳
+
+    `_cleanup_after_stop` 的说明写着「收尾必须由**活着的控制方**执行」，理由是
+    宿主可能被强杀。**启动期失败不属于那种情况**：宿主不是被杀，是它自己
+    `return 2`，进程还活着、认领 QQ 的 profile 还在手上；而壳**根本不知道**
+    宿主失败了（`start_daemon` 把进程丢上桌面就返回了）。
+
+    不收的代价实测过（2026-10-10）：隐藏桌面上留下一台渲染进程已死的 QQ；
+    若拉起它的壳是提权进程、子进程同样提权，非提权 shell 连 `taskkill /F /T`
+    都是「拒绝访问」——现场删不掉、旧 exe 也被占用、下一次构建直接失败。
+    """
+    try:
+        c = host._cleanup_after_stop(profile)
+    except Exception as exc:                        # noqa: BLE001
+        log("WARN", f"退出收尾失败（不阻塞退出）：{type(exc).__name__}: {exc}")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    qq = c.get("qq") or {}
+    de = c.get("desktop") or {}
+    log("HOST", f"{why} → 自动收尾：QQ 结束 {qq.get('killed')} 个进程；"
+                f"桌面 {de.get('name')!r} 销毁={de.get('destroyed')}")
+    if de.get("error"):
+        # 「桌面句柄已放但仍探测到存在」在本进程里是**预期之内**的：
+        # 我们自己的退出还没完成，桌面引用要等进程真的没了才归零。
+        log("HOST", f"（桌面这一项没成：{de['error']}）—— 本进程退出后引用归零，桌面会随之销毁")
+    return c
+
+
 def main() -> int:
     # prog 要跟着形态走：冻结后 `--help` 里写「python -m app.hostd」会把人
     # 引到一个在这台机器上根本不存在的命令上。
@@ -635,12 +708,17 @@ def main() -> int:
                     os.remove(p)
             except Exception:
                 pass
-        if a.stop_qq_on_exit:
+        # 退出收尾。判据收在 `_exit_cleanup_plan` 里（一处定义、一处测试）：
+        # 2026-10-10 起多了一条「启动期失败（rc=2）自动收拾现场」。
+        plan = _exit_cleanup_plan(rc, a.stop_qq_on_exit)
+        if plan == "qq-only":
             try:
                 r = host.stop(a.profile)
                 log("HOST", f"已按 --stop-qq-on-exit 结束 QQ：{r.get('killed')} 个进程")
             except Exception as exc:
                 log("WARN", f"退出时结束 QQ 失败：{exc}")
+        elif plan == "full":
+            _cleanup_on_exit(a.profile, f"启动期失败 rc={rc}（{reason}）")
         try:
             if logf:
                 logf.close()

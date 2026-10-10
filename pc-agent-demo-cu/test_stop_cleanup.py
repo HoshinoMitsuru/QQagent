@@ -8,6 +8,8 @@ test_stop_cleanup.py —— stop_daemon 收尾清理（杀 QQ + 销毁桌面）�
 2. 容错路径（stop 炸 / close 炸 / 销毁超时，各记各的错，不阻塞主结论）
 3. stop_daemon 两个退出分支（宿主在跑/不在跑）都要做收尾
 4. keep_qq（切换模式专用）真的不碰 QQ；restart_daemon 只换模式、其余参数原样回放
+5. 启动期失败（rc=2）由宿主自己收尾（2026-10-10）：判据只有一处、正常停止不动 QQ、
+   收尾炸了不改退出码
 
 用法：python test_stop_cleanup.py
 """
@@ -242,6 +244,54 @@ try:
     r = host_mod.restart_daemon(dry_run=False)
     case("--no-agent 起的（没跑回复循环）→ 没有模式可切，明说原因",
          r.get("ok") is False and "回复循环" in str(r.get("error")), str(r))
+
+    # ------------------------------------------------------------------
+    print("[5] 启动期失败（rc=2）由宿主自己收尾 —— 判据 + 收尾入口")
+    #
+    # 2026-10-10 拍板。真实事故：宿主启动失败（rc=2）退出后，隐藏桌面上留下一台
+    # 渲染进程已死的 QQ；而壳**不知道**宿主失败了（start_daemon 丢完进程就返回），
+    # 于是没人收 —— 现场还删不掉（壳提权 → QQ 也提权 → 非提权 shell 的 taskkill
+    # 是「拒绝访问」），旧 exe 被占用，下一次构建直接失败。
+    # 这里钉住三件事：判据只有一处定义；正常停止**不许**顺手带走 QQ；
+    # 收尾自己炸了也不许改退出码（退出码是壳判断「正常停止 / 启动失败」的唯一依据）。
+
+    import app.hostd as hostd_mod
+
+    case("RC_STARTUP_FAIL 就是 2（与 fail() / _run_agent 的约定一致）",
+         hostd_mod.RC_STARTUP_FAIL == 2)
+    case("rc=2 → full（启动期失败自动收尾）",
+         hostd_mod._exit_cleanup_plan(2, False) == "full")
+    case("rc=0 → none（正常停止交给壳的 stop_daemon，不在这里动 QQ）",
+         hostd_mod._exit_cleanup_plan(0, False) == "none")
+    case("--stop-qq-on-exit → qq-only（用户显式指定，不叠一次全量收尾）",
+         hostd_mod._exit_cleanup_plan(0, True) == "qq-only")
+    case("--stop-qq-on-exit 优先于 rc=2（不重复收一遍）",
+         hostd_mod._exit_cleanup_plan(2, True) == "qq-only")
+
+    seen_cleanup = []
+    host_mod._cleanup_after_stop = lambda profile="", **k: (
+        seen_cleanup.append(profile),
+        {"qq": {"ok": True, "killed": 3},
+         "desktop": {"name": "QQAgentHidden", "closed": True, "destroyed": True}})[1]
+    out = hostd_mod._cleanup_on_exit("", "启动期失败 rc=2（本用例）")
+    case("_cleanup_on_exit 真的调 host._cleanup_after_stop 并把结果原样返回",
+         seen_cleanup == [""] and out["qq"]["killed"] == 3, str(out))
+
+    def _boom(*a, **k):
+        raise RuntimeError("收尾炸了")
+
+    host_mod._cleanup_after_stop = _boom
+    out = hostd_mod._cleanup_on_exit("", "启动期失败 rc=2（本用例）")
+    case("收尾自己炸了 → 吞掉并报 ok=False（绝不改退出码）",
+         out.get("ok") is False and "RuntimeError" in str(out.get("error")), str(out))
+
+    # 源码守门：main() 的 finally 里必须走这条判据，而不是留着旧的裸 if。
+    # （dir() 看不见「写了但没接上」这种情况，只能扫源码。）
+    _hd_src = open(os.path.join(HERE, "app", "hostd.py"), encoding="utf-8").read()
+    case("hostd 的 finally 通过 _exit_cleanup_plan 决定收尾（不是裸 if）",
+         "_exit_cleanup_plan(rc, a.stop_qq_on_exit)" in _hd_src, "")
+    case("hostd 里 full 分支真的调了 _cleanup_on_exit",
+         'elif plan == "full":' in _hd_src and "_cleanup_on_exit(a.profile" in _hd_src, "")
 
 finally:
     for n, v in _saved.items():

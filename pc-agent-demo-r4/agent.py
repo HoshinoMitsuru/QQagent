@@ -121,10 +121,31 @@ def _resolve_home() -> str:
         2. 冻结运行时：exe 所在目录 —— 打包后 `__file__` 指向 _MEIPASS 临时目录，
                                     写进去的文件重启就没了，必须换成 exe 旁边
         3. 源码运行时：本文件所在目录
+
+    ## 单一事实来源（2026-10-10）
+
+    **规则本身住在 `app/paths.py`，这里先问它**，下面那份内联实现只作为兜底。
+
+    为什么：这两处原来各写了一遍，而 `paths` 多两条这里没有的规则
+    （exe 目录没 config.json 就采用上一级目录的配置；exe 目录不可写时回退
+    LOCALAPPDATA）。正常路径上靠「`paths.py` 导入期写 `QQ_AGENT_HOME` + 壳把
+    环境变量传给子进程」对齐，看不出问题；但 `qq-agent.exe --run-agent --selftest`
+    这类**直接进 agent 的入口不 import app.paths**，exe 一旦落在不可写目录，
+    壳和它就解析出**两个不同**的数据目录 —— 表现成「界面上填了密钥、命令行里说没有」。
+
+    导入 `app.paths` 的副作用（把 DATA_DIR 写进 QQ_AGENT_HOME）正是我们要的：
+    后面所有 `abs_here()` 才会和壳落在同一个目录里。
     """
     env = (os.environ.get("QQ_AGENT_HOME") or "").strip()
     if env:
         return os.path.normpath(os.path.abspath(env))
+    try:
+        from app.paths import DATA_DIR as _DATA_DIR       # noqa: PLC0415
+        if _DATA_DIR:
+            return _DATA_DIR
+    except Exception:
+        # app 包不可用（agent.py 被当单文件拷走）→ 退回内联规则，行为与旧版一致。
+        pass
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))

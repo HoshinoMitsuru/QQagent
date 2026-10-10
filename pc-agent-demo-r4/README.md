@@ -460,9 +460,46 @@ V2 多了一张卡：**隐藏桌面（独立 profile）**。两者**互斥**（�
 |---|---|---|
 | `尚未调用 CoInitialize` / `Can not load UIAutomationCore.dll` | `uiautomation` 内部的 `CUIAutomation` 是**进程级单例**，在首次被使用时把 COM 对象建在「当时那个线程」的公寓里；从 HTTP 请求线程顺手 import 一下就会把它钉死在错误的公寓 | 全进程**只在一条 UIA 工作线程上**碰 UIA，且该线程启动时显式 `InitializeUIAutomationInCurrentThread()`。只 import 是不够的——import 不创建单例 |
 | `ctypes.ArgumentError: int too long to convert`（窗口过程里） | 没声明函数原型时 ctypes 按 32 位 int 传参；而 `HWND/HANDLE/LPARAM` 是指针宽度 | 显式写 `argtypes` / `restype`。同理 `CreateToolhelp32Snapshot` 不声明 restype 会**静默截断句柄** |
-| 打包后状态写到重启就丢 | 冻结后 `__file__` 指向 `_MEIPASS` 临时解压目录 | `HERE` 改成「`QQ_AGENT_HOME` → exe 所在目录 → 源码目录」三级解析；`qqid.py` 直接引用 `agent.HERE` 而不是自己再算一遍 |
+| 打包后状态写到重启就丢 | 冻结后 `__file__` 指向 `_MEIPASS` 临时解压目录 | 数据目录解析全部收在 `app/paths.resolve_data_dir()`（`QQ_AGENT_HOME` → exe 目录 → **上一级目录** → exe 目录 → `%LOCALAPPDATA%`，见下文「在项目根填了 Key…」）；`agent._resolve_home()` 与 `qqid.py` 都直接问它，不再各写一遍 |
 | 退出时最后几行日志丢失 / 常驻子进程被丢下 | 后台线程收尾、主线程同时往下走直接退出进程 | 谁在等退出信号谁负责收尾；托盘模式下由看门线程收尾、主线程等它做完 |
 | 界面里任务卡在「运行中」不动 | Python 输出到管道是块缓冲 | 子进程强制 `PYTHONUNBUFFERED=1` + `PYTHONIOENCODING=utf-8`；日志泵读**二进制**再按 UTF-8 解码，避免被中文 Windows 的 GBK 弄成乱码 |
+
+### 「在项目根填了 Key，双击 dist 里的 exe 却报没有 Key」（2026-10-10 修）
+
+**发生了什么**：打包好的目录拷到另一台机器上跑。`dist` 目录里没有 `config.json`，
+于是首次运行在旁边新建了一份**空配置**；而人填的那份 Key 在**项目根目录**的
+`config.json` 里。日志只有一句 `E-LLM-001 没有可用的 API Key`，界面上也只写
+「数据目录：…\dist」—— **没有任何一处告诉他「你填的那份不是我在读的那份」**。
+（同一类问题在 2026-09-25 那次误操作里也出现过一次，当时的记录见上文。）
+
+**根因**：数据目录的解析只认「exe 在哪」，不认「配置在哪」。
+
+**改法**：`app/paths.resolve_data_dir()` 的搜索顺序加了**上一级目录**这一档：
+
+```
+1. QQ_AGENT_HOME                                 环境变量显式指定
+2. exe 所在目录 —— 且那里已有我们的 config.json    便携部署优先
+3. exe 所在目录的上一级 —— 且那里有我们的 config.json   ← 本次新增
+4. exe 所在目录 —— 只要可写（全新安装，就地新建）
+5. %LOCALAPPDATA%\QQAgent                        兜底
+```
+
+**为什么不会误采用别人的配置**：`app/paths._has_our_config()` 只认「能解析成 JSON
+对象、且有 `llm` 段或我们特有的 `_xxx说明` 注释键」的文件；半截文件、别人的 JSON、
+非对象一律不认 —— 否则把 exe 丢进任何一个放着别人 `config.json` 的目录都会被悄悄接管，
+那种故障**不报错、只是行为诡异**，比「读不到 Key」更难查。
+
+**为什么已经跑起来的部署行为不变**：第 2 档仍然优先。实测本仓库打包版：
+`DATA_DIR=...\dist`、原因「exe 所在目录里已有 config.json（便携模式）」，与改前逐字相同。
+
+**顺带修掉的一处隐患**：`agent._resolve_home()` 原来自己又写了一遍解析规则，而且比
+`app/paths` 少两条。`qq-agent.exe --run-agent --selftest` 这类**不 import `app.paths`**
+的入口，在 exe 所在目录不可写时会和壳解析出**两个不同**的数据目录 —— 表现成
+「界面上填了密钥、命令行里说没有」。现在 `agent._resolve_home()` 直接问 `app.paths`，
+内联实现只作为「app 包不可用（agent.py 被当单文件拷走）」时的兜底。
+
+**闸门**：`test_paths.py`（29 条）—— 五档顺序与原因文案、「别人的 config.json」一律
+不认、以及**用子进程真造一个不可写的 exe 目录**实测 `agent.HERE == paths.DATA_DIR`。
 
 ### 怎么验证这一层
 
@@ -833,6 +870,7 @@ python test_errors.py     # 179 条：目录完整性 / 异常映射 / LLM 分�
 | **`run_ui.bat`** | 源码模式启动控制台 |
 | **`test_ui.py`** | **控制台端到端测试**（131 条：令牌、配置往返、密钥收拢、恢复默认保 Key、进程托管、互斥、SSE、UIA 线程、托盘） |
 | **`test_exe.py`** | **打包产物验收**（52 条：真 exe、冻结后的数据目录、exe 自调用、退出） |
+| **`test_paths.py`** | **数据目录解析**（29 条：五档搜索顺序与原因文案、「别人的 config.json」一律不认、`agent._resolve_home()` 与壳同源 —— 用子进程真造一个不可写的 exe 目录实测） |
 | **`EXE使用说明.md`** | **给最终用户的手册**（五步流程、VM 加固、排错表） |
 | `config.json` | 配置（模型、提示词、防抖/连续对话/持久化、identity、queue、discovery、memory）+ **API Key**，已被 `.gitignore` 排除 |
 | `secrets.local.json` | 旧版敏感信息文件（密钥），**只读后备**：`resolve_api_key` 仍读，但界面填的 Key 不再写入 |

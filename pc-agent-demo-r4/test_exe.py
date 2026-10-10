@@ -18,6 +18,7 @@ test_exe.py —— 打包产物的验收测试
        它们是「进隐藏桌面」的唯一入口，且**只能**由 exe 自己扮演
     2  --version / --help 正常
     3  --run-agent 子模式可用，且**数据目录落在 exe 旁边**（冻结适配的关键）
+    3b 上一级目录里有 config.json 时，数据目录往上找一层（2026-10-10 加）
     4  --safe 起服务、写出 state/ui.json（端口 + 令牌）
     5  /api/state、/api/settings、/api/tasks、/api/host/* 都通
     6  真的能起子进程任务并跑完（验证 exe 自调用自己这条链路）
@@ -205,6 +206,29 @@ def main():
                 work.lower() in out.lower().replace("/", "\\"), out[-400:])
         if VERBOSE:
             print(out[:800])
+
+        # ---------------- 2b. 采用上一级目录的 config.json（2026-10-10） ----------------
+        # 用户常把 exe 拷进子目录（比如 dist\），却在工程根填 Key。那种情况下
+        # 「exe 目录里没有 config.json」必须往上一层找，否则表现成「填了 Key 却读不到」。
+        # 这一条只有跑真 exe 验得到：源码态下壳与 agent 永远在同一目录，看不出错位。
+        print("\n[2b] 采用上一级目录的 config.json（exe 被放进子目录的场景）")
+        alt = tempfile.mkdtemp(prefix="qqagent-up-")
+        try:
+            proj = os.path.join(alt, "proj")
+            sub = os.path.join(proj, "dist")
+            os.makedirs(sub)
+            with open(os.path.join(proj, "config.json"), "w", encoding="utf-8") as f:
+                json.dump({"llm": {"api_key": "sk-verify-" + "0" * 36}}, f)
+            exe_up = os.path.join(sub, "qq-agent.exe")
+            shutil.copy2(exe_src, exe_up)
+            r = subprocess.run([exe_up, "--run-agent", "--state"], cwd=sub,
+                               capture_output=True, timeout=120, creationflags=NO_WINDOW)
+            o = (r.stdout + r.stderr).decode("utf-8", "replace")
+            R.check("数据目录往上找一层（state 落在 proj\\state）",
+                    os.path.normcase(os.path.join(proj, "state")) in os.path.normcase(o),
+                    o[-300:])
+        finally:
+            shutil.rmtree(alt, ignore_errors=True)
 
         # ---------------- 3. 起控制台服务 ----------------
         print("\n[3] 控制台服务（--safe）")

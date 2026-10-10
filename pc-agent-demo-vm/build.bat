@@ -26,6 +26,7 @@ cd /d "%~dp0"
 
 set "QQAGENT_CONSOLE=0"
 set "QQAGENT_ONEDIR=0"
+set "QQAGENT_NO_ADMIN=0"
 
 :parse
 if "%~1"=="" goto afterparse
@@ -33,6 +34,11 @@ if /i "%~1"=="console" set "QQAGENT_CONSOLE=1"
 if /i "%~1"=="diag"    set "QQAGENT_CONSOLE=1"
 if /i "%~1"=="dir"     set "QQAGENT_ONEDIR=1"
 if /i "%~1"=="onedir"  set "QQAGENT_ONEDIR=1"
+rem NOTE: both spellings are accepted on purpose. This flag used to be written
+rem as "nadmin" in the usage text but matched only "noadmin" here, so following
+rem the docs produced a silently WRONG build (still requireAdministrator) and a
+rem confusing WinError 740 the first time you tried to launch it.
+if /i "%~1"=="nadmin"  set "QQAGENT_NO_ADMIN=1"
 if /i "%~1"=="noadmin" set "QQAGENT_NO_ADMIN=1"
 shift
 goto parse
